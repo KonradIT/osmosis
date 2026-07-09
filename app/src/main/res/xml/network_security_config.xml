@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cameras serve plain HTTP on their local AP (IP varies by model). This is a utility app that
+     only ever talks to a directly-joined, internet-less camera network, so permit cleartext. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
