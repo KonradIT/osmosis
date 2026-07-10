@@ -37,6 +37,8 @@ class DatalinkClient(
         "camcap_photo_storage_format", "camcap_color_mode", "cam_storage", "cam_status",
     )
 
+    private val VIDEO_EXTS = setOf("MP4", "MOV", "OSV", "INSV")
+
     private var sessionId = 0
     private var udpSeq = 0
     private var dumlSeq = 0xA000
@@ -91,24 +93,32 @@ class DatalinkClient(
         }
         repeat(4) { recvAll(400); sendAck() }
 
-        // File-list request (0x00/0x26 -> camera), collected across batches (paged at 3 and 7).
+        // File-list request (0x00/0x26). Records stream back over several packets. Page the list up
+        // front (indices 0.., 42.., 64..), then collect only until the parsed record count stops
+        // growing — instead of always waiting a fixed 15 s.
         sendDuml(0x00, 0x26, hex(
             "4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000"
         ), receiverType = 0x01, receiverId = 0)
-        val all = StringBuilder()
-        var rawLen = 0
+        val blob = java.io.ByteArrayOutputStream()
+        var lastCount = -1
+        var stable = 0
         for (batch in 0 until 15) {
-            val resps = recvAll(1000); sendAck()
-            for (r in resps) { rawLen += r.size; all.append(String(r, Charsets.ISO_8859_1)) }
-            if (batch == 3) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"),
+            val resps = recvAll(800); sendAck()
+            for (r in resps) blob.write(r)
+            if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"),
                 receiverType = 0x01, receiverId = 0)
-            if (batch == 7) sendDuml(0x00, 0x26, hex(
+            if (batch == 2) sendDuml(0x00, 0x26, hex(
                 "4a002a10020000000000010000402d000d0100ffffffffffffffff000100000000000000000000000000"
             ), receiverType = 0x01, receiverId = 0)
+            val count = distinctPaths(blob)
+            if (count != lastCount) log("datalink: $count files (batch $batch)")
+            if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
+            lastCount = count
         }
 
-        val files = parse(all.toString())
-        log("datalink: parsed ${files.size} media files (${rawLen}B)")
+        val bytes = blob.toByteArray()
+        val files = parse(bytes)
+        log("datalink: parsed ${files.size} media files (${bytes.size}B)")
         return files
     }
 
@@ -129,17 +139,27 @@ class DatalinkClient(
         runCatching { sock.close() }
     }
 
+    private val pathCountRe = Regex("""DCIM/(?:DJI|CAM)_\d{3}/(?:DJI|CAM)_\d{14}_\d{4}_D""")
+
+    /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
+    private fun distinctPaths(blob: java.io.ByteArrayOutputStream): Int =
+        pathCountRe.findAll(String(blob.toByteArray(), Charsets.ISO_8859_1)).map { it.value }.toHashSet().size
+
     /** Media naming: Osmo Nano uses DCIM/DJI_001/DJI_…; 360 & Action 5 use CAM_. Match either. */
-    private fun parse(text: String): List<CameraFile> {
+    private fun parse(bytes: ByteArray): List<CameraFile> {
+        val text = String(bytes, Charsets.ISO_8859_1)
         val pathRe = Regex("""DCIM/(?:DJI|CAM)_\d{3}/(?:DJI|CAM)_\d{14}_\d{4}_D""")
         val nameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_D\.[A-Za-z0-9]{2,4}""")
         val bestExt = HashMap<String, String>()
+        val proxyByBase = HashMap<String, String>() // base -> LRF/LRV proxy extension, if listed
         val primary = setOf("MP4", "MOV", "JPG", "JPEG", "DNG", "OSV", "INSV", "HEIC")
+        val proxyExts = setOf("LRF", "LRV")
         for (m in nameRe.findAll(text)) {
             val base = m.value.substringBeforeLast('.')
             val ext = m.value.substringAfterLast('.').uppercase()
             val cur = bestExt[base]
             if (cur == null || (ext in primary && cur !in primary)) bestExt[base] = ext
+            if (ext in proxyExts) proxyByBase[base] = ext
         }
         val thumbRe = Regex("""MISC/THM/(?:DJI|CAM)_\d{3}/(?:DJI|CAM)_\d{14}_\d{4}_D(?:\.\w{2,4})?""")
         val thumbByBase = HashMap<String, String>()
@@ -148,12 +168,51 @@ class DatalinkClient(
             thumbByBase[v.substringAfterLast('/').substringBeforeLast('.')] =
                 if (v.contains('.')) v else "$v.scr"
         }
+        log("datalink: media exts=${bestExt.values.toSortedSet()} proxies=${proxyByBase.values.toSortedSet()}")
         return pathRe.findAll(text).map { it.value }.toSortedSet().map { p ->
             val base = p.substringAfterLast('/')
-            val mediaPath = bestExt[base]?.let { "$p.$it" } ?: p
+            val ext = bestExt[base]
+            val mediaPath = ext?.let { "$p.$it" } ?: p
             val thumb = thumbByBase[base] ?: (p.replaceFirst("DCIM/", "MISC/THM/") + ".scr")
-            CameraFile(path = mediaPath, thumbPath = thumb, storage = 0)
+            val fps = if (ext in VIDEO_EXTS) fpsFor(bytes, "$base.$ext") else null
+            val proxy = proxyByBase[base]?.let { "$p.$it" }
+            CameraFile(path = mediaPath, thumbPath = thumb, storage = 0,
+                resLabel = fps?.let { "${it}fps" }, proxyPath = proxy)
         }
+    }
+
+    /**
+     * The record encodes fps as a rational num/den (den ∈ {1000,1001}) shortly before the filename
+     * field — 25000/1000 = 25, 30000/1001 = 29.97. That's the only reliable per-file metadata here:
+     * pixel dimensions aren't stored, and the enum block can't separate 4K from 2.7K (both same
+     * enums), so resolution is read from the MP4 moov instead.
+     */
+    private fun fpsFor(bytes: ByteArray, fileName: String): Int? {
+        val idx = indexOf(bytes, fileName.toByteArray(Charsets.ISO_8859_1))
+        if (idx < 0) return null
+        var fps: Int? = null
+        var i = maxOf(0, idx - 220)
+        while (i <= idx - 8) {
+            val den = u32le(bytes, i + 4)
+            if (den == 1000L || den == 1001L) {
+                val num = u32le(bytes, i)
+                if (num in 20_000L..250_000L) fps = Math.round(num.toDouble() / den).toInt()
+            }
+            i++
+        }
+        return fps
+    }
+
+    private fun u32le(b: ByteArray, o: Int): Long =
+        (b[o].toLong() and 0xFF) or ((b[o + 1].toLong() and 0xFF) shl 8) or
+            ((b[o + 2].toLong() and 0xFF) shl 16) or ((b[o + 3].toLong() and 0xFF) shl 24)
+
+    private fun indexOf(hay: ByteArray, needle: ByteArray): Int {
+        outer@ for (i in 0..hay.size - needle.size) {
+            for (j in needle.indices) if (hay[i + j] != needle[j]) continue@outer
+            return i
+        }
+        return -1
     }
 
     // ---- packet builders (mirror file_list.py) ------------------------------

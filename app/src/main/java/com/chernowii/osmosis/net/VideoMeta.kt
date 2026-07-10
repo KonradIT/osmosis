@@ -9,6 +9,33 @@ import com.chernowii.osmosis.core.CameraFile
  */
 object VideoMeta {
     private val MVHD = byteArrayOf('m'.code.toByte(), 'v'.code.toByte(), 'h'.code.toByte(), 'd'.code.toByte())
+    private val TKHD = byteArrayOf('t'.code.toByte(), 'k'.code.toByte(), 'h'.code.toByte(), 'd'.code.toByte())
+
+    /**
+     * Video-track pixel size from the moov's `tkhd` box (last 8 bytes = width,height as 16.16 fixed).
+     * The audio track's tkhd is 0×0, so we return the first track with non-zero dimensions.
+     */
+    fun resolution(http: HttpClient, file: CameraFile): Pair<Int, Int>? {
+        val url = file.urlPath()
+        val size = http.head(url)
+        var buf = http.getRange(url, 0, 65_535) ?: return null
+        if (indexOf(buf, TKHD) < 0 && size > 65_536) {
+            buf = http.getRange(url, maxOf(0L, size - 1_048_576), size - 1) ?: return null
+        }
+        var from = 0
+        while (true) {
+            val t = indexOf(buf, TKHD, from)
+            if (t < 4) return null
+            from = t + 4
+            val boxLen = be32(buf, t - 4).toInt()
+            val boxEnd = t - 4 + boxLen
+            if (boxLen in 32..8192 && boxEnd <= buf.size) {
+                val w = (be32(buf, boxEnd - 8) shr 16).toInt()
+                val h = (be32(buf, boxEnd - 4) shr 16).toInt()
+                if (w in 1..12000 && h in 1..12000) return w to h
+            }
+        }
+    }
 
     /** Duration in milliseconds, or -1 if it can't be determined. */
     fun durationMs(http: HttpClient, file: CameraFile): Long {
@@ -42,8 +69,8 @@ object VideoMeta {
         return duration * 1000 / timescale
     }
 
-    private fun indexOf(haystack: ByteArray, needle: ByteArray): Int {
-        outer@ for (i in 0..haystack.size - needle.size) {
+    private fun indexOf(haystack: ByteArray, needle: ByteArray, from: Int = 0): Int {
+        outer@ for (i in from..haystack.size - needle.size) {
             for (j in needle.indices) if (haystack[i + j] != needle[j]) continue@outer
             return i
         }

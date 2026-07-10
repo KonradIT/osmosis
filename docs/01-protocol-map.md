@@ -50,12 +50,29 @@ still unverified for the Nano.
 - **Thumbnails** are at `MISC/THM/DJI_001/DJI_<ts>_<seq>_D.scr` (same storage id), served by
   `/v2`; the `.scr` decodes as a JPEG (renders fine via `BitmapFactory`).
 - **File-list response cmd is `0x00/0x27`** (request is `0x26`). Records are delimited binary
-  (protobuf-ish): seq, resolution/fps enums, capture timestamp, media path, thumb path, hashes.
-- **Size/duration are NOT in the file list** (verified by byte-diffing the newest vs oldest
-  video record against ground truth: real size 3.58 MB vs 3.04 GB, duration 0.92 s vs 11.3 min —
-  no record field matches, in any unit). The list is a lightweight index; get size from HTTP
-  `HEAD` (`Content-Length`) and video duration by parsing the MP4 `mvhd` atom via Range requests
-  (both respect the process network binding, unlike `MediaMetadataRetriever`).
+  (protobuf-ish): a per-file KV enum block, capture timestamp, media path, proxy path, thumb path,
+  and an fps rational.
+- **fps IS in the record; resolution is NOT** (decoded 2026-07-10 against ffprobe ground truth
+  across all 43 records). fps is a rational `num/den` (den ∈ {1000,1001}) just before the filename
+  field — `25000/1000` = 25, `30000/1001` = 29.97; round to the nearest standard. Pixel dimensions
+  appear in **no** encoding, and the KV enums can't separate resolutions (a 2.7K clip and a 4K clip
+  carry identical `0x2c`/`0x36`/`0x37` values). The enum `0x36` (∈{2,6}) does **not** track fps
+  either (both map to 25 fps clips). So **read resolution from the MP4 `moov`** (`tkhd` last 8 bytes
+  = width,height as 16.16 fixed) — the same Range fetch already used for duration.
+- **Size/duration are NOT in the file list** (byte-diffed newest vs oldest against ground truth:
+  3.58 MB vs 3.04 GB, 0.92 s vs 11.3 min — no field matches, any unit). Get size from HTTP `HEAD`
+  (`Content-Length`) and duration/resolution from the MP4 `mvhd`/`tkhd` via Range requests
+  (`HttpURLConnection` respects the process network binding, unlike `MediaMetadataRetriever`).
+- **Low-res preview proxies**: the Nano lists a `.LRF` proxy clip per video in the manifest
+  (`DCIM/DJI_001/DJI_<ts>_<seq>_D.LRF`, a 960×720 MP4 with `moov` at the **end**; size scales with
+  clip length — ~0.6 MB for ~1 s up to ~95–190 MB for long clips). **Read the proxy path from the
+  manifest, don't derive it** — extension/availability vary by model (`.LRF` vs `.LRV`, or none;
+  fall back to the full-res file). Preview by **streaming**:
+  `VideoView.setVideoURI("http://192.168.2.1/v2?…&path=<proxy>")`. Native `MediaPlayer` HTTP **does**
+  honour `bindProcessToNetwork` (corrects an earlier assumption drawn from `MediaMetadataRetriever`),
+  so it reaches the internet-less AP and range-fetches the `moov` off the end — any length, full
+  scrub, zero download. Gotcha: a `visibility=gone` `VideoView` has no Surface and **never**
+  prepares (no `onPrepared`/`onError`) — make it visible before `setVideoURI`.
 
 ## Xtra Edge Pro (= DJI Osmo Action 5 Pro) — deltas from the Nano
 
@@ -76,6 +93,12 @@ DJI firmware. Verified via the app (`reference/xtra/`, unpacked, string/dexdump 
 - **Live test (this unit)**: ports **21/80/5000** open (NOT 7001/9004). lighttpd/1.4.55 serves
   `/v2?storage=&path=` (404/403 as expected); **`/v1` is connection-reset** (it's for other
   models) — so THIS camera is a `/v2` server like the Nano. Only the *list* is blocked.
+- **Media preview (verified live 2026-07-10)**: this unit's manifest lists **no proxy clips**
+  (`media exts=[JPG, MP4]`, `proxies=[]`) even though `.lrf` appears in the app's abstract
+  extension list — so there's no `.LRF` to stream like the Nano. The preview falls back to
+  **streaming the full-res `/v2` MP4**, which `MediaPlayer` plays fine off the AP (prepared at
+  native `2688×2016`). Resolution/fps come from the same sources as the Nano (moov `tkhd` + the
+  manifest fps rational). Naming is `DCIM/CAM_001/CAM_<ts>_<seq>_D.MP4`.
 - **Data-link is native UDP** (`xtra/sdk/datalink/wifi/UDPSocketClient` + `MgDatalinkHelper`),
   with ports assigned by the native lib (`JNIRawData.native_StartWifiServicePort` /
   `native_GetWiFiPortFdSet`) — not the fixed UDP-9004 the Nano uses, and not derivable from the

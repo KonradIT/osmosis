@@ -9,17 +9,24 @@ import android.widget.ImageView
 import android.widget.TextView
 import com.chernowii.osmosis.R
 import com.chernowii.osmosis.core.CameraFile
+import com.chernowii.osmosis.core.TrimRange
 import com.chernowii.osmosis.net.ImageLoader
 import com.chernowii.osmosis.net.MetaLoader
 
-/** GridView adapter: thumbnail + seq/ext/duration/size label + selection checkbox per media item. */
+/**
+ * GridView adapter: thumbnail + seq/ext/duration/size label + a "queued" checkbox per item.
+ * Tapping a cell (thumbnail or its checkbox — the checkbox isn't independently clickable) opens
+ * the preview via [onOpen]; queueing itself happens there and flows back through [setQueued].
+ */
 class MediaGridAdapter(
     private val files: List<CameraFile>,
     private val loader: ImageLoader,
     private val meta: MetaLoader,
+    private val onOpen: (Int) -> Unit,
 ) : BaseAdapter() {
 
-    private val selected = HashSet<Int>()
+    // position -> optional trim (null = whole file). Presence in the map = queued.
+    private val selected = LinkedHashMap<Int, TrimRange?>()
 
     override fun getCount() = files.size
     override fun getItem(position: Int) = files[position]
@@ -33,26 +40,31 @@ class MediaGridAdapter(
         val name = v.findViewById<TextView>(R.id.name)
 
         val f = files[position]
-        check.isChecked = selected.contains(position)
+        check.isChecked = selected.containsKey(position)
         loader.load(f.thumbUrlPath(), thumb)
-        meta.load(f, name, "%04d·%s".format(f.seq, f.ext))
+        val prefix = "%04d·%s".format(f.seq, f.ext) + if (selected[position] != null) " ✂" else ""
+        meta.load(f, name, prefix)
 
-        v.setOnClickListener {
-            if (!selected.add(position)) selected.remove(position)
-            check.isChecked = selected.contains(position)
-        }
+        v.setOnClickListener { onOpen(position) }
         return v
     }
 
-    fun selectedFiles(): List<CameraFile> = selected.sorted().map { files[it] }
+    fun isQueued(position: Int): Boolean = selected.containsKey(position)
+    fun trimFor(position: Int): TrimRange? = selected[position]
+
+    /** Apply the preview's add/remove decision (with optional trim) and refresh. */
+    fun setQueued(position: Int, queued: Boolean, trim: TrimRange? = null) {
+        if (queued) selected[position] = trim else selected.remove(position)
+        notifyDataSetChanged()
+    }
+
+    fun selectedEntries(): List<Pair<CameraFile, TrimRange?>> =
+        selected.entries.sortedBy { it.key }.map { files[it.key] to it.value }
     fun selectedCount() = selected.size
 
     fun toggleAll() {
-        if (selected.size < files.size) {
-            selected.clear(); files.indices.forEach { selected.add(it) }
-        } else {
-            selected.clear()
-        }
+        if (selected.size < files.size) files.indices.forEach { selected.putIfAbsent(it, null) }
+        else selected.clear()
         notifyDataSetChanged()
     }
 }

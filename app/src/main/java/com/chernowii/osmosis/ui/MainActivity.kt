@@ -15,6 +15,7 @@ import android.widget.GridView
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import android.net.LinkProperties
@@ -26,6 +27,7 @@ import com.chernowii.osmosis.ble.Brand
 import com.chernowii.osmosis.ble.GattClient
 import com.chernowii.osmosis.ble.OsmoScanner
 import com.chernowii.osmosis.core.CameraFile
+import com.chernowii.osmosis.core.TrimRange
 import com.chernowii.osmosis.duml.DjiMessage
 import com.chernowii.osmosis.net.ApJoiner
 import com.chernowii.osmosis.net.HttpClient
@@ -63,6 +65,19 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private var imageLoader: ImageLoader? = null
     private var metaLoader: MetaLoader? = null
     private var adapter: MediaGridAdapter? = null
+
+    // Preview screen result: add/remove the previewed item (with optional trim) from the queue.
+    private val previewLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data ?: return@registerForActivityResult
+        val pos = data.getIntExtra(MediaPreviewActivity.EXTRA_POSITION, -1)
+        if (pos < 0) return@registerForActivityResult
+        val queued = data.getBooleanExtra(MediaPreviewActivity.EXTRA_QUEUED, false)
+        val s = data.getLongExtra(MediaPreviewActivity.EXTRA_TRIM_START, -1L)
+        val e = data.getLongExtra(MediaPreviewActivity.EXTRA_TRIM_END, -1L)
+        adapter?.setQueued(pos, queued, if (s >= 0 && e > s) TrimRange(s, e) else null)
+    }
 
     // The datalink session keeps the camera AP alive (the Action 5 sleeps its AP the moment the
     // datalink goes idle). Held open during browse/download; closed on a new offload / exit.
@@ -426,10 +441,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val ml = MetaLoader(http)
         imageLoader = loader
         metaLoader = ml
-        val ad = MediaGridAdapter(files, loader, ml)
+        val ad = MediaGridAdapter(files, loader, ml) { openPreview(it) }
         adapter = ad
         grid.adapter = ad
-        logLine("Grid ready: ${files.size} files. Tap to select, 'All / None', then Download.")
+        logLine("Grid ready: ${files.size} files. Tap a cell to preview + queue, then Download.")
+    }
+
+    /** Open the full-screen preview for the tapped cell; queue changes flow back via the launcher. */
+    private fun openPreview(position: Int) {
+        val ad = adapter ?: return
+        val f = ad.getItem(position)
+        previewLauncher.launch(
+            MediaPreviewActivity.intent(this, "192.168.2.1", f, position, ad.isQueued(position), ad.trimFor(position)))
     }
 
     /** Returns the storage id (1=SD, 0=internal) that actually serves this file's path. */
@@ -442,12 +465,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     private fun onDownloadClicked() {
         val ad = adapter ?: run { logLine("Nothing listed yet — tap Offload first."); return }
-        val sel = ad.selectedFiles()
-        if (sel.isEmpty()) {
-            logLine("No files selected (tap thumbnails or 'All / None').")
+        val jobs = ad.selectedEntries().map { MediaDownloader.Job(it.first, it.second) }
+        if (jobs.isEmpty()) {
+            logLine("No files queued (tap a cell to preview + queue).")
             return
         }
-        logLine("Downloading ${sel.size} file(s) to gallery...")
+        val trimmed = jobs.count { it.trim != null }
+        logLine("Downloading ${jobs.size} item(s)${if (trimmed > 0) " ($trimmed trimmed)" else ""} to gallery...")
         val listener = object : MediaDownloader.Progress {
             private var totalBytes = 0L
             private var fileTotal = 0L
@@ -492,7 +516,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 logLine("DONE: $saved saved, $skipped skipped, $failed failed")
             }
         }
-        Thread { MediaDownloader(this, http, ::logLine).run(sel, listener) }.start()
+        Thread { MediaDownloader(this, http, ::logLine).run(jobs, listener) }.start()
     }
 
     private fun fmtBytes(b: Long): String = when {

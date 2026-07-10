@@ -9,6 +9,9 @@ class HttpClient(
     private val ip: String = "192.168.2.1",
     private val log: (String) -> Unit = {},
 ) {
+    /** Absolute URL for a camera path, e.g. for MediaExtractor/MediaPlayer data sources. */
+    fun url(path: String): String = "http://$ip$path"
+
     private fun open(path: String, method: String, rangeStart: Long = -1): HttpURLConnection =
         (URL("http://$ip$path").openConnection() as HttpURLConnection).apply {
             connectTimeout = 5000
