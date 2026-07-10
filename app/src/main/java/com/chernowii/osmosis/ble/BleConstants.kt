@@ -13,8 +13,8 @@ object BleConstants {
     const val DJI_COMPANY_ID = 0x08AA
     const val DJI_COMPANY_ID_ALT = 0xF7AA
 
-    // Model id = first two manufacturer-payload bytes, little-endian. Nano is NOT yet known
-    // (that's one thing Phase 1 discovers by logging the raw advertisement).
+    // Model id = first two manufacturer-payload bytes, little-endian (names for the scan log;
+    // offload capabilities per model live in CameraModel). Nano/Action 5 Pro verified on hardware.
     val MODEL_NAMES: Map<Int, String> = mapOf(
         0x0010 to "OsmoAction2",
         0x0012 to "OsmoAction3",
@@ -24,5 +24,6 @@ object BleConstants {
         0x0018 to "OsmoAction6",
         0x0019 to "OsmoNano",   // verified 2026-07-09: OsmoNano-C2D8 advertised model 0x0019
         0x0020 to "OsmoPocket3",
+        0x0021 to "OsmoPocket4",
     )
 }

@@ -9,12 +9,15 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.GridView
+import android.widget.ListView
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -24,9 +27,11 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.chernowii.osmosis.R
 import com.chernowii.osmosis.ble.Brand
+import com.chernowii.osmosis.ble.CameraModel
 import com.chernowii.osmosis.ble.GattClient
 import com.chernowii.osmosis.ble.OsmoScanner
 import com.chernowii.osmosis.core.CameraFile
+import com.chernowii.osmosis.core.SavedCameras
 import com.chernowii.osmosis.core.TrimRange
 import com.chernowii.osmosis.duml.DjiMessage
 import com.chernowii.osmosis.net.ApJoiner
@@ -53,6 +58,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private lateinit var fileBar: ProgressBar
     private lateinit var overallText: TextView
     private lateinit var fileText: TextView
+    private lateinit var cameraList: ListView
+    private lateinit var selectorGroup: View
+    private lateinit var gridGroup: View
+    private lateinit var selectorHint: TextView
+    private lateinit var savedCameras: SavedCameras
+    private var camRows: List<CamRow> = emptyList()
     private val main = Handler(Looper.getMainLooper())
 
     private var btAdapter: BluetoothAdapter? = null
@@ -94,6 +105,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private var offloadPass = ""
     private var offloadTriggered = false
     private var currentBrand = Brand.UNKNOWN
+    private var currentModel = CameraModel.DEFAULT
+    private var currentModelId: Int? = null
     private var currentAddress: String? = null
 
     // Credential-probe mode: after pairing, sweep 0x07 WiFi commands and search every notification
@@ -145,12 +158,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         fileBar = findViewById(R.id.fileBar)
         overallText = findViewById(R.id.overallText)
         fileText = findViewById(R.id.fileText)
-        findViewById<Button>(R.id.btnScan).setOnClickListener { onOffloadClicked() }
-        findViewById<Button>(R.id.btnScan).setOnLongClickListener {
-            val addr = currentAddress
-            if (addr != null) promptPasswordFor(addr) { logLine("Password saved.") } else startCameraScan(select = true)
-            true
-        }
+        cameraList = findViewById(R.id.cameraList)
+        selectorGroup = findViewById(R.id.selectorGroup)
+        gridGroup = findViewById(R.id.gridGroup)
+        selectorHint = findViewById(R.id.selectorHint)
+        savedCameras = SavedCameras(getSharedPreferences("osmosis", MODE_PRIVATE))
+        findViewById<Button>(R.id.btnRescan).setOnClickListener { startCameraScan(select = true) }
+        cameraList.setOnItemClickListener { _, _, pos, _ -> onCamRowClick(pos) }
+        cameraList.setOnItemLongClickListener { _, _, pos, _ -> onCamRowLongClick(pos) }
         findViewById<Button>(R.id.btnDownload).setOnClickListener { onDownloadClicked() }
         findViewById<Button>(R.id.btnAll).setOnClickListener { adapter?.toggleAll() }
         findViewById<Button>(R.id.btnClear).setOnClickListener {
@@ -195,6 +210,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             logLine("CRED-PROBE mode: known ssid=\"$knownSsid\" passLen=${knownPass.length}")
             main.postDelayed({ startCameraScan(select = false) }, 500)
         }
+
+        // Camera selector is the launch screen: show saved cameras, then scan to mark which are in
+        // range and surface new ones (unless a test hook is already driving a scan/flow).
+        rebuildCameraList()
+        val hookDriving = intent?.getBooleanExtra("autoscan", false) == true ||
+            intent?.getBooleanExtra("offload", false) == true ||
+            intent?.getBooleanExtra("wifi", false) == true ||
+            intent?.getBooleanExtra("credprobe", false) == true
+        if (!hookDriving) startCameraScan(select = true)
     }
 
     override fun onDestroy() {
@@ -223,14 +247,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     // ---- Scan / permissions -------------------------------------------------
 
-    private fun onOffloadClicked() = startCameraScan(select = true)
-
-    private data class Cam(val device: BluetoothDevice, val name: String?, val brand: Brand, val rssi: Int)
+    private data class Cam(val device: BluetoothDevice, val name: String?, val brand: Brand, val rssi: Int, val modelId: Int?, val model: CameraModel)
     private val discovered = LinkedHashMap<String, Cam>()
-    private var selectAfterScan = false
     private var autoPick: String? = null
 
-    /** Scan ~4s for DJI/Xtra cameras (bonds aren't reliable for these), then show a selector. */
+    /** Scan ~4s for DJI/Xtra cameras (bonds aren't reliable for these), then feed the selector list. */
     private fun startCameraScan(select: Boolean, pick: String? = null) {
         val adapter = btAdapter ?: run { logLine("No Bluetooth adapter."); return }
         if (!adapter.isEnabled) { logLine("Bluetooth is OFF — enable it and try again."); return }
@@ -241,45 +262,95 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQ_PERMS)
             return
         }
-        selectAfterScan = select; autoPick = pick
+        autoPick = pick
         discovered.clear()
         connecting = false
+        selectorHint.text = "Scanning…"
+        rebuildCameraList()
         val s = OsmoScanner(adapter, this); scanner = s; s.start()
-        logLine("Scanning for cameras (~4s)...")
         main.postDelayed({
             s.stop()
-            if (connecting) return@postDelayed // credprobe already connected on first hit
-            val cams = discovered.values.sortedByDescending { it.rssi }
-            if (cams.isEmpty()) { logLine("No cameras found. Is the camera on and nearby?"); return@postDelayed }
-            val pk = autoPick
-            val auto = if (pk != null) cams.firstOrNull {
-                (it.name ?: "").contains(pk, true) || it.brand.name.equals(pk, true)
-            } else null
-            when {
-                auto != null -> onCameraChosen(auto.device)
-                selectAfterScan -> showCameraSelector(cams)
-                else -> onCameraChosen(cams.first().device)
+            if (connecting) return@postDelayed // credprobe/auto-pick already connected
+            rebuildCameraList()
+            // Test-hook auto-pick (`--es pick <name|brand>`) connects without a tap.
+            autoPick?.let { pk ->
+                discovered.values.firstOrNull {
+                    (it.name ?: "").contains(pk, true) || it.brand.name.equals(pk, true)
+                }?.let { onCameraChosen(it.device) }
             }
         }, 4000)
     }
 
-    private fun showCameraSelector(cams: List<Cam>) {
-        val labels = cams.map {
-            "[${it.brand}]  ${it.name ?: "?"}\n${it.device.address}   rssi=${it.rssi}"
-        }.toTypedArray()
+    /** Selector list: saved cameras first (📶 in range / 🚫 not), then newly-scanned ones tagged NEW. */
+    private fun rebuildCameraList() {
+        val scanned = discovered.values.toList()
+        val byMac = scanned.associateBy { it.device.address }
+        val saved = savedCameras.all()
+        val savedMacs = saved.mapTo(HashSet()) { it.mac }
+        val savedRows = saved.map { e ->
+            val c = byMac[e.mac]
+            CamRow(e.mac, c?.name ?: e.name,
+                c?.model ?: CameraModel.resolve(e.modelId.takeIf { it >= 0 }, e.name),
+                inRange = c != null, saved = true, device = c?.device)
+        }
+        val newRows = scanned.filter { it.device.address !in savedMacs }.map { c ->
+            CamRow(c.device.address, c.name, c.model, inRange = true, saved = false, device = c.device)
+        }
+        camRows = savedRows + newRows
+        cameraList.adapter = CameraListAdapter(camRows)
+        if (scanner?.isScanning() != true) {
+            selectorHint.text = if (camRows.isEmpty()) "No cameras yet — turn one on and tap Rescan."
+            else "${savedRows.count { it.inRange }}/${savedRows.size} saved in range · ${newRows.size} new"
+        }
+    }
+
+    private fun onCamRowClick(pos: Int) {
+        val r = camRows.getOrNull(pos) ?: return
+        val dev = r.device
+        if (dev != null) onCameraChosen(dev)
+        else Toast.makeText(this, "${r.name ?: r.mac} isn't in range — turn it on, then Rescan", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun onCamRowLongClick(pos: Int): Boolean {
+        val r = camRows.getOrNull(pos) ?: return false
+        if (!r.saved) return false
         AlertDialog.Builder(this)
-            .setTitle("Select camera (${cams.size} found)")
-            .setItems(labels) { _, i -> onCameraChosen(cams[i].device) }
-            .setNegativeButton("Cancel", null)
-            .show()
+            .setTitle("${r.model.name}  (${r.name ?: r.mac})")
+            .setItems(arrayOf("Re-enter WiFi password", "Forget camera")) { _, i ->
+                when (i) {
+                    0 -> promptPasswordFor(r.mac) { logLine("Password updated.") }
+                    1 -> {
+                        savedCameras.remove(r.mac)
+                        getSharedPreferences("osmosis", MODE_PRIVATE).edit().remove("pass_${r.mac}").apply()
+                        logLine("Forgot ${r.name ?: r.mac}")
+                        rebuildCameraList()
+                    }
+                }
+            }.show()
+        return true
+    }
+
+    private fun switchToGrid() { selectorGroup.visibility = View.GONE; gridGroup.visibility = View.VISIBLE }
+
+    private fun switchToSelector() {
+        gridGroup.visibility = View.GONE
+        selectorGroup.visibility = View.VISIBLE
+        startCameraScan(select = true)
+    }
+
+    override fun onBackPressed() {
+        if (gridGroup.visibility == View.VISIBLE) switchToSelector() else super.onBackPressed()
     }
 
     private fun safeName(d: BluetoothDevice): String? = try { d.name } catch (_: SecurityException) { null }
 
     private fun onCameraChosen(device: BluetoothDevice) {
-        currentBrand = Brand.of(device.address, safeName(device))
+        val cam = discovered[device.address]
+        currentBrand = Brand.of(device.address, cam?.name ?: safeName(device))
+        currentModel = cam?.model ?: CameraModel.resolve(null, safeName(device))
+        currentModelId = cam?.modelId
         currentAddress = device.address
-        offloadSsid = safeName(device) ?: "camera"
+        offloadSsid = cam?.name ?: safeName(device) ?: "camera"
         if (savedPassFor(device.address).isEmpty()) {
             promptPasswordFor(device.address) { connectAndOffload(device) }
         } else {
@@ -405,10 +476,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     ?.firstOrNull { it is java.net.Inet4Address }
                 logLine("WiFi link: ip=${ip4?.hostAddress}")
                 Thread {
-                    // Datalink port differs by family: Osmo = 9004 (needs a TCP-7001 poke),
-                    // Xtra Edge Pro / Action 5 = 10004 (no poke).
-                    val (dlPort, dlPoke) = if (currentBrand == Brand.XTRA) 10004 to false else 9004 to true
-                    logLine("=== media list [$currentBrand] via udp/$dlPort ===")
+                    // Datalink port + poke come from the model (e.g. Action 5 Pro = 10004/no-poke,
+                    // the rest = 9004/poke); the Xtra resolves to Action 5 Pro by its model byte.
+                    val dlPort = currentModel.datalinkPort
+                    val dlPoke = currentModel.tcpPoke
+                    logLine("=== media list [${currentModel.name}] via udp/$dlPort ===")
                     datalink?.close()
                     val dl = DatalinkClient(::logLine, dlPort, dlPoke)
                     datalink = dl
@@ -425,12 +497,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             }
         })
         apJoiner = joiner
-        joiner.join(ssid, pass)
+        joiner.join(ssid, pass, currentModel.wpa3)
     }
 
     // ---- media grid + download ---------------------------------------------
 
     private fun showGrid(files: List<CameraFile>) {
+        // Reaching here = pairing + WiFi + datalink all worked → remember this camera, show the grid.
+        currentAddress?.let { savedCameras.save(it, offloadSsid, currentModelId) }
+        switchToGrid()
         if (files.isEmpty()) {
             logLine("No media found on camera.")
             return
@@ -528,10 +603,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     // ---- OsmoScanner.Listener ----------------------------------------------
 
-    override fun onHit(device: BluetoothDevice, rssi: Int, name: String?, modelGuess: String?) {
+    override fun onHit(device: BluetoothDevice, rssi: Int, name: String?, modelGuess: String?, modelId: Int?) {
         val addr = device.address
-        if (discovered.put(addr, Cam(device, name, Brand.of(addr, name), rssi)) == null) {
-            logLine("found [${Brand.of(addr, name)}] ${name ?: addr} rssi=$rssi")
+        val model = CameraModel.resolve(modelId, name)
+        if (discovered.put(addr, Cam(device, name, Brand.of(addr, name), rssi, modelId, model)) == null) {
+            logLine("found ${model.name} [${Brand.of(addr, name)}] (${name ?: addr}) rssi=$rssi" +
+                if (!model.verified) "  ~experimental" else "")
+            main.post { rebuildCameraList() }
         }
         // Credential-probe is headless — connect to the first camera immediately.
         if (credProbeMode && !connecting) {
@@ -626,7 +704,22 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         connecting = false
         stopKeepalive()
         lastPairStatus = -99
-        logLine("Disconnected. Tap Scan to retry.")
+        main.post {
+            if (isFinishing || isDestroyed) return@post
+            // A BLE drop before the grid is the normal control→WiFi handoff (status=8) — ignore it.
+            // A drop while the gallery is up (status=19, camera terminated) means the camera is gone:
+            // the gallery is now stale, so tear the session down and return to the camera selector.
+            if (gridGroup.visibility == View.VISIBLE) {
+                logLine("Camera link lost — returning to camera list.")
+                datalink?.close()
+                apJoiner?.release()
+                grid.adapter = null
+                adapter = null
+                switchToSelector()
+            } else {
+                logLine("Disconnected.")
+            }
+        }
     }
 
     // ---- log / util ---------------------------------------------------------

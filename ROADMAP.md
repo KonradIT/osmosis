@@ -29,27 +29,40 @@ re-encoding, deliberately out of scope). Code:
 [MediaDownloader.downloadTrimmed](app/src/main/java/com/chernowii/osmosis/net/MediaDownloader.kt),
 [MediaPreviewActivity](app/src/main/java/com/chernowii/osmosis/ui/MediaPreviewActivity.kt).
 
-## 2. Support the rest of the Osmo line
+## 2. Support the rest of the Osmo line — ⚙️ framework done, verification hardware-gated (2026-07-10)
 
-Cameras: **Osmo Action 3 / 4 / 6, Osmo 360, Osmo Pocket 3.** Most of the stack is already
-brand/naming-agnostic — the datalink handshake, `DJI_`/`CAM_` filename parsing, `/v2` download,
-and the LRF/preview flow are shared. What each new model needs:
+Built a per-model capability table
+([CameraModel](app/src/main/java/com/chernowii/osmosis/ble/CameraModel.kt)) keyed on the BLE model
+byte: datalink port + TCP-poke, WiFi security, and a `verified` flag. The runtime resolves it from
+the scan ([OsmoScanner](app/src/main/java/com/chernowii/osmosis/ble/OsmoScanner.kt) now passes the
+model byte up), so port/poke/WPA come from the **model, not the brand** — the Xtra resolves to
+Action 5 Pro (`0x15`) → 10004 by its model byte, exactly as a DJI-branded Action 5 would.
+Unrecognized models fall back to the common config (9004 + poke + WPA2) so **any DJI Osmo is
+attempted, not refused**; the selector tags unverified models `~experimental`.
 
-- **BLE model byte → name** in [BleConstants](app/src/main/java/com/chernowii/osmosis/ble/BleConstants.kt)
-  (`MODEL_NAMES`; today `0x15`=Action 5 Pro, `0x19`=Nano) and any [Brand](app/src/main/java/com/chernowii/osmosis/ble/Brand.kt) tells.
-- **Datalink port per family:** Osmo 360 / Pocket 3 = **UDP 9004** (same as Nano — should mostly
-  work as-is); Action 5 Pro = **UDP 10004**. Action 3/4/6 unknown — likely 9003 or their own
-  port; if not in the reference repos, capture it via PCAPdroid like we did for the Action 5.
-- **WiFi security:** the **Osmo 360 uses WPA3** (Nano/Action are WPA2). The
-  [ApJoiner](app/src/main/java/com/chernowii/osmosis/net/ApJoiner.kt) `WifiNetworkSpecifier` path
-  will need a WPA3 branch.
-- **Storage + naming quirks** per the protocol map (e.g. `CAM_` vs `DJI_`, internal vs SD).
-- **References already cloned under `reference/`:** `dji-remote`, `DJI-Wifi-Connect`,
-  `dji_protocol`, `lib-osmo-ble`, `osmo-download`, `reverse-engineering-dji`,
-  `Osmo-GPS-Controller-Demo` — mine these for model IDs, ports, and per-model handshakes before
-  reaching for a pcap.
-- **Approach:** add a small per-model capability table (port, WPA mode, naming, storage) and key
-  the runtime off the BLE model byte, so a new camera is mostly a data entry + a verification run.
+Status per model:
+- **Verified on hardware:** Osmo Nano (`0x19`, 9004, WPA2), Osmo Action 5 Pro / Xtra Edge Pro
+  (`0x15`, 10004, WPA2) — both re-confirmed after the brand→model switch.
+- **Coded, unverified (no unit):** Osmo 360 (`0x17`, 9004, **WPA3** via `setWpa3Passphrase`) and
+  Osmo Pocket 3 (`0x20`, 9004) — the Pocket 3 broadcasts **no** BLE manufacturer data, so detection
+  falls back to the BLE local name. Pocket 4 (`0x21`) added to the map.
+- **Best-effort default (no data source):** Osmo Action 2 / 3 / 4 / 6 — these are Mimo cameras, so they get the
+  9004/poke/WPA2 default and the `~experimental` tag. Confirming each needs a PCAPdroid capture of
+  Mimo or the unit itself.
+
+Shared, already model-agnostic: pairing (`mbln`), `/v2` HTTP, `DJI_`/`CAM_` naming, storage
+auto-detect, and the preview/trim/stream flow. **Remaining:** hardware/pcap verification of the 360,
+Pocket 3, and the Action 3/4/6 ports.
+
+**Onboarding UI (2026-07-10):** the app now launches into a **camera selector**
+([SavedCameras](app/src/main/java/com/chernowii/osmosis/core/SavedCameras.kt),
+[CameraListAdapter](app/src/main/java/com/chernowii/osmosis/ui/CameraListAdapter.kt)) — saved
+cameras first (📶 in range / 🚫 out of range, from the live BLE scan), then newly-scanned ones
+tagged **NEW**. Tapping an in-range camera connects → grid; a first-time camera prompts for the WiFi
+password once and is remembered per-MAC (with its model byte, so the Pocket 3's name-fallback
+survives). Long-press → re-enter password / forget. If the camera drops the BLE link while the
+gallery is open (status=19, vs. the benign handoff status=8), the session tears down and returns to
+the selector, which rescans and shows it 🚫.
 
 ## 3. Retrieve the WiFi password over BLE
 
@@ -71,11 +84,3 @@ pull it automatically over the BLE DUML channel so no manual entry is needed.
   (QR-scan of the camera's on-screen connection QR, if present, decodes SSID+password directly).
 - **Note:** the R-SDK/accessory family (`Osmo-GPS-Controller-Demo`) uses a different pairing with
   numeric `verify_data` and is control-only — not a media/credential path.
-
----
-
-### Not planned (yet)
-
-- Frame-accurate re-encode trimming (vs. fast-cut) — only if users ask.
-- iOS / desktop clients — this is Android-only by design.
-- Live view / camera control — out of scope; Osmosis is an offloader.

@@ -24,9 +24,12 @@ class ApJoiner(context: Context, private val listener: Listener) {
         .getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private var cb: ConnectivityManager.NetworkCallback? = null
 
-    fun join(ssid: String, passphrase: String) {
+    fun join(ssid: String, passphrase: String, wpa3: Boolean = false) {
         val specBuilder = WifiNetworkSpecifier.Builder().setSsid(ssid)
-        if (passphrase.isNotEmpty()) specBuilder.setWpa2Passphrase(passphrase)
+        if (passphrase.isNotEmpty()) {
+            // The Osmo 360 AP is WPA3-SAE; the rest are WPA2-PSK.
+            if (wpa3) specBuilder.setWpa3Passphrase(passphrase) else specBuilder.setWpa2Passphrase(passphrase)
+        }
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -50,7 +53,7 @@ class ApJoiner(context: Context, private val listener: Listener) {
             }
         }
         cb = callback
-        listener.onLog("WiFi: requesting \"$ssid\" (WPA2, no-internet)...")
+        listener.onLog("WiFi: requesting \"$ssid\" (${if (wpa3) "WPA3" else "WPA2"}, no-internet)...")
         cm.requestNetwork(request, callback)
     }
 

@@ -22,7 +22,7 @@ class OsmoScanner(
 ) {
     interface Listener {
         fun onLog(s: String)
-        fun onHit(device: BluetoothDevice, rssi: Int, name: String?, modelGuess: String?)
+        fun onHit(device: BluetoothDevice, rssi: Int, name: String?, modelGuess: String?, modelId: Int?)
     }
 
     private var scanning = false
@@ -62,6 +62,7 @@ class OsmoScanner(
             val name = rec?.deviceName ?: safeName(dev)
 
             var modelGuess: String? = null
+            var modelId: Int? = null
             var mfrHex: String? = null
             val msd = rec?.manufacturerSpecificData
             if (msd != null) {
@@ -71,8 +72,8 @@ class OsmoScanner(
                     if (cid == BleConstants.DJI_COMPANY_ID || cid == BleConstants.DJI_COMPANY_ID_ALT) {
                         mfrHex = "cid=%04x %s".format(cid, data.joinToString("") { "%02x".format(it) })
                         if (data.size >= 2) {
-                            val model = (data[0].toInt() and 0xFF) or ((data[1].toInt() and 0xFF) shl 8)
-                            modelGuess = BleConstants.MODEL_NAMES[model] ?: "unknown(0x%04x)".format(model)
+                            modelId = (data[0].toInt() and 0xFF) or ((data[1].toInt() and 0xFF) shl 8)
+                            modelGuess = BleConstants.MODEL_NAMES[modelId] ?: "unknown(0x%04x)".format(modelId)
                         }
                     }
                 }
@@ -92,7 +93,7 @@ class OsmoScanner(
                         mfrHex?.let { "  mfr[$it]" } ?: ""
                     )
                 )
-                listener.onHit(dev, result.rssi, name, modelGuess)
+                listener.onHit(dev, result.rssi, name, modelGuess, modelId)
             } else if (name != null) {
                 listener.onLog("  (other) %s %s".format(dev.address, name))
             }
