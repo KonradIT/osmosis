@@ -31,6 +31,7 @@ import com.chernowii.osmosis.ble.CameraModel
 import com.chernowii.osmosis.ble.GattClient
 import com.chernowii.osmosis.ble.OsmoScanner
 import com.chernowii.osmosis.core.CameraFile
+import com.chernowii.osmosis.core.CameraStatus
 import com.chernowii.osmosis.core.SavedCameras
 import com.chernowii.osmosis.core.TrimRange
 import com.chernowii.osmosis.duml.DjiMessage
@@ -40,6 +41,7 @@ import com.chernowii.osmosis.net.DatalinkClient
 import com.chernowii.osmosis.net.ImageLoader
 import com.chernowii.osmosis.net.MediaDownloader
 import com.chernowii.osmosis.net.MetaLoader
+import com.google.android.material.progressindicator.LinearProgressIndicator
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -58,12 +60,16 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private lateinit var fileBar: ProgressBar
     private lateinit var overallText: TextView
     private lateinit var fileText: TextView
+    private lateinit var progressArea: View
     private lateinit var cameraList: ListView
     private lateinit var selectorGroup: View
     private lateinit var gridGroup: View
     private lateinit var selectorHint: TextView
+    private lateinit var connectBar: LinearProgressIndicator
     private lateinit var savedCameras: SavedCameras
+    private lateinit var statusPill: StatusPillView
     private var camRows: List<CamRow> = emptyList()
+    private var currentStatus = CameraStatus()
     private val main = Handler(Looper.getMainLooper())
 
     private var btAdapter: BluetoothAdapter? = null
@@ -94,10 +100,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // datalink goes idle). Held open during browse/download; closed on a new offload / exit.
     private var datalink: DatalinkClient? = null
 
-    // Pairing PIN string sent in SetPairingPIN. "mbln" is the moblin/dji-remote value proven to
-    // pair Osmo cameras for streaming; first thing we try on the Nano. Overridable via
-    // `am start ... --es pin <value>` for iterating if the Nano wants something else.
-    private var pairPin = "mbln"
+    // Pairing PIN string sent in SetPairingPIN — an app-chosen token (any value pairs; the camera
+    // shows its approval popup once, then stores it for silent re-pair). Overridable via
+    // `am start ... --es pin <value>`.
+    private var pairPin = "osmo"
 
     // End-to-end offload: BLE-pair -> wake AP -> join WiFi -> probe manifest.
     private var offloadMode = false
@@ -158,16 +164,19 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         fileBar = findViewById(R.id.fileBar)
         overallText = findViewById(R.id.overallText)
         fileText = findViewById(R.id.fileText)
+        progressArea = findViewById(R.id.progressArea)
         cameraList = findViewById(R.id.cameraList)
         selectorGroup = findViewById(R.id.selectorGroup)
         gridGroup = findViewById(R.id.gridGroup)
         selectorHint = findViewById(R.id.selectorHint)
+        connectBar = findViewById(R.id.connectBar)
+        statusPill = findViewById(R.id.statusPill)
         savedCameras = SavedCameras(getSharedPreferences("osmosis", MODE_PRIVATE))
-        findViewById<Button>(R.id.btnRescan).setOnClickListener { startCameraScan(select = true) }
+        findViewById<View>(R.id.btnRescan).setOnClickListener { startCameraScan(select = true) }
         cameraList.setOnItemClickListener { _, _, pos, _ -> onCamRowClick(pos) }
         cameraList.setOnItemLongClickListener { _, _, pos, _ -> onCamRowLongClick(pos) }
-        findViewById<Button>(R.id.btnDownload).setOnClickListener { onDownloadClicked() }
-        findViewById<Button>(R.id.btnAll).setOnClickListener { adapter?.toggleAll() }
+        findViewById<View>(R.id.fabDownload).setOnClickListener { onDownloadClicked() }
+        findViewById<View>(R.id.btnAll).setOnClickListener { adapter?.toggleAll() }
         findViewById<Button>(R.id.btnClear).setOnClickListener {
             log.text = ""
             typeCounts.clear()
@@ -365,6 +374,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         offloadMode = true
         offloadTriggered = false
         connecting = true
+        setConnectProgress(3) // tap → connecting
         logLine("OFFLOAD [$currentBrand] $offloadSsid (${device.address})")
         val gc = GattClient(this, this)
         gattClient = gc
@@ -440,6 +450,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun maybeStartOffload() {
         if (!offloadMode || offloadTriggered) return
         offloadTriggered = true
+        setConnectProgress(28) // paired → waking the AP
         logLine("OFFLOAD: paired -> waking AP via ConnectToWiFi(0x07/47)")
         gattClient?.writeCommand(
             com.chernowii.osmosis.duml.OsmoCommands.connectWifi(offloadSsid, offloadPass)
@@ -467,13 +478,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     private fun startWifiFlow(ssid: String, pass: String) {
         apJoiner?.release() // release any prior request so only one WiFi specifier is pending
+        setConnectProgress(35) // requesting the WiFi join
         logLine("WiFi flow: ssid=\"$ssid\" passLen=${pass.length}")
         val joiner = ApJoiner(this, object : ApJoiner.Listener {
             override fun onLog(s: String) = logLine(s)
-            override fun onFailed(reason: String) = logLine(reason)
+            override fun onFailed(reason: String) { logLine(reason); setConnectProgress(0) }
             override fun onNetwork(network: Network, link: LinkProperties?) {
                 val ip4 = link?.linkAddresses?.map { it.address }
                     ?.firstOrNull { it is java.net.Inet4Address }
+                setConnectProgress(58) // WiFi joined + bound
                 logLine("WiFi link: ip=${ip4?.hostAddress}")
                 Thread {
                     // Datalink port + poke come from the model (e.g. Action 5 Pro = 10004/no-poke,
@@ -484,6 +497,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     datalink?.close()
                     val dl = DatalinkClient(::logLine, dlPort, dlPoke)
                     datalink = dl
+                    dl.onStatus = { s -> main.post { onCameraStatus(s) } }
+                    dl.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98 during the manifest
                     val files = runCatching { dl.fetchFileList("192.168.2.1") }
                         .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
                     if (files.isNotEmpty()) dl.startKeepAlive() // hold the AP up while browsing
@@ -504,8 +519,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     private fun showGrid(files: List<CameraFile>) {
         // Reaching here = pairing + WiFi + datalink all worked → remember this camera, show the grid.
+        setConnectProgress(100) // first media in — connection complete
         currentAddress?.let { savedCameras.save(it, offloadSsid, currentModelId) }
         switchToGrid()
+        statusPill.render(pillName(), "Connected · WiFi", currentStatus)
         if (files.isEmpty()) {
             logLine("No media found on camera.")
             return
@@ -520,6 +537,30 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         adapter = ad
         grid.adapter = ad
         logLine("Grid ready: ${files.size} files. Tap a cell to preview + queue, then Download.")
+    }
+
+    private fun pillName() = "${currentModel.name} ${offloadSsid.substringAfterLast('-', "")}".trim()
+
+    /** Live camera status → refresh the pill (only while the gallery is showing). */
+    private fun onCameraStatus(s: CameraStatus) {
+        currentStatus = s
+        if (gridGroup.visibility == View.VISIBLE) statusPill.render(pillName(), "Connected · WiFi", s)
+    }
+
+    /**
+     * Connection progress shown in the selector (between the hint and the camera list), from tapping
+     * a camera through pairing, WiFi join, and the datalink manifest to the first media. 0 hides it,
+     * 100 completes and hides (the grid takes over).
+     */
+    private fun setConnectProgress(pct: Int) = main.post {
+        when {
+            pct <= 0 -> connectBar.visibility = View.GONE
+            pct >= 100 -> { connectBar.setProgressCompat(100, true); connectBar.visibility = View.GONE }
+            else -> {
+                if (connectBar.visibility != View.VISIBLE) { connectBar.visibility = View.VISIBLE; connectBar.progress = 0 }
+                connectBar.setProgressCompat(pct, true)
+            }
+        }
     }
 
     /** Open the full-screen preview for the tapped cell; queue changes flow back via the launcher. */
@@ -557,6 +598,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             override fun onStart(totalFiles: Int, tb: Long) {
                 totalBytes = tb; count = totalFiles
                 main.post {
+                    progressArea.visibility = View.VISIBLE
                     overallText.text = "Overall: 0/$totalFiles — ${fmtBytes(tb)}"
                     overallBar.progress = 0; fileBar.progress = 0
                 }
@@ -587,6 +629,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     overallBar.progress = 100
                     overallText.text = "Done: $saved saved, $skipped skipped, $failed failed"
                     fileText.text = ""
+                    main.postDelayed({ progressArea.visibility = View.INVISIBLE }, 3000)
                 }
                 logLine("DONE: $saved saved, $skipped skipped, $failed failed")
             }
@@ -624,6 +667,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // ---- GattClient.Listener -----------------------------------------------
 
     override fun onReady(gatt: GattClient) {
+        if (offloadMode) setConnectProgress(15) // GATT connected + services ready
         val frame = com.chernowii.osmosis.duml.OsmoCommands.setPairingPin(pairPin)
         val ok = gatt.writeCommand(frame)
         logLine("READY — sent SetPairingPIN(pin=\"$pairPin\") ok=$ok")
@@ -718,6 +762,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 switchToSelector()
             } else {
                 logLine("Disconnected.")
+                // A drop after pairing is the normal WiFi handoff (keep the progress bar going);
+                // a drop before pairing means the connection failed early — clear the bar.
+                if (!offloadTriggered) setConnectProgress(0)
             }
         }
     }

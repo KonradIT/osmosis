@@ -11,9 +11,10 @@ still unverified for the Nano.
   `19 00 00 <6-byte MAC> 03`. **Model id = `0x0019`** (new; slots after A6=0x18).
 - **GATT**: service `fff0` with chars `fff3, fff4, fff5, fff7`. MTU 517 negotiated fine.
   Notifications enabled on both `fff4` and `fff5`; telemetry arrives after pairing.
-- **Pairing just works with the moblin values**: `SetPairingPIN` (0x07/0x45) with the
-  32-hex identifier blob + PackString(`"mbln"`) → camera replies `0x07/0x45` payload
-  `00 01` = **ALREADY PAIRED** (no on-screen approval needed on this unit). The "pesky PIN"
+- **Pairing**: `SetPairingPIN` (0x07/0x45) with the 32-hex identifier blob + PackString of an
+  app-chosen token (we send `"osmo"`; any value works — the moblin default was `"mbln"`) → camera
+  replies `0x07/0x45` payload
+  `00 01` = **ALREADY PAIRED** (or an approval popup on first use of a new token). The "pesky PIN"
   turned out to be a non-issue here — no numeric code required.
 - **Internal model code = `"ow001"`** (ASCII head of the `0x00/0x81` DeviceInfo payload).
 - **Post-pairing telemetry** (all SOF 0x55 DUML on the BLE channel):
@@ -81,7 +82,7 @@ DJI firmware. Verified via the app (`reference/xtra/`, unpacked, string/dexdump 
 
 - **BLE brand tells**: MAC OUI **`EC:9E:EA`** (Xtra's own), manufacturer company id **`0xAAF7`**
   (vs DJI `0xAA08`), BLE model byte **`0x15`** (Action 5 Pro). Name `XtraEdgePro-XXXX`.
-- **Pairing identical**: `SetPairingPIN("mbln")` → `ALREADY PAIRED`.
+- **Pairing identical**: `SetPairingPIN("osmo")` → `ALREADY PAIRED`.
 - **WiFi**: SSID = BLE name, WPA2, `192.168.2.x`. Woken by `ConnectToWiFi`.
 - **DUML data channel differs**: TCP 7001 REFUSED, UDP-9004 handshake FAILS (unlike Nano). Its
   file-list DUML runs in native `libdjisdk_jni.so` (`native_*file_list*`), not in the base APK.
@@ -216,7 +217,7 @@ password over BLE (36 KB of notifications scanned). Assume the same on Nano unti
 | ←   | 0xC0 | 07/47 | WiFiConnectResult | `0x0000` = ok |
 | →   | 0x40 | 07/AB | ScanWiFi (client mode) | list of nearby APs — not needed for offload |
 
-SSID pattern (360) `Osmo360-XXXX` (XXXX = serial tail); Nano pattern ❓ (likely `OsmoNano-XXXX`).
+SSID pattern (360) `Osmo360-XXXX` (XXXX = serial tail); Nano pattern: `OsmoNano-XXXX`.
 Password shown on camera screen under Connection settings; **not** retrievable over BLE on 360.
 
 ## 5. WiFi join on Android (the clean replacement for macOS `networksetup`)
@@ -226,7 +227,7 @@ Password shown on camera screen under Connection settings; **not** retrievable o
   HTTP/UDP sockets use the camera AP even though it has **no internet** (otherwise Android
   bails to cellular). This is very likely how Mimo "connects without typing the password" —
   companion WiFi association, WPA passphrase supplied programmatically.
-- Try `setWpa3Passphrase` first (360 is WPA3-SAE), fall back to `setWpa2Passphrase`. Nano ❓.
+- Try `setWpa3Passphrase` first (360 is WPA3-SAE), fall back to `setWpa2Passphrase`. Nano uses `setWpa2Passphrase`, not WPA-3.
 - Camera IP `192.168.2.1`, client gets `192.168.2.x`.
 - **Keepalive**: AP drops after ~10 s idle; camera auto-sleeps. Keep one of: active HTTP
   download, UDP-9004 handshake ping every 2 s, or a TCP-7001 DUML heartbeat.

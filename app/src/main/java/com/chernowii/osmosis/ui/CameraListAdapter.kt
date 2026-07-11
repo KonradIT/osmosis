@@ -37,6 +37,7 @@ class CameraListAdapter(private val rows: List<CamRow>) : BaseAdapter() {
         v.findViewById<TextView>(R.id.camName).text = r.name ?: r.mac
         v.findViewById<TextView>(R.id.camStatus).text = if (r.inRange) "📶" else "🚫"
         v.findViewById<TextView>(R.id.camTag).visibility = if (r.saved) View.GONE else View.VISIBLE
+        v.alpha = if (r.inRange) 1f else 0.5f // dim saved cameras that aren't in range
         return v
     }
 }

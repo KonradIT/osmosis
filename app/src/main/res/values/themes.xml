@@ -1,5 +1,23 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.Osmosis" parent="Theme.AppCompat.DayNight.NoActionBar">
-        <item name="android:statusBarColor" tools:targetApi="l">@android:color/black</item>
+    <style name="Theme.Osmosis" parent="Theme.Material3.Light.NoActionBar">
+        <item name="colorPrimary">@color/osmo_accent</item>
+        <item name="colorOnPrimary">@color/osmo_on_accent</item>
+        <item name="colorPrimaryContainer">@color/osmo_accent</item>
+        <item name="colorOnPrimaryContainer">@color/osmo_on_accent</item>
+        <item name="colorSecondary">@color/osmo_accent</item>
+
+        <item name="android:colorBackground">@color/osmo_bg</item>
+        <item name="colorSurface">@color/osmo_surface</item>
+        <item name="colorSurfaceVariant">@color/osmo_surface_dim</item>
+        <item name="colorOnBackground">@color/osmo_ink</item>
+        <item name="colorOnSurface">@color/osmo_ink</item>
+        <item name="colorOnSurfaceVariant">@color/osmo_muted</item>
+        <item name="colorOutline">@color/osmo_track</item>
+
+        <!-- System bars blend into the cream background with dark icons. -->
+        <item name="android:statusBarColor">@color/osmo_bg</item>
+        <item name="android:navigationBarColor">@color/osmo_bg</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
     </style>
 </resources>

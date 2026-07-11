@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Osmosis palette — matches the Status Pill design (warm cream page, white cards, teal accent). -->
+    <color name="osmo_bg">#F4F1EB</color>
+    <color name="osmo_surface">#FFFFFF</color>
+    <color name="osmo_surface_dim">#ECE7DE</color>
+    <color name="osmo_ink">#2B2722</color>
+    <color name="osmo_muted">#8C867D</color>
+    <color name="osmo_accent">#00838F</color>
+    <color name="osmo_on_accent">#FFFFFF</color>
+    <color name="osmo_green">#52B788</color>
+    <color name="osmo_track">#E2DCD2</color>
+    <color name="white">#FFFFFF</color>
+</resources>

@@ -120,7 +120,7 @@ class DjiCrcTest {
 
     @Test
     fun pairMessageStructure() {
-        val pairPayload = DjiPairMessagePayload("mbln").encode()
+        val pairPayload = DjiPairMessagePayload("osmo").encode()
         val msg = DjiMessage(0x0702, 0x8092, 0x450740, pairPayload)
         val bytes = msg.encode()
         assertEquals(51, bytes.size)

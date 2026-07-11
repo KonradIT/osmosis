@@ -50,7 +50,7 @@ Status per model:
   9004/poke/WPA2 default and the `~experimental` tag. Confirming each needs a PCAPdroid capture of
   Mimo or the unit itself.
 
-Shared, already model-agnostic: pairing (`mbln`), `/v2` HTTP, `DJI_`/`CAM_` naming, storage
+Shared, already model-agnostic: pairing (`osmo` token), `/v2` HTTP, `DJI_`/`CAM_` naming, storage
 auto-detect, and the preview/trim/stream flow. **Remaining:** hardware/pcap verification of the 360,
 Pocket 3, and the Action 3/4/6 ports.
 

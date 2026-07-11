@@ -4,7 +4,7 @@ package com.chernowii.osmosis.ble
  * Per-model camera capabilities, keyed on the BLE manufacturer model id (payload bytes [0:1], LE).
  *
  * Only the datalink UDP port and WiFi security actually vary across the Osmo line — pairing (the
- * "mbln" PIN), the `/v2` HTTP media API, and DJI_/CAM_ file naming are shared. Cells marked
+ * "osmo" PIN), the `/v2` HTTP media API, and DJI_/CAM_ file naming are shared. Cells marked
  * [verified] were confirmed on real hardware (our own pcap + device tests for the Nano and Action 5
  * Pro; the osmo-download project for the 360). Everything else falls back to the most common config
  * (9004 + TCP-7001 poke + WPA2) so an unrecognized DJI Osmo is still *attempted* rather than refused

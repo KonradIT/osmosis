@@ -1,51 +1,61 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:minHeight="60dp"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
-    android:paddingHorizontal="10dp"
-    android:paddingVertical="8dp">
+    android:paddingVertical="5dp">
 
     <LinearLayout
-        android:layout_width="0dp"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:orientation="vertical">
+        android:background="@drawable/pill_bg"
+        android:foreground="@drawable/card_ripple"
+        android:gravity="center_vertical"
+        android:minHeight="64dp"
+        android:orientation="horizontal"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="12dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/camType"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/osmo_ink"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/camName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:textColor="@color/osmo_muted"
+                android:textSize="12sp" />
+        </LinearLayout>
 
         <TextView
-            android:id="@+id/camType"
+            android:id="@+id/camTag"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textSize="16sp"
-            android:textStyle="bold" />
+            android:layout_marginEnd="12dp"
+            android:background="@drawable/chip_new"
+            android:paddingHorizontal="7dp"
+            android:paddingVertical="2dp"
+            android:text="NEW"
+            android:textColor="@color/osmo_on_accent"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
 
         <TextView
-            android:id="@+id/camName"
+            android:id="@+id/camStatus"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:textColor="#888888" />
+            android:textSize="20sp" />
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/camTag"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginEnd="10dp"
-        android:background="#3366CC"
-        android:paddingHorizontal="6dp"
-        android:paddingVertical="1dp"
-        android:text="NEW"
-        android:textColor="#FFFFFF"
-        android:textSize="10sp"
-        android:textStyle="bold"
-        android:visibility="gone" />
-
-    <TextView
-        android:id="@+id/camStatus"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:textSize="20sp" />
-</LinearLayout>
+</FrameLayout>

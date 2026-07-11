@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="6dp">
+    android:orientation="vertical">
 
     <!-- ===== CAMERA SELECTOR (shown on launch) ===== -->
     <LinearLayout
@@ -11,143 +12,201 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:orientation="vertical">
+        android:orientation="vertical"
+        android:padding="14dp">
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:paddingHorizontal="4dp"
             android:paddingVertical="4dp"
             android:text="Cameras"
-            android:textSize="20sp"
+            android:textColor="@color/osmo_ink"
+            android:textSize="22sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/selectorHint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingHorizontal="4dp"
-            android:paddingBottom="4dp"
-            android:textColor="#888888"
+            android:paddingBottom="6dp"
+            android:textColor="@color/osmo_muted"
             android:textSize="12sp" />
+
+        <com.google.android.material.progressindicator.LinearProgressIndicator
+            android:id="@+id/connectBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone"
+            app:indicatorColor="@color/osmo_accent"
+            app:trackColor="@color/osmo_track"
+            app:trackCornerRadius="3dp"
+            app:trackThickness="6dp" />
 
         <ListView
             android:id="@+id/cameraList"
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1" />
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:divider="@null"
+            android:dividerHeight="0dp"
+            android:scrollbarStyle="outsideOverlay" />
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btnRescan"
+            style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Rescan" />
+            android:layout_marginTop="8dp"
+            android:text="Rescan"
+            app:icon="@android:drawable/ic_popup_sync" />
     </LinearLayout>
 
-    <!-- ===== GRID WORKFLOW (shown after connecting) ===== -->
-    <LinearLayout
+    <!-- ===== GALLERY (shown after connecting) ===== -->
+    <FrameLayout
         android:id="@+id/gridGroup"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:orientation="vertical"
         android:visibility="gone">
 
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
+            android:layout_height="match_parent"
+            android:orientation="vertical">
 
-            <Button
-                android:id="@+id/btnDownload"
-                android:layout_width="0dp"
+            <com.chernowii.osmosis.ui.StatusPillView
+                android:id="@+id/statusPill"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Download" />
+                android:layout_margin="12dp" />
 
-            <Button
-                android:id="@+id/btnAll"
-                android:layout_width="0dp"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="8dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAll"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Select all / none" />
+            </LinearLayout>
+
+            <!-- Progress: invisible by default, space reserved so the grid doesn't jump. -->
+            <LinearLayout
+                android:id="@+id/progressArea"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="14dp"
+                android:paddingVertical="4dp"
+                android:visibility="invisible">
+
+                <TextView
+                    android:id="@+id/overallText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/osmo_muted"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/overallBar"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    app:indicatorColor="@color/osmo_accent"
+                    app:trackColor="@color/osmo_track"
+                    app:trackCornerRadius="3dp"
+                    app:trackThickness="6dp" />
+
+                <TextView
+                    android:id="@+id/fileText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/osmo_muted"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/fileBar"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    app:indicatorColor="@color/osmo_green"
+                    app:trackColor="@color/osmo_track"
+                    app:trackCornerRadius="3dp"
+                    app:trackThickness="6dp" />
+            </LinearLayout>
+
+            <GridView
+                android:id="@+id/grid"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
                 android:layout_weight="1"
-                android:text="All / None" />
+                android:clipToPadding="false"
+                android:horizontalSpacing="2dp"
+                android:numColumns="3"
+                android:paddingHorizontal="6dp"
+                android:paddingBottom="92dp"
+                android:stretchMode="columnWidth"
+                android:verticalSpacing="2dp" />
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/overallText"
-            android:layout_width="match_parent"
+        <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+            android:id="@+id/fabDownload"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:paddingHorizontal="2dp"
-            android:textSize="11sp" />
-
-        <ProgressBar
-            android:id="@+id/overallBar"
-            style="?android:attr/progressBarStyleHorizontal"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:max="100" />
-
-        <TextView
-            android:id="@+id/fileText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingHorizontal="2dp"
-            android:textSize="11sp" />
-
-        <ProgressBar
-            android:id="@+id/fileBar"
-            style="?android:attr/progressBarStyleHorizontal"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:max="100" />
-
-        <GridView
-            android:id="@+id/grid"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:numColumns="3"
-            android:stretchMode="columnWidth"
-            android:verticalSpacing="2dp"
-            android:horizontalSpacing="2dp" />
-    </LinearLayout>
+            android:layout_gravity="bottom|end"
+            android:layout_margin="18dp"
+            android:text="Download"
+            android:textColor="@color/osmo_on_accent"
+            app:backgroundTint="@color/osmo_accent"
+            app:icon="@drawable/ic_download"
+            app:iconTint="@color/osmo_on_accent" />
+    </FrameLayout>
 
     <!-- ===== LOG (shared) ===== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:paddingStart="14dp">
 
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:paddingHorizontal="4dp"
             android:text="Log"
-            android:textColor="#888888"
+            android:textColor="@color/osmo_muted"
             android:textSize="11sp" />
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btnClear"
+            style="@style/Widget.Material3.Button.TextButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:minWidth="0dp"
-            android:paddingHorizontal="12dp"
             android:text="Clear" />
     </LinearLayout>
 
     <ScrollView
         android:id="@+id/scroll"
         android:layout_width="match_parent"
-        android:layout_height="96dp">
+        android:layout_height="84dp"
+        android:background="@color/osmo_surface_dim">
 
         <TextView
             android:id="@+id/txtLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:fontFamily="monospace"
-            android:padding="4dp"
+            android:padding="6dp"
+            android:textColor="@color/osmo_muted"
             android:textIsSelectable="true"
             android:textSize="10sp" />
     </ScrollView>

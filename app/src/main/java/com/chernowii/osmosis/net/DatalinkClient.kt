@@ -1,6 +1,7 @@
 package com.chernowii.osmosis.net
 
 import com.chernowii.osmosis.core.CameraFile
+import com.chernowii.osmosis.core.CameraStatus
 import com.chernowii.osmosis.duml.DjiMessage
 import com.chernowii.osmosis.duml.OsmoCommands
 import java.net.DatagramPacket
@@ -49,6 +50,19 @@ class DatalinkClient(
     private lateinit var cam: InetAddress
     @Volatile private var keepAliveOn = false
 
+    /** Set to receive live camera status (battery/mode/recording/storage) parsed from status pushes. */
+    @Volatile var onStatus: ((CameraStatus) -> Unit)? = null
+
+    /** Progress 0..100 through fetchFileList (handshake → registration → manifest), for a UI bar. */
+    @Volatile var onFetchProgress: ((Int) -> Unit)? = null
+    private var status = CameraStatus()
+    private var lastHex80 = ""      // last 0x02/0x80 payload — recording ⇔ it keeps changing
+    private var lastActive80 = 0L   // nanoTime of the last 0x02/0x80 change
+    private var lastSig = ""        // last display signature fired to onStatus (throttles UI updates)
+    private val modeNames = mapOf(
+        0 to "Photo", 1 to "Video", 2 to "Playback", 3 to "SlowMo", 4 to "Timelapse", 5 to "Panorama",
+    )
+
     /** Handshake + register + list. Socket stays open on success. Empty list on failure. */
     fun fetchFileList(ip: String): List<CameraFile> {
         cam = InetAddress.getByName(ip)
@@ -59,7 +73,7 @@ class DatalinkClient(
             runCatching {
                 Socket().use { s ->
                     s.connect(InetSocketAddress(cam, 7001), 1200)
-                    s.getOutputStream().write(OsmoCommands.setPairingPin("mbln"))
+                    s.getOutputStream().write(OsmoCommands.setPairingPin("osmo"))
                     s.getOutputStream().flush()
                     Thread.sleep(400)
                 }
@@ -74,10 +88,12 @@ class DatalinkClient(
         }
         if (!ok) { log("datalink: handshake FAILED on udp/$port"); sock.close(); return emptyList() }
         log("datalink: handshake OK on udp/$port")
+        onFetchProgress?.invoke(8)
 
         // Drain heartbeats, learn camera channel, set our seq start.
         repeat(5) { recvAll(400); sendAck() }
         udpSeq = (lastCamSeq + 8) and 0xFFFF
+        onFetchProgress?.invoke(16)
 
         // Registration.
         sendDuml(0x00, 0x81, appDeviceInfo(), receiverType = 0x08, receiverId = 2, cmdType = 4)
@@ -87,11 +103,13 @@ class DatalinkClient(
         sendDuml(0x03, 0xDA, hex("05ffffffff"), receiverType = 0x03, receiverId = 0)
         recvAll(400); sendAck()
         var subId = 0x69DF
-        for (p in paramSubs) {
+        for ((i, p) in paramSubs.withIndex()) {
             sendDuml(0x00, 0x99, subscription(p, subId), receiverType = 0x08, receiverId = 1)
             subId++; recvAll(300); sendAck()
+            onFetchProgress?.invoke(22 + i * 3) // ramp through the 8 subscriptions
         }
         repeat(4) { recvAll(400); sendAck() }
+        onFetchProgress?.invoke(50)
 
         // File-list request (0x00/0x26). Records stream back over several packets. Page the list up
         // front (indices 0.., 42.., 64..), then collect only until the parsed record count stops
@@ -112,6 +130,7 @@ class DatalinkClient(
             ), receiverType = 0x01, receiverId = 0)
             val count = distinctPaths(blob)
             if (count != lastCount) log("datalink: $count files (batch $batch)")
+            onFetchProgress?.invoke((55 + batch * 6).coerceAtMost(95))
             if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = count
         }
@@ -119,19 +138,96 @@ class DatalinkClient(
         val bytes = blob.toByteArray()
         val files = parse(bytes)
         log("datalink: parsed ${files.size} media files (${bytes.size}B)")
+        onFetchProgress?.invoke(100)
         return files
     }
 
-    /** Keep the datalink session active (ACK the camera ~2×/s) so the AP doesn't sleep. */
+    /**
+     * Keep the datalink alive (ACK ~2×/s so the AP doesn't sleep) and, Mimo-style, poll the camera
+     * for status — heartbeat 0x02/0x8E, state query 0x02/0xA0, status poll 0x02/0x61 — decoding the
+     * pushed status frames (battery/mode/recording/storage) as they arrive.
+     */
     fun startKeepAlive() {
         if (keepAliveOn) return
         keepAliveOn = true
+        status = CameraStatus()
+        lastHex80 = ""; lastActive80 = 0L; lastSig = ""
         Thread {
+            var tick = 0
             while (keepAliveOn) {
-                runCatching { recvAll(200); sendAck() }
+                runCatching {
+                    parseStatus(recvAll(200))
+                    sendAck()
+                    sendDuml(0x02, 0x8E, hex("00011400"), receiverType = 0x01, receiverId = 0)
+                    if (tick % 3 == 0) sendDuml(0x02, 0xA0, ByteArray(0), receiverType = 0x01, receiverId = 0)
+                    if (tick % 6 == 0) sendDuml(0x02, 0x61, ByteArray(0), receiverType = 0x01, receiverId = 0)
+                }
                 runCatching { Thread.sleep(300) }
+                tick++
             }
         }.apply { isDaemon = true; name = "datalink-keepalive" }.start()
+    }
+
+    /** Scan datagrams for DUML status frames (SOF 0x55; cmd set/id at header offsets 9/10) and decode. */
+    private fun parseStatus(datagrams: List<ByteArray>) {
+        for (d in datagrams) {
+            var i = 0
+            while (i + 11 <= d.size) {
+                if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
+                val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+                if (len < 13 || i + len > d.size) { i++; continue }
+                val set = d[i + 9].toInt() and 0xFF
+                val id = d[i + 10].toInt() and 0xFF
+                applyStatusFrame(set, id, d.copyOfRange(i + 11, i + len - 2))
+                i += len
+            }
+        }
+        // Re-evaluate the recording decay even if no 0x80 arrived this pass, then fire on real change.
+        val rec = lastActive80 != 0L && System.nanoTime() - lastActive80 < 1_500_000_000L
+        if (rec != status.recording) status = status.copy(recording = rec)
+        val sig = displaySig(status)
+        if (sig != lastSig) { lastSig = sig; onStatus?.invoke(status) }
+    }
+
+    private fun displaySig(s: CameraStatus) =
+        "${s.batteryPercent}|${s.mode}|${s.recording}|${s.sdInserted}|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}"
+
+    private fun applyStatusFrame(set: Int, id: Int, p: ByteArray): Boolean {
+        val hex = p.joinToString("") { "%02x".format(it) } // 0x80 recording detection diffs this
+
+        when {
+            set == 0x02 && id == 0x80 && p.size >= 13 -> {
+                // Recording ⇔ this frame keeps changing (no clean flag byte); decay handled in parseStatus.
+                if (hex != lastHex80) { lastHex80 = hex; lastActive80 = System.nanoTime() }
+                // Storage of the active store: total = u32-LE MiB @ byte 5, free = u32-LE MiB @ byte 9.
+                val total = u32le(p, 5).toInt()
+                val free = u32le(p, 9).toInt()
+                status = status.copy(
+                    mode = modeNames[p[0].toInt() and 0x0F] ?: "Mode${p[0].toInt() and 0x0F}",
+                    storageTotalMb = if (total in 1..50_000_000) total else status.storageTotalMb,
+                    storageFreeMb = if (free in 0..50_000_000) free else status.storageFreeMb,
+                ); return true
+            }
+            set == 0x02 && id == 0xDC && p.isNotEmpty() -> {
+                status = status.copy(sdInserted = (p[0].toInt() and 0x01) != 0); return true
+            }
+            set == 0x00 && id == 0x00 && p.size >= 6 -> {
+                // GetVersion reply: NUL-separated ASCII (sdk\0name\0firmware); grab the version string.
+                val text = String(p, Charsets.US_ASCII)
+                val fw = Regex("""\d{2}\.\d{2}\.\d{2}\.\d{2}""").find(text)?.value
+                    ?: text.split(' ').map { it.trim() }.lastOrNull { it.length in 4..24 && it.any(Char::isDigit) }
+                if (!fw.isNullOrBlank()) { status = status.copy(firmware = fw); return true }
+            }
+            set == 0x0D && id == 0x02 && p.size >= 21 -> {
+                val bp = p[20].toInt() and 0xFF
+                if (bp in 0..100) { status = status.copy(batteryPercent = bp); return true }
+            }
+            set == 0x02 && id == 0xA0 && p.size >= 8 -> {
+                status = status.copy(recordSeconds = (p[6].toInt() and 0xFF) or ((p[7].toInt() and 0xFF) shl 8))
+                return true
+            }
+        }
+        return false
     }
 
     fun close() {
