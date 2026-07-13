@@ -701,6 +701,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             if (reqSeen.add(rk)) {
                 logLine("REQ <- 0x%02x/%02x (flags40) -> responded ok=%s".format(parsed.cmdSet, parsed.cmdId, ok))
             }
+            // First-time pairing: the camera signals approval as a 0x07/46 REQUEST (flags 0x40), not
+            // a response — so it's handled here, before the CmdSet 0x07 block below. ACK it (done
+            // above), then start offload exactly like the already-paired 0x45=0x01 path; otherwise a
+            // fresh camera pairs but never proceeds to WiFi/grid. (maybeStartOffload is idempotent.)
+            if (parsed.cmdSet == 0x07 && parsed.cmdId == 0x46) {
+                logLine("PAIRING <- 0x07/46 APPROVED (req)  [${parsed.payload.toHex()}]")
+                if (credProbeMode) startCredProbe() else maybeStartOffload()
+            }
             return
         }
 
