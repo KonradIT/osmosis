@@ -482,7 +482,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         logLine("WiFi flow: ssid=\"$ssid\" passLen=${pass.length}")
         val joiner = ApJoiner(this, object : ApJoiner.Listener {
             override fun onLog(s: String) = logLine(s)
-            override fun onFailed(reason: String) { logLine(reason); setConnectProgress(0) }
+            override fun onFailed(reason: String) { logLine(reason); main.post { onWifiJoinFailed() } }
             override fun onNetwork(network: Network, link: LinkProperties?) {
                 val ip4 = link?.linkAddresses?.map { it.address }
                     ?.firstOrNull { it is java.net.Inet4Address }
@@ -513,6 +513,38 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         })
         apJoiner = joiner
         joiner.join(ssid, pass, currentModel.wpa3)
+    }
+
+    /**
+     * WiFi join failed (WifiNetworkSpecifier `onUnavailable` — wrong password, AP down, or the user
+     * dismissed the system dialog; Android can't tell them apart). If we joined with a *saved*
+     * password, the usual cause is a stale one — the camera was factory-reset and regenerated it — so
+     * offer to re-enter it and retry, instead of silently stranding the saved camera. The AP is still
+     * up from the ConnectToWiFi we just sent, so retrying the join alone (no re-pair) works once the
+     * password is right. First-time cameras (no saved password) already prompt up front, so there's
+     * nothing stale to fix — just leave the user on the selector.
+     */
+    private fun onWifiJoinFailed() {
+        if (isFinishing || isDestroyed) return
+        setConnectProgress(0)
+        val addr = currentAddress ?: return
+        if (savedPassFor(addr).isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("Couldn't join $offloadSsid")
+            .setMessage(
+                "The camera Wi-Fi join failed. This usually means the saved password is out of date " +
+                    "— e.g. after a camera factory reset. Re-enter it and try again?"
+            )
+            .setPositiveButton("Re-enter password") { _, _ ->
+                promptPasswordFor(addr) {
+                    offloadPass = savedPassFor(addr)
+                    logLine("Retrying Wi-Fi join with the updated password…")
+                    startWifiFlow(offloadSsid, offloadPass)
+                }
+            }
+            .setNegativeButton("Back to cameras") { _, _ -> switchToSelector() }
+            .setCancelable(false)
+            .show()
     }
 
     // ---- media grid + download ---------------------------------------------
