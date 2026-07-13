@@ -137,7 +137,7 @@ class DatalinkClient(
 
         val raw = blob.toByteArray()
         val bytes = manifestBytes(raw) // reassemble the fragmented file-list frames (see manifestBytes)
-        val files = parse(bytes)
+        val files = decodeManifest(bytes)
         log("datalink: parsed ${files.size} media files (${bytes.size}B)")
         onFetchProgress?.invoke(100)
         return files
@@ -279,20 +279,65 @@ class DatalinkClient(
         pathCountRe.findAll(String(manifestBytes(blob.toByteArray()), Charsets.ISO_8859_1))
             .map { it.value }.toHashSet().size
 
-    /** Media naming: Osmo Nano uses DCIM/DJI_001/DJI_…; 360 & Action 5 use CAM_. Match either. */
-    private fun parse(bytes: ByteArray): List<CameraFile> {
+    private val primaryExts = setOf("MP4", "MOV", "JPG", "JPEG", "DNG", "OSV", "INSV", "HEIC")
+    private val proxyExts = setOf("LRF", "LRV")
+
+    /**
+     * Decode the reassembled manifest into one [CameraFile] per record. The manifest is a DJI TLV:
+     * a `u32-LE` file count, then fixed-stride records, each an enum block (carries the fps rational
+     * num/den) followed by length-prefixed strings — filename, `DCIM/…` media path, `MISC/THM/…`
+     * thumb path, and an optional `LRF/LRV` proxy. Only the filename field carries an extension (the
+     * path fields don't), so a primary-extension name token appears exactly once per record; we anchor
+     * on those, scope every other field to that record's byte window, and assert the record count
+     * matches the header. That assertion is the safety net: a dropped/duplicated record (the kind the
+     * 0x00/0x27 sub-header bug caused) fails the count check here instead of silently shipping a short
+     * grid. Falls back to the looser whole-blob scrape ([parseFlat]) when the structure doesn't
+     * validate — an unknown model layout, or a manifest whose count includes proxy entries.
+     */
+    private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
+        val text = String(bytes, Charsets.ISO_8859_1)
+        val declared = if (bytes.size >= 4) u32le(bytes, 0).toInt() else -1
+        val nameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_[A-Z]\.([A-Za-z0-9]{2,4})""")
+        val names = nameRe.findAll(text).filter { it.groupValues[1].uppercase() in primaryExts }.toList()
+        if (names.isEmpty() || names.size != declared) {
+            log("datalink: manifest struct-decode skipped (declared=$declared, records=${names.size}) — flat scrape")
+            return parseFlat(bytes)
+        }
+        val out = ArrayList<CameraFile>(names.size)
+        for (k in names.indices) {
+            val name = names[k].value
+            val base = name.substringBeforeLast('.'); val ext = name.substringAfterLast('.').uppercase()
+            val qbase = Regex.escape(base)
+            val winStart = if (k == 0) 0 else names[k - 1].range.last + 1
+            val winEnd = if (k + 1 < names.size) names[k + 1].range.first else text.length
+            val win = text.substring(winStart, winEnd)
+            // Media/thumb paths carry no extension in the manifest; append the real one (.scr for thumbs).
+            val mediaDir = Regex("""DCIM/(?:DJI|CAM)_\d{3}/$qbase""").find(win)?.value ?: return parseFlat(bytes)
+            val thumb = Regex("""MISC/THM/(?:DJI|CAM)_\d{3}/$qbase""").find(win)?.value?.plus(".scr")
+                ?: (mediaDir.replaceFirst("DCIM/", "MISC/THM/") + ".scr")
+            val proxy = Regex("""$qbase\.(?:LRF|LRV)""").find(win)?.let { "$mediaDir.${it.value.substringAfterLast('.')}" }
+            val fps = if (ext in VIDEO_EXTS) fpsInRange(bytes, winStart, names[k].range.first) else null
+            out.add(CameraFile(path = "$mediaDir.$ext", thumbPath = thumb, storage = 0,
+                resLabel = fps?.let { "${it}fps" }, proxyPath = proxy))
+        }
+        log("datalink: decoded $declared records (${out.count { it.resLabel != null }} with fps, ${out.count { it.proxyPath != null }} proxies)")
+        return out
+    }
+
+    /** Fallback scrape: whole-blob regex, joining fields by filename base. No per-record structure or
+     *  count check — used when [decodeManifest] can't validate the layout. Osmo Nano uses
+     *  DCIM/DJI_001/DJI_…; 360 & Action 5 use CAM_. */
+    private fun parseFlat(bytes: ByteArray): List<CameraFile> {
         val text = String(bytes, Charsets.ISO_8859_1)
         val pathRe = Regex("""DCIM/(?:DJI|CAM)_\d{3}/(?:DJI|CAM)_\d{14}_\d{4}_D""")
         val nameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_D\.[A-Za-z0-9]{2,4}""")
         val bestExt = HashMap<String, String>()
         val proxyByBase = HashMap<String, String>() // base -> LRF/LRV proxy extension, if listed
-        val primary = setOf("MP4", "MOV", "JPG", "JPEG", "DNG", "OSV", "INSV", "HEIC")
-        val proxyExts = setOf("LRF", "LRV")
         for (m in nameRe.findAll(text)) {
             val base = m.value.substringBeforeLast('.')
             val ext = m.value.substringAfterLast('.').uppercase()
             val cur = bestExt[base]
-            if (cur == null || (ext in primary && cur !in primary)) bestExt[base] = ext
+            if (cur == null || (ext in primaryExts && cur !in primaryExts)) bestExt[base] = ext
             if (ext in proxyExts) proxyByBase[base] = ext
         }
         val thumbRe = Regex("""MISC/THM/(?:DJI|CAM)_\d{3}/(?:DJI|CAM)_\d{14}_\d{4}_D(?:\.\w{2,4})?""")
@@ -324,9 +369,16 @@ class DatalinkClient(
     private fun fpsFor(bytes: ByteArray, fileName: String): Int? {
         val idx = indexOf(bytes, fileName.toByteArray(Charsets.ISO_8859_1))
         if (idx < 0) return null
+        return fpsInRange(bytes, idx - 220, idx)
+    }
+
+    /** Scan [start,end) for the fps rational (num/den, den ∈ {1000,1001}); takes the last match, which
+     *  is the one nearest the filename — i.e. this record's own enum block. See [fpsFor] for the format. */
+    private fun fpsInRange(bytes: ByteArray, start: Int, end: Int): Int? {
         var fps: Int? = null
-        var i = maxOf(0, idx - 220)
-        while (i <= idx - 8) {
+        var i = maxOf(0, start)
+        val stop = minOf(end, bytes.size) - 8
+        while (i <= stop) {
             val den = u32le(bytes, i + 4)
             if (den == 1000L || den == 1001L) {
                 val num = u32le(bytes, i)
