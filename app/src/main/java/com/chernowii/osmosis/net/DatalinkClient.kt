@@ -282,6 +282,10 @@ class DatalinkClient(
     private val primaryExts = setOf("MP4", "MOV", "JPG", "JPEG", "DNG", "OSV", "INSV", "HEIC")
     private val proxyExts = setOf("LRF", "LRV")
 
+    /** Test seam: run the full raw-blob → frame-reassemble → decode pipeline on a captured manifest. */
+    internal fun decodeManifestBlobForTest(rawBlob: ByteArray): List<CameraFile> =
+        decodeManifest(manifestBytes(rawBlob))
+
     /**
      * Decode the reassembled manifest into one [CameraFile] per record. The manifest is a DJI TLV:
      * a `u32-LE` file count, then fixed-stride records, each an enum block (carries the fps rational
