@@ -135,7 +135,8 @@ class DatalinkClient(
             lastCount = count
         }
 
-        val bytes = blob.toByteArray()
+        val raw = blob.toByteArray()
+        val bytes = manifestBytes(raw) // reassemble the fragmented file-list frames (see manifestBytes)
         val files = parse(bytes)
         log("datalink: parsed ${files.size} media files (${bytes.size}B)")
         onFetchProgress?.invoke(100)
@@ -237,9 +238,46 @@ class DatalinkClient(
 
     private val pathCountRe = Regex("""DCIM/(?:DJI|CAM)_\d{3}/(?:DJI|CAM)_\d{14}_\d{4}_D""")
 
+    /**
+     * The file list streams back as many DUML frames (cmdset 0x00 / cmd 0x26). Concatenating the raw
+     * datagrams leaves each frame's 11-byte header + 2-byte CRC spliced into the byte stream, so any
+     * DCIM path that straddles a frame boundary gets those bytes injected mid-string and the file
+     * silently drops out of the grid — non-deterministically, depending on which record lands on a
+     * boundary. Re-stitch just the 0x00/0x26 payloads, in order, so the manifest is contiguous before
+     * we regex it. Walks the whole blob (not per-datagram) so a frame split across two UDP packets is
+     * still reassembled.
+     */
+    private fun manifestBytes(raw: ByteArray): ByteArray {
+        // The file list streams back as DUML data frames (cmd 0x00/0x27) whose payload is
+        //   [10-byte sub-header][chunk]:  4A 01 .. .. <seq:u16le @6> 00 00, then the chunk bytes.
+        // byte1==0x01 marks a data chunk; the control frames (4A 04.. start / 4A 03.. end) are 10
+        // bytes of sub-header with no chunk. The chunks reassemble into the real manifest, which opens
+        // with a u32-LE file count. We must strip the sub-header before concatenating — otherwise a
+        // record whose path straddles a frame boundary gets those 10 bytes injected mid-path
+        // (e.g. "DCIM/DJI_" + "J….001/…") and silently drops from the grid. Concatenate in arrival
+        // order (not seq-sorted): on multi-page lists the seq counter restarts per page.
+        val out = java.io.ByteArrayOutputStream()
+        var i = 0
+        while (i + 13 <= raw.size) {
+            if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
+            val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+            if (len < 13 || i + len > raw.size) { i++; continue }
+            val plStart = i + 11; val plLen = len - 13
+            if (plLen > 10 && (raw[plStart].toInt() and 0xFF) == 0x4A && (raw[plStart + 1].toInt() and 0xFF) == 0x01)
+                out.write(raw, plStart + 10, plLen - 10) // drop the 10-byte sub-header, keep the chunk
+            i += len
+        }
+        val bytes = out.toByteArray()
+        // Guard: only use the reassembled stream if it carries at least as many paths as the raw blob,
+        // so a model that streams the list some other way falls back to the old whole-blob parse.
+        fun paths(b: ByteArray) = pathCountRe.findAll(String(b, Charsets.ISO_8859_1)).map { it.value }.toHashSet().size
+        return if (paths(bytes) >= paths(raw) && bytes.isNotEmpty()) bytes else raw
+    }
+
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
     private fun distinctPaths(blob: java.io.ByteArrayOutputStream): Int =
-        pathCountRe.findAll(String(blob.toByteArray(), Charsets.ISO_8859_1)).map { it.value }.toHashSet().size
+        pathCountRe.findAll(String(manifestBytes(blob.toByteArray()), Charsets.ISO_8859_1))
+            .map { it.value }.toHashSet().size
 
     /** Media naming: Osmo Nano uses DCIM/DJI_001/DJI_…; 360 & Action 5 use CAM_. Match either. */
     private fun parse(bytes: ByteArray): List<CameraFile> {

@@ -52,7 +52,19 @@ still unverified for the Nano.
   `/v2`; the `.scr` decodes as a JPEG (renders fine via `BitmapFactory`).
 - **File-list response cmd is `0x00/0x27`** (request is `0x26`). Records are delimited binary
   (protobuf-ish): a per-file KV enum block, capture timestamp, media path, proxy path, thumb path,
-  and an fps rational.
+  and an fps rational. Strings are length-prefixed (`… <type> <len:u8> DJI_<ts>_<seq>_D.MP4 …`).
+- **The `0x00/0x27` payload is fragmented with a 10-byte sub-header per frame** (found 2026-07-13,
+  after a video intermittently vanished from the grid). The manifest is too big for one DUML frame,
+  so it's chunked across ~17 `0x00/0x27` frames; **each frame's payload is `[10-byte sub-header][chunk]`**,
+  where the sub-header is `4A 01 xx xx <seq:u16-LE @6> 00 00`. `byte1 == 0x01` marks a data chunk;
+  the bracketing control frames are `4A 04…` (start) / `4A 03…` (end), 10 bytes of sub-header and no
+  chunk. Concatenating the `chunk` bytes (`payload[10:]`) **in arrival order** rebuilds the real
+  manifest, which opens with a `u32-LE` file count. **You must strip the sub-header before
+  concatenating** — otherwise any record whose path straddles a frame boundary gets those 10 bytes
+  injected mid-string (`DCIM/DJI_` + `J….001/…`), the path regex misses it, and that one file
+  silently drops. Which file drops depends on packet layout, so the loss looks random run-to-run.
+  Don't seq-sort across pages: on multi-page lists the counter restarts per page. See
+  [`manifestBytes`](../app/src/main/java/com/chernowii/osmosis/net/DatalinkClient.kt).
 - **fps IS in the record; resolution is NOT** (decoded 2026-07-10 against ffprobe ground truth
   across all 43 records). fps is a rational `num/den` (den ∈ {1000,1001}) just before the filename
   field — `25000/1000` = 25, `30000/1001` = 29.97; round to the nearest standard. Pixel dimensions
