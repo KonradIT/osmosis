@@ -254,12 +254,20 @@ password over BLE (36 KB of notifications scanned). Assume the same on Nano unti
 | dir | flags | set/id | name | payload / notes |
 |-----|-------|--------|------|-----------------|
 | →   | 0x40 | 07/44 | GetWifiApStatus | 360 returns 3 bytes ❓ |
+| →   | 0x40 | 07/07 | **GetWifiSsid** | reply `[status:1][PackString ssid]` (`00 12 "XtraEdgePro-2DCA16"`) |
+| →   | 0x40 | 07/0e | **GetWifiPassword** | reply `[status:1][PackString passphrase]` — the AP password, over BLE |
+| →   | 0x40 | 07/0c | GetWifiMac | reply `[status:1][6-byte MAC]` |
 | →   | 0x40 | 07/47 | ConnectToWiFi   | `PackString(ssid)+PackString(pass)`. On the **360 this activates the camera's own AP** (you send it its own creds). AP comes up ~15 s later. |
 | ←   | 0xC0 | 07/47 | WiFiConnectResult | `0x0000` = ok |
 | →   | 0x40 | 07/AB | ScanWiFi (client mode) | list of nearby APs — not needed for offload |
 
 SSID pattern (360) `Osmo360-XXXX` (XXXX = serial tail); Nano pattern: `OsmoNano-XXXX`.
-Password shown on camera screen under Connection settings; **not** retrievable over BLE on 360.
+**WiFi creds ARE retrievable over BLE** (found 2026-07-14 by HCI-snooping the official Xtra app):
+query `07/07` (SSID) then `07/0e` (password) after pairing — the camera returns them, no on-screen
+reading needed. **Pace the two queries** (~500 ms apart): `fff5` is write-without-response, so a
+back-to-back second query drops, and the first must not race the pairing-approval ACK. The old
+`credprobe` sweep missed these because it swept `0x40–0x5F`, not the low `07/07`/`0c`/`0e`. (The 360
+note "not retrievable over BLE" predates this — likely wrong; the getters were just never tried.)
 
 ## 5. WiFi join on Android (the clean replacement for macOS `networksetup`)
 

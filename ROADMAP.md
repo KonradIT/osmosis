@@ -64,32 +64,33 @@ survives). Long-press → re-enter password / forget. If the camera drops the BL
 gallery is open (status=19, vs. the benign handoff status=8), the session tears down and returns to
 the selector, which rescans and shows it 🚫.
 
-## 3. Retrieve the WiFi password over BLE
+## 3. Retrieve the WiFi password over BLE — ✅ DONE (2026-07-14)
 
-Today the passphrase is entered once per camera in-app (stored per-MAC, never hardcoded). Goal:
-pull it automatically over the BLE DUML channel so no manual entry is needed.
+The camera hands out its own AP SSID + passphrase over BLE once paired — no manual entry needed.
+Cracked by **HCI-snooping the official Xtra app** (`adb bugreport` → `btsnoop_hci.log`), which
+revealed a credential getter in the WiFi cmdset `0x07` that we'd missed:
 
-- **Reality check:** on the Osmo 360 and Nano the passphrase is **not** leaked by the pairing
-  flow — fresh pairing returns only `0x01` after approval, and the protocol map notes the 360
-  "never leaks the WiFi" over BLE (the password is shown on the camera screen). So this is genuine
-  research, not a known command we've skipped.
-- **Findings so far (2026-07-14) — the easy vectors are exhausted, both on the Nano AND the Xtra
-  Edge Pro / Action 5 Pro:**
-  - *During pairing*, neither camera pushes credentials — a first-time (`0x0002`) capture on the Xtra
-    showed it emitting battery/status/SD and its **serial** (`BBRXN8100`), but no SSID/passphrase.
-  - *The full `0x07` command sweep* (`credprobe`, cmds `0x40–0x5F`, empty + index args) returns
-    `passwordFound=false` on both — responses are `0xE0` (unsupported), `0x00`, status bytes, and the
-    string `"Fail"` from `0x4a`/`0x4b`. Those two are the **only** string-returning `0x07` commands, so
-    they're the one lead left — likely gated on a precondition (AP already up, an arg, or app-level
-    auth) rather than plainly returning `"Fail"`. Revisit them with the AP active.
-- **Investigate:**
-  - A dedicated credential-query DUML command (e.g. a `GetWiFi*`/SSID+password getter in the
-    WiFi cmdset `0x07`) that the official app issues **after** app-level pairing establishes trust.
-    RE the unpacked Xtra app (`reference/xtra/`) and/or capture a PCAPdroid trace of Mimo
-    auto-connecting to the camera to see if such a request/response exists.
-  - Whether newer models (Action 5/6) expose creds where older ones don't — test per model.
-  - The dormant `credprobe` intent hook was an earlier stab at this; fold in whatever the RE finds.
-- **Fallback if creds are truly never exposed:** keep the one-time in-app entry, but improve it
-  (QR-scan of the camera's on-screen connection QR, if present, decodes SSID+password directly).
+| cmd | request | response payload |
+|-----|---------|------------------|
+| `0x07/0x07` | GetWifiSsid | `[status:1][PackString ssid]` |
+| `0x07/0x0e` | **GetWifiPassword** | `[status:1][PackString passphrase]` |
+| `0x07/0x0c` | GetWifiMac  | `[status:1][6-byte MAC]` |
+
+Why the earlier `credprobe` sweep missed it: it swept `0x40–0x5F`, but the getters live at the
+**low cmdIds `0x07`/`0x0c`/`0x0e`**. The creds are never pushed unsolicited (nothing during pairing) —
+you have to query them.
+
+**Implementation** ([`onPaired`](app/src/main/java/com/chernowii/osmosis/ui/MainActivity.kt)): after
+the `0x07/0x45`/`0x46` pairing completes, query `0x07/0x07` then `0x07/0x0e`, parse the
+`[status][PackString]` replies, and feed SSID/password straight into the WiFi join (the native
+`WifiNetworkSpecifier` "join XtraEdgePro-…" dialog). **Pacing matters**: `fff5` is
+write-without-response, so the two queries must be spaced out (~500 ms) or the second drops — and the
+first must not race the pairing-approval ACK. Falls back to the saved password / one-time prompt for
+models that don't answer. The retrieved passphrase is cached per-MAC and **never logged or committed**
+(only its length is logged). Verified on the Xtra Edge Pro / Action 5 Pro: fresh camera →
+approve → creds over BLE → grid, zero manual entry.
+
+- **Untested:** whether the Nano/360 answer the same `0x07/0x07`/`0x0e` getters (they likely do — we
+  only ever swept the wrong range there too). The fallback keeps them working regardless.
 - **Note:** the R-SDK/accessory family (`Osmo-GPS-Controller-Demo`) uses a different pairing with
   numeric `verify_data` and is control-only — not a media/credential path.

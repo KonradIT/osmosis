@@ -115,13 +115,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private var currentModelId: Int? = null
     private var currentAddress: String? = null
 
-    // Credential-probe mode: after pairing, sweep 0x07 WiFi commands and search every notification
-    // for the known SSID/password, to discover whether the Nano leaks its AP creds over BLE.
-    private var credProbeMode = false
-    private var knownSsid = ""
-    private var knownPass = ""
-    private var credFound = false
-    private var credMatchCount = 0
+    // WiFi credentials over BLE: the camera hands out its own AP SSID + passphrase when asked
+    // (0x07/0x07 = SSID, 0x07/0x0e = password), learned from the official app's BLE trace. We query
+    // them right after pairing so no manual password entry is needed; a saved-password / prompt path
+    // is the fallback for models that don't answer.
+    private var credsRequested = false
 
     // Telemetry flood control: log each distinct DUML (flags/set/cmd) once, then every 25th.
     private val typeCounts = HashMap<Int, Int>()
@@ -182,14 +180,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             typeCounts.clear()
         }
 
-        // Persist WiFi creds seeded via `--es ssid/pass` so the Offload button can reuse them
-        // without the password living in source.
-        val prefs = getSharedPreferences("osmosis", MODE_PRIVATE)
-        intent?.getStringExtra("ssid")?.let { prefs.edit().putString("ssid", it).apply() }
-        intent?.getStringExtra("pass")?.let { prefs.edit().putString("pass", it).apply() }
-        knownSsid = prefs.getString("ssid", "") ?: ""
-        knownPass = prefs.getString("pass", "") ?: ""
-
         btAdapter = (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
         logLine("Osmosis $packageName started")
@@ -213,22 +203,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             val pick = intent.getStringExtra("pick")
             main.postDelayed({ startCameraScan(select = true, pick = pick) }, 500)
         }
-        // Credential probe: `--ez credprobe true` — pair, then sweep 0x07 cmds and watch for creds.
-        // `--es pick <name|brand>` auto-connects to that camera; without it, tap one in the selector.
-        if (intent?.getBooleanExtra("credprobe", false) == true) {
-            credProbeMode = true
-            logLine("CRED-PROBE mode: known ssid=\"$knownSsid\" passLen=${knownPass.length}")
-            val pick = intent.getStringExtra("pick")
-            main.postDelayed({ startCameraScan(select = true, pick = pick) }, 500)
-        }
-
         // Camera selector is the launch screen: show saved cameras, then scan to mark which are in
         // range and surface new ones (unless a test hook is already driving a scan/flow).
         rebuildCameraList()
         val hookDriving = intent?.getBooleanExtra("autoscan", false) == true ||
             intent?.getBooleanExtra("offload", false) == true ||
-            intent?.getBooleanExtra("wifi", false) == true ||
-            intent?.getBooleanExtra("credprobe", false) == true
+            intent?.getBooleanExtra("wifi", false) == true
         if (!hookDriving) startCameraScan(select = true)
     }
 
@@ -281,7 +261,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val s = OsmoScanner(adapter, this); scanner = s; s.start()
         main.postDelayed({
             s.stop()
-            if (connecting) return@postDelayed // credprobe/auto-pick already connected
+            if (connecting) return@postDelayed // auto-pick already connected
             rebuildCameraList()
             // Test-hook auto-pick (`--es pick <name|brand>`) connects without a tap.
             autoPick?.let { pk ->
@@ -362,11 +342,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         currentModelId = cam?.modelId
         currentAddress = device.address
         offloadSsid = cam?.name ?: safeName(device) ?: "camera"
-        if (savedPassFor(device.address).isEmpty()) {
-            promptPasswordFor(device.address) { connectAndOffload(device) }
-        } else {
-            connectAndOffload(device)
-        }
+        // No up-front password prompt: the camera hands us the passphrase over BLE after pairing
+        // (see onPaired). savedPassFor seeds the fallback for models that don't expose it.
+        connectAndOffload(device)
     }
 
     private fun connectAndOffload(device: BluetoothDevice) {
@@ -375,6 +353,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         offloadPass = savedPassFor(device.address)
         offloadMode = true
         offloadTriggered = false
+        credsRequested = false
         connecting = true
         setConnectProgress(3) // tap → connecting
         logLine("OFFLOAD [$currentBrand] $offloadSsid (${device.address})")
@@ -431,22 +410,37 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     // ---- WiFi manifest flow -------------------------------------------------
 
-    private fun startCredProbe() {
-        logLine("CRED-PROBE: sweeping 0x07 cmds (empty + arg payloads)...")
-        var delay = 150L
-        fun send(cmd: Int, payload: ByteArray, id: Int) {
-            main.postDelayed({
-                gattClient?.writeCommand(com.chernowii.osmosis.duml.OsmoCommands.wifiQuery(cmd, payload, id))
-            }, delay)
-            delay += 100
-        }
-        // Phase 1: empty payload across the range.
-        for (cmd in 0x40..0x5F) send(cmd, ByteArray(0), 0x8000 or cmd)
-        // Phase 2: the string-returning / getter-looking cmds with a 1-byte index argument.
-        for (cmd in intArrayOf(0x40, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x52)) {
-            for (arg in 0..4) send(cmd, byteArrayOf(arg.toByte()), 0x9000 or (cmd shl 4) or arg)
-        }
-        main.postDelayed({ logLine("CRED-PROBE: sweep done (passwordFound=$credFound)") }, delay + 600)
+    /**
+     * Paired — fetch the camera's WiFi SSID + passphrase over BLE (0x07/0x07, 0x07/0x0e) so no manual
+     * entry is needed. The replies land in [onNotification] and drive the join. If the model doesn't
+     * answer (older cameras), a fallback timer uses the saved password or prompts. Called once.
+     */
+    private fun onPaired() {
+        if (!offloadMode || credsRequested) return
+        credsRequested = true
+        logLine("Paired — requesting WiFi credentials over BLE (0x07/07 SSID, 0x07/0e password)…")
+        // Paced writes: fff5 is write-without-response, so back-to-back queries drop, and an immediate
+        // one also races the pairing-approval ACK. Space them out; the 0x07/0e reply drives the join
+        // (handled in onNotification), 0x07/07 just refreshes the SSID.
+        main.postDelayed({ gattClient?.writeCommand(com.chernowii.osmosis.duml.OsmoCommands.wifiQuery(0x07, id = 0x8007)) }, 600)
+        main.postDelayed({ gattClient?.writeCommand(com.chernowii.osmosis.duml.OsmoCommands.wifiQuery(0x0E, id = 0x800E)) }, 1100)
+        main.postDelayed({
+            if (offloadTriggered) return@postDelayed
+            val addr = currentAddress
+            when {
+                offloadPass.isNotEmpty() -> { logLine("No BLE creds — using the saved password."); maybeStartOffload() }
+                addr != null -> { logLine("No BLE creds — asking for the password."); promptPasswordFor(addr) { offloadPass = savedPassFor(addr); maybeStartOffload() } }
+            }
+        }, 4500)
+    }
+
+    /** Parse a `[status:1][PackString]` reply (0x07/0x07 SSID, 0x07/0x0e password): status byte, then
+     *  a length-prefixed string. Returns null if malformed. */
+    private fun parseStatusPackString(p: ByteArray): String? {
+        if (p.size < 2) return null
+        val len = p[1].toInt() and 0xFF
+        if (2 + len > p.size) return null
+        return String(p, 2, len, Charsets.US_ASCII)
     }
 
     private fun maybeStartOffload() {
@@ -688,16 +682,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 if (!model.verified) "  ~experimental" else "")
             main.post { rebuildCameraList() }
         }
-        // Credential-probe: auto-connect only to the `--es pick` target; otherwise wait for a tap in
-        // the selector so you choose which camera to probe.
-        val pk = autoPick
-        if (credProbeMode && !connecting && pk != null && (name ?: "").contains(pk, true)) {
-            connecting = true
-            scanner?.stop()
-            offloadSsid = name ?: addr
-            logLine("CRED-PROBE: connecting to ${name ?: addr}")
-            val gc = GattClient(this, this); gattClient = gc; gc.connect(device)
-        }
     }
 
     // ---- GattClient.Listener -----------------------------------------------
@@ -710,19 +694,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     override fun onNotification(sourceChar: java.util.UUID, raw: ByteArray, parsed: DjiMessage?) {
-        // CRED-PROBE: does any BLE message carry the AP SSID/password we already know?
-        if (credProbeMode && !credFound && (knownPass.isNotEmpty() || knownSsid.length >= 6)) {
-            val ascii = String(raw, Charsets.ISO_8859_1)
-            val hasPass = knownPass.isNotEmpty() && ascii.contains(knownPass)
-            val hasSsid = knownSsid.length >= 6 && ascii.contains(knownSsid)
-            if (hasPass || hasSsid) {
-                val where = parsed?.let { "0x%02x/%02x".format(it.cmdSet, it.cmdId) } ?: "raw"
-                logLine("*** CRED MATCH in $where pass=$hasPass ssid=$hasSsid: ${raw.toHex()}")
-                credMatchCount++
-                if (hasPass || credMatchCount >= 12) credFound = true
-            }
-        }
-
         // The camera sends some messages as REQUESTS (flags=0x40) and drops us (~6s) if we don't
         // answer. Auto-reply with a matching response (flags=0xC0, swapped target, echoed id, a
         // single 0x00 "ok" byte). This is what keeps the paired BLE session alive.
@@ -743,7 +714,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             // fresh camera pairs but never proceeds to WiFi/grid. (maybeStartOffload is idempotent.)
             if (parsed.cmdSet == 0x07 && parsed.cmdId == 0x46) {
                 logLine("PAIRING <- 0x07/46 APPROVED (req)  [${parsed.payload.toHex()}]")
-                if (credProbeMode) startCredProbe() else maybeStartOffload()
+                onPaired()
             }
             return
         }
@@ -762,14 +733,27 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                             else -> "status=0x%02x".format(status)
                         }
                         logLine("PAIRING <- 0x07/45 $meaning  [${p.toHex()}]")
-                        if (status == 0x01) { if (credProbeMode) startCredProbe() else maybeStartOffload() }
+                        if (status == 0x01) onPaired()
                     }
                 }
                 0x46 -> {
                     logLine("PAIRING <- 0x07/46 APPROVED  [${p.toHex()}]")
-                    if (credProbeMode) startCredProbe() else maybeStartOffload()
+                    onPaired()
                 }
                 0x47 -> logLine("WIFI <- 0x07/47 result  [${p.toHex()}]")
+                0x07 -> parseStatusPackString(p)?.takeIf { it.isNotEmpty() }?.let { // GetWifiSsid reply
+                    offloadSsid = it
+                    logLine("WIFI <- 0x07/07 SSID = \"$it\"")
+                }
+                0x0E -> { // GetWifiPassword reply — never log the value, only its length
+                    val pass = parseStatusPackString(p)
+                    if (!pass.isNullOrEmpty()) {
+                        offloadPass = pass
+                        currentAddress?.let { getSharedPreferences("osmosis", MODE_PRIVATE).edit().putString("pass_$it", pass).apply() }
+                        logLine("WIFI <- 0x07/0e password retrieved over BLE (${pass.length} chars)")
+                        maybeStartOffload()
+                    } else logLine("WIFI <- 0x07/0e no password in reply")
+                }
                 else -> logLine("CMD07 <- 0x07/%02x  [%s]".format(parsed.cmdId, p.toHex()))
             }
             return
