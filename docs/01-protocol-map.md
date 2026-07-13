@@ -65,6 +65,25 @@ still unverified for the Nano.
   silently drops. Which file drops depends on packet layout, so the loss looks random run-to-run.
   Don't seq-sort across pages: on multi-page lists the counter restarts per page. See
   [`manifestBytes`](../app/src/main/java/com/chernowii/osmosis/net/DatalinkClient.kt).
+- **Record layout (mapped 2026-07-13 against Nano + Xtra captures)**: the reassembled manifest is
+  `[u32-LE file count][record × count]`, **fixed-stride** records (Nano `DJI_` = 361 B/record,
+  Xtra `CAM_` = 272 B/record — the stride is constant within a device). Each record is an **enum
+  block** (holds the fps rational as `u32-LE num` + `u32-LE den` pairs, e.g. `a8 61 00 00  e8 03 00 00`
+  = 25000/1000) followed by **length-prefixed strings**. The recurring per-record signature is:
+  `… 0b "DJI"/"CAM" 00×9   8A 01 <idx>   … 12 01 00 13 00   0d <len:u8> <filename>   1a <len:u8> 00 00 00 01 <DCIM media path>   1a <len:u8> 00 00 00 02 <MISC/THM thumb path>`
+  (`0d` = filename tag, `1a` = path tag with a 4-byte discriminator: `…01` = media, `…02` = thumb;
+  an optional `LRF/LRV` proxy is a further field). **Key parsing fact: the media/thumb path fields
+  carry NO extension — only the filename field does** — so a primary-extension name token
+  (`_D.MP4`/`.JPG`, not `.LRF`) appears **exactly once per record**. That makes the filename the
+  reliable record anchor, and the leading `u32` count a checksum.
+- **Decode, don't scrape**: [`decodeManifest`](../app/src/main/java/com/chernowii/osmosis/net/DatalinkClient.kt)
+  anchors on each primary-extension filename, scopes that record's media/thumb/proxy paths and fps
+  to its own byte window (no cross-record HashMap joins, no `±220 B` fps guess), and **asserts the
+  decoded record count == the header `u32` count**. That assertion is the safety net — the dropped
+  record from the sub-header bug fails the count check and logs, instead of silently shipping a short
+  grid. It falls back to the older whole-blob regex scrape (`parseFlat`) for layouts that don't
+  validate (unknown model, or a count that includes proxy entries). Regression-locked by
+  `DatalinkManifestTest` against the real 45-record Nano and 13-record Xtra blobs.
 - **fps IS in the record; resolution is NOT** (decoded 2026-07-10 against ffprobe ground truth
   across all 43 records). fps is a rational `num/den` (den ∈ {1000,1001}) just before the filename
   field — `25000/1000` = 25, `30000/1001` = 29.97; round to the nearest standard. Pixel dimensions
