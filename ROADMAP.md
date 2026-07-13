@@ -73,6 +73,15 @@ pull it automatically over the BLE DUML channel so no manual entry is needed.
   flow — fresh pairing returns only `0x01` after approval, and the protocol map notes the 360
   "never leaks the WiFi" over BLE (the password is shown on the camera screen). So this is genuine
   research, not a known command we've skipped.
+- **Findings so far (2026-07-14) — the easy vectors are exhausted, both on the Nano AND the Xtra
+  Edge Pro / Action 5 Pro:**
+  - *During pairing*, neither camera pushes credentials — a first-time (`0x0002`) capture on the Xtra
+    showed it emitting battery/status/SD and its **serial** (`BBRXN8100`), but no SSID/passphrase.
+  - *The full `0x07` command sweep* (`credprobe`, cmds `0x40–0x5F`, empty + index args) returns
+    `passwordFound=false` on both — responses are `0xE0` (unsupported), `0x00`, status bytes, and the
+    string `"Fail"` from `0x4a`/`0x4b`. Those two are the **only** string-returning `0x07` commands, so
+    they're the one lead left — likely gated on a precondition (AP already up, an arg, or app-level
+    auth) rather than plainly returning `"Fail"`. Revisit them with the AP active.
 - **Investigate:**
   - A dedicated credential-query DUML command (e.g. a `GetWiFi*`/SSID+password getter in the
     WiFi cmdset `0x07`) that the official app issues **after** app-level pairing establishes trust.

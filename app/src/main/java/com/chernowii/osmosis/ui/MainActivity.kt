@@ -214,10 +214,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             main.postDelayed({ startCameraScan(select = true, pick = pick) }, 500)
         }
         // Credential probe: `--ez credprobe true` — pair, then sweep 0x07 cmds and watch for creds.
+        // `--es pick <name|brand>` auto-connects to that camera; without it, tap one in the selector.
         if (intent?.getBooleanExtra("credprobe", false) == true) {
             credProbeMode = true
             logLine("CRED-PROBE mode: known ssid=\"$knownSsid\" passLen=${knownPass.length}")
-            main.postDelayed({ startCameraScan(select = false) }, 500)
+            val pick = intent.getStringExtra("pick")
+            main.postDelayed({ startCameraScan(select = true, pick = pick) }, 500)
         }
 
         // Camera selector is the launch screen: show saved cameras, then scan to mark which are in
@@ -686,8 +688,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 if (!model.verified) "  ~experimental" else "")
             main.post { rebuildCameraList() }
         }
-        // Credential-probe is headless — connect to the first camera immediately.
-        if (credProbeMode && !connecting) {
+        // Credential-probe: auto-connect only to the `--es pick` target; otherwise wait for a tap in
+        // the selector so you choose which camera to probe.
+        val pk = autoPick
+        if (credProbeMode && !connecting && pk != null && (name ?: "").contains(pk, true)) {
             connecting = true
             scanner?.stop()
             offloadSsid = name ?: addr
