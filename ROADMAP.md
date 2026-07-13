@@ -94,3 +94,26 @@ approve → creds over BLE → grid, zero manual entry.
   only ever swept the wrong range there too). The fallback keeps them working regardless.
 - **Note:** the R-SDK/accessory family (`Osmo-GPS-Controller-Demo`) uses a different pairing with
   numeric `verify_data` and is control-only — not a media/credential path.
+
+## 4. Delete a specific file on the camera — 🔬 researched, one byte short (2026-07-14)
+
+Confirmed possible; the RE is ~90 % done. Delete is a DUML command in the **same file-management
+cmdset as the file list** (`0x00`, where list = `0x00/0x26`), reverse-engineered from the real
+camera SDK `libxtrasdk_jni.so` (pulled from the phone: `split_dynamic_pack_csdk.apk` →
+`assets/white-dymlibs.zip` → `libxtrasdk_jni.so`).
+
+- **Request type:** `xtra::core::delete_file_req`.
+- **Entry points** (`xtra::sdk::FileTransferManager`): `DeleteFiles` (specific files),
+  `DeleteMediaSubFiles` (a clip's main + sub/proxy together), `DeleteFilesAll` (all of a `FileType`).
+- **Transport:** `SendCompositePack<delete_file_req, MediaFile>` — batch/composite (many files per
+  op), versioned `XTRA_V1_CMD_VERSION`, takes a storage selector `pair<u8,u8>`, `MediaFile` refs, and
+  an async `FileActionResponse` callback. (The dex only has the Kotlin `MediaDeleterFactory` /
+  `Normal|Loop|ShotsMediaDeleter` → CSDK `MediaFileEx` bridge; the wire command is native.)
+- **Missing:** the exact **cmdId byte**. It's written several call-levels below `SendCompositePack`
+  in the native frame builder; `llvm-objdump` grep only surfaced struct sizes/flags
+  (`0x30/0x18/0x40/0x80`), not the cmd. Getting it needs a Ghidra trace of the frame builder, or —
+  preferably — a **live datalink capture** of the official app deleting one file (it rides the
+  WiFi/UDP datalink, not BLE, so btsnoop won't see it; try PCAPdroid per-app mode). The capture
+  doubles as the safety check.
+- **When implemented:** gate behind an explicit confirm and test on a throwaway clip first — deletes
+  are irreversible on the SD card.
