@@ -9,7 +9,7 @@
 Third-party Android client to download videos and photos from DJI Osmo action / gimbal cameras. **No DJI SDK dependencies, no logins, no bloatware, no activation.**
 
 <p align="center">
-  <img src="./screenshots/Screenshot_20260714-201612_1.png" width="300"/>
+  <img src="./screenshots/Screenshot_20260714-201612_1.png" width="500"/>
 </p>
 
 Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK or the DJI R-SDK, and should also work with the rest of the DJI Osmo lineup (see [Supported cameras](#supported-cameras)). Also tested with the **Xtra Edge Pro**, a rebadged **DJI Osmo Action 5 Pro** made by DJI front company Xtra.
@@ -18,26 +18,24 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 
 ## Features
 
-- **Zero-config pairing** — approve once on the camera screen; the app retrieves the camera's WiFi credentials over BLE, so there's no password to read off the camera or type in (with a one-time password prompt as a fallback for cameras that don't expose it).
-- **Automatic WiFi handoff** — joins the camera's access point via Android's native `WifiNetworkSpecifier` and binds only this app's traffic to it, so your phone keeps its normal internet connection.
 - **Media grid** with thumbnails, pulled straight off the camera.
 - **Low-res streaming preview** — scrub any clip without downloading it first.
-- **In-preview trimming** — set in/out points and download just that slice of the **high-res** clip. Keyframe-accurate stream copy (no re-encode), and only the window's bytes come off the camera.
+- **In-preview trimming** — set in/out points and download just that slice of the **high-res** clip. Keyframe-accurate stream copy in original quality.
 - **Resumable download queue** — high-res downloads straight into your phone's gallery.
-- **Live status** — battery, shooting mode, and storage (internal / SD) shown in a status pill.
+- **Live status** — battery, shooting mode, and storage (internal / SD) shown in a status pill. More to come (recording indicator, resolution, fps, etc...)
 - **Multi-camera** — remembers your cameras and shows which are currently in range.
 
-<img src="./screenshots/Screenshot_20260714-210742_1.png" width="300"/>
+<img src="./screenshots/Screenshot_20260714-210742_1.png" width="500"/>
 
 ## Supported cameras
 
 | Camera | Status |
 |---|---|
-| Osmo Nano | ✅ Verified on hardware |
-| Osmo Action 5 Pro / Xtra Edge Pro | ✅ Verified on hardware |
-| Osmo 360 | 🧪 Coded, untested (WPA3 AP) |
-| Osmo Pocket 3 / 4 | 🧪 Coded, untested |
-| Osmo Action 2 / 3 / 4 / 6 | 🤷 Best-effort default |
+| Osmo Nano | Verified on hardware |
+| Osmo Action 5 Pro / Xtra Edge Pro | Verified on hardware |
+| Osmo 360 | Coded, untested (WPA3 AP) |
+| Osmo Pocket 3 / 4 | Coded, untested |
+| Osmo Action 2 / 3 / 4 / 6 | Best-effort default |
 
 The datalink port and WiFi security are resolved from the camera's BLE **model byte**, not its brand — so an unrecognized DJI Osmo is *attempted*, not refused. Got one working (or broken)? [Open an issue](../../issues) so it can be listed as fully supported.
 
@@ -69,7 +67,7 @@ Contrast the official apps, which require a login and phone home to activation a
 
 1. Turn on Bluetooth and open Osmosis; grant the permission prompts.
 2. Power on the camera and tap it in the **Cameras** list.
-3. **Approve the pairing prompt on the camera screen** (it shows a short token, e.g. `OSMO`).
+3. **Approve the pairing prompt on the camera screen** (will read: `OSMO`).
 4. **Approve the Android "join WiFi" dialog** when it appears.
 5. Browse the grid. Tap a clip to preview, trim, and add it to the queue.
 6. Tap **Download** — files land in your phone's gallery.
