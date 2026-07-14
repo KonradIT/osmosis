@@ -64,7 +64,7 @@ still unverified for the Nano.
   injected mid-string (`DCIM/DJI_` + `J….001/…`), the path regex misses it, and that one file
   silently drops. Which file drops depends on packet layout, so the loss looks random run-to-run.
   Don't seq-sort across pages: on multi-page lists the counter restarts per page. See
-  [`manifestBytes`](../app/src/main/java/com/chernowii/osmosis/net/DatalinkClient.kt).
+  [`manifestBytes`](../app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt).
 - **Record layout (mapped 2026-07-13 against Nano + Xtra captures)**: the reassembled manifest is
   `[u32-LE file count][record × count]`, **fixed-stride** records (Nano `DJI_` = 361 B/record,
   Xtra `CAM_` = 272 B/record — the stride is constant within a device). Each record is an **enum
@@ -76,7 +76,7 @@ still unverified for the Nano.
   carry NO extension — only the filename field does** — so a primary-extension name token
   (`_D.MP4`/`.JPG`, not `.LRF`) appears **exactly once per record**. That makes the filename the
   reliable record anchor, and the leading `u32` count a checksum.
-- **Decode, don't scrape**: [`decodeManifest`](../app/src/main/java/com/chernowii/osmosis/net/DatalinkClient.kt)
+- **Decode, don't scrape**: [`decodeManifest`](../app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt)
   anchors on each primary-extension filename, scopes that record's media/thumb/proxy paths and fps
   to its own byte window (no cross-record HashMap joins, no `±220 B` fps guess), and **asserts the
   decoded record count == the header `u32` count**. That assertion is the safety net — the dropped

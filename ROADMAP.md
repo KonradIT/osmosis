@@ -26,15 +26,15 @@ window off the camera: `MediaExtractor.setDataSource(<full-res HTTP URL>)` →
 bytes (+ `moov`) come off the AP — no whole-file download, no MP4 surgery. Stream copy = no
 re-encode; the start snaps to the nearest keyframe ≤ the in-point (frame-accurate would need
 re-encoding, deliberately out of scope). Code:
-[MediaDownloader.downloadTrimmed](app/src/main/java/com/chernowii/osmosis/net/MediaDownloader.kt),
-[MediaPreviewActivity](app/src/main/java/com/chernowii/osmosis/ui/MediaPreviewActivity.kt).
+[MediaDownloader.downloadTrimmed](app/src/main/java/dev/konraditurbe/osmosis/net/MediaDownloader.kt),
+[MediaPreviewActivity](app/src/main/java/dev/konraditurbe/osmosis/ui/MediaPreviewActivity.kt).
 
 ## 2. Support the rest of the Osmo line — ⚙️ framework done, verification hardware-gated (2026-07-10)
 
 Built a per-model capability table
-([CameraModel](app/src/main/java/com/chernowii/osmosis/ble/CameraModel.kt)) keyed on the BLE model
+([CameraModel](app/src/main/java/dev/konraditurbe/osmosis/ble/CameraModel.kt)) keyed on the BLE model
 byte: datalink port + TCP-poke, WiFi security, and a `verified` flag. The runtime resolves it from
-the scan ([OsmoScanner](app/src/main/java/com/chernowii/osmosis/ble/OsmoScanner.kt) now passes the
+the scan ([OsmoScanner](app/src/main/java/dev/konraditurbe/osmosis/ble/OsmoScanner.kt) now passes the
 model byte up), so port/poke/WPA come from the **model, not the brand** — the Xtra resolves to
 Action 5 Pro (`0x15`) → 10004 by its model byte, exactly as a DJI-branded Action 5 would.
 Unrecognized models fall back to the common config (9004 + poke + WPA2) so **any DJI Osmo is
@@ -55,8 +55,8 @@ auto-detect, and the preview/trim/stream flow. **Remaining:** hardware/pcap veri
 Pocket 3, and the Action 3/4/6 ports.
 
 **Onboarding UI (2026-07-10):** the app now launches into a **camera selector**
-([SavedCameras](app/src/main/java/com/chernowii/osmosis/core/SavedCameras.kt),
-[CameraListAdapter](app/src/main/java/com/chernowii/osmosis/ui/CameraListAdapter.kt)) — saved
+([SavedCameras](app/src/main/java/dev/konraditurbe/osmosis/core/SavedCameras.kt),
+[CameraListAdapter](app/src/main/java/dev/konraditurbe/osmosis/ui/CameraListAdapter.kt)) — saved
 cameras first (📶 in range / 🚫 out of range, from the live BLE scan), then newly-scanned ones
 tagged **NEW**. Tapping an in-range camera connects → grid; a first-time camera prompts for the WiFi
 password once and is remembered per-MAC (with its model byte, so the Pocket 3's name-fallback
@@ -80,7 +80,7 @@ Why the earlier `credprobe` sweep missed it: it swept `0x40–0x5F`, but the get
 **low cmdIds `0x07`/`0x0c`/`0x0e`**. The creds are never pushed unsolicited (nothing during pairing) —
 you have to query them.
 
-**Implementation** ([`onPaired`](app/src/main/java/com/chernowii/osmosis/ui/MainActivity.kt)): after
+**Implementation** ([`onPaired`](app/src/main/java/dev/konraditurbe/osmosis/ui/MainActivity.kt)): after
 the `0x07/0x45`/`0x46` pairing completes, query `0x07/0x07` then `0x07/0x0e`, parse the
 `[status][PackString]` replies, and feed SSID/password straight into the WiFi join (the native
 `WifiNetworkSpecifier` "join XtraEdgePro-…" dialog). **Pacing matters**: `fff5` is

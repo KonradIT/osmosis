@@ -24,7 +24,7 @@ Consequences:
 app/
  build.gradle                 (AGP 7.4.2, no compose, jvmTarget 15)
  src/main/AndroidManifest.xml (BLE + WiFi perms)
- src/main/java/com/chernowii/osmosis/
+ src/main/java/dev/konraditurbe/osmosis/
    duml/      DjiCrc, ByteReader, ByteWriter, DjiMessage, Payloads   <- vendored + tests
    ble/       OsmoScanner, GattClient (fff0/fff4/fff5, MTU, notify), Pairing
    net/       ApJoiner (WifiNetworkSpecifier+bind), HttpClient (/v2), Udp9004Client

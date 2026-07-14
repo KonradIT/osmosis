@@ -76,7 +76,7 @@
             android:layout_height="match_parent"
             android:orientation="vertical">
 
-            <com.chernowii.osmosis.ui.StatusPillView
+            <dev.konraditurbe.osmosis.ui.StatusPillView
                 android:id="@+id/statusPill"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
