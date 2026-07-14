@@ -10,12 +10,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
-import android.widget.Button
 import android.widget.EditText
 import android.widget.GridView
 import android.widget.ListView
 import android.widget.ProgressBar
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,6 +39,7 @@ import dev.konraditurbe.osmosis.net.DatalinkClient
 import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MediaDownloader
 import dev.konraditurbe.osmosis.net.MetaLoader
+import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -53,8 +52,7 @@ import java.util.Locale
  */
 class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Listener {
 
-    private lateinit var log: TextView
-    private lateinit var scroll: ScrollView
+    @Volatile private var logWriter: java.io.Writer? = null // set when "Save logs" is on
     private lateinit var grid: GridView
     private lateinit var overallBar: ProgressBar
     private lateinit var fileBar: ProgressBar
@@ -155,8 +153,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // Keep the screen on: the WifiNetworkSpecifier consent dialog is dismissed if the display
         // sleeps, which aborts the join.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        log = findViewById(R.id.txtLog)
-        scroll = findViewById(R.id.scroll)
         grid = findViewById(R.id.grid)
         overallBar = findViewById(R.id.overallBar)
         fileBar = findViewById(R.id.fileBar)
@@ -175,9 +171,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         cameraList.setOnItemLongClickListener { _, _, pos, _ -> onCamRowLongClick(pos) }
         findViewById<View>(R.id.fabDownload).setOnClickListener { onDownloadClicked() }
         findViewById<View>(R.id.btnAll).setOnClickListener { adapter?.toggleAll() }
-        findViewById<Button>(R.id.btnClear).setOnClickListener {
-            log.text = ""
-            typeCounts.clear()
+        // "Save logs" toggle → persist all log lines to a rotating .log file in external files dir.
+        val prefs = getSharedPreferences("osmosis", MODE_PRIVATE)
+        val saveLogs = findViewById<MaterialSwitch>(R.id.switchSaveLogs)
+        saveLogs.isChecked = prefs.getBoolean("save_logs", false)
+        if (saveLogs.isChecked) startFileLogging() // set state before the listener so this isn't double-fired
+        saveLogs.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("save_logs", checked).apply()
+            if (checked) startFileLogging() else stopFileLogging()
         }
 
         btAdapter = (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
@@ -214,6 +215,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     override fun onDestroy() {
         super.onDestroy()
+        stopFileLogging()
         stopKeepalive()
         datalink?.close()
         scanner?.stop()
@@ -802,12 +804,35 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     override fun onLog(s: String) = logLine(s)
 
     private fun logLine(s: String) {
-        android.util.Log.i("Osmosis", s)
-        main.post {
-            val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-            log.append("[$ts] $s\n")
-            scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
-        }
+        android.util.Log.i("Osmosis", s) // always to logcat (adb logcat)
+        val w = logWriter ?: return       // ...and to the file only when "Save logs" is on
+        val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        synchronized(w) { runCatching { w.write("[$ts] $s\n"); w.flush() } }
+    }
+
+    /** Log dir in external files storage — pull with
+     *  `adb pull /sdcard/Android/data/$packageName/files/logs/` (or run-as on a debug build). */
+    private fun logsDir(): java.io.File = java.io.File(getExternalFilesDir(null), "logs").apply { mkdirs() }
+
+    /** Open a new timestamped .log for this session, keeping only the 5 newest files. */
+    private fun startFileLogging() {
+        if (logWriter != null) return
+        runCatching {
+            val dir = logsDir()
+            // keep the 4 newest existing, so after adding this one the total is 5 (delete the rest)
+            dir.listFiles { f -> f.isFile && f.name.endsWith(".log") }
+                ?.sortedByDescending { it.lastModified() }?.drop(4)?.forEach { it.delete() }
+            val name = "osmosis_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.log"
+            val file = java.io.File(dir, name)
+            logWriter = java.io.BufferedWriter(java.io.FileWriter(file, true))
+            logLine("=== saving logs to ${file.absolutePath} ===")
+        }.onFailure { android.util.Log.e("Osmosis", "startFileLogging failed", it) }
+    }
+
+    private fun stopFileLogging() {
+        val w = logWriter ?: return
+        logWriter = null
+        synchronized(w) { runCatching { w.flush(); w.close() } }
     }
 
     private fun short(u: java.util.UUID) = u.toString().substring(4, 8)

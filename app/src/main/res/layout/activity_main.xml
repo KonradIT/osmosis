@@ -15,14 +15,30 @@
         android:orientation="vertical"
         android:padding="14dp">
 
-        <TextView
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingVertical="4dp"
-            android:text="Cameras"
-            android:textColor="@color/osmo_ink"
-            android:textSize="22sp"
-            android:textStyle="bold" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingVertical="4dp"
+                android:text="Cameras"
+                android:textColor="@color/osmo_ink"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/switchSaveLogs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Save logs"
+                android:textColor="@color/osmo_muted"
+                android:textSize="12sp" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/selectorHint"
@@ -169,45 +185,4 @@
             app:icon="@drawable/ic_download"
             app:iconTint="@color/osmo_on_accent" />
     </FrameLayout>
-
-    <!-- ===== LOG (shared) ===== -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingStart="14dp">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Log"
-            android:textColor="@color/osmo_muted"
-            android:textSize="11sp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnClear"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Clear" />
-    </LinearLayout>
-
-    <ScrollView
-        android:id="@+id/scroll"
-        android:layout_width="match_parent"
-        android:layout_height="84dp"
-        android:background="@color/osmo_surface_dim">
-
-        <TextView
-            android:id="@+id/txtLog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:padding="6dp"
-            android:textColor="@color/osmo_muted"
-            android:textIsSelectable="true"
-            android:textSize="10sp" />
-    </ScrollView>
 </LinearLayout>
