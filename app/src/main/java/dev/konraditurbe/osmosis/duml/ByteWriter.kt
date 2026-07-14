@@ -1,6 +1,7 @@
 package dev.konraditurbe.osmosis.duml
 
-// Vendored from reference/dji-remote (com.dimadesu.djiremote.dji.ByteWriter), MIT.
+// Vendored from https://github.com/dimadesu/dji-remote (com.dimadesu.djiremote.dji.ByteWriter).
+// MIT License.
 class ByteWriter {
     private val buffer = ArrayList<Byte>()
 

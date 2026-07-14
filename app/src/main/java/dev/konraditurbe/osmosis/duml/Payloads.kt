@@ -1,6 +1,7 @@
 package dev.konraditurbe.osmosis.duml
 
-// Vendored/adapted from reference/dji-remote (com.dimadesu.djiremote.dji.DjiPayloads), MIT.
+// Vendored/adapted from https://github.com/dimadesu/dji-remote (com.dimadesu.djiremote.dji.DjiPayloads).
+// MIT License.
 
 /** DJI string field: [len:u8][utf8 bytes]. */
 fun djiPackString(value: String): ByteArray {

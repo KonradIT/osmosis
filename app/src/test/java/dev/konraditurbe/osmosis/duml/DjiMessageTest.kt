@@ -4,7 +4,8 @@ import org.junit.Test
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 
-// Vendored from reference/dji-remote, repackaged.
+// Vendored from https://github.com/dimadesu/dji-remote
+// MIT License.
 class DjiMessageTest {
     @Test
     fun encodeDecodeRoundtrip() {

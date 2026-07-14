@@ -1,6 +1,6 @@
 # Osmosis — DJI Osmo Nano protocol map (BLE + WiFi)
 
-Reverse-engineered from the five `reference/` repos (Osmo 360, Pocket 3, Action 4/5/6)
+Reverse-engineered from the five open source GitHub repos (Osmo 360, Pocket 3, Action 4/5/6)
 plus DJI's own docs, then **verified against a real Osmo Nano** (see findings below).
 Treat the 360 as the closest sibling (WPA3 AP + internal+SD storage). Items marked ❓ are
 still unverified for the Nano.
@@ -146,18 +146,6 @@ DJI firmware. Verified via the app (`reference/xtra/`, unpacked, string/dexdump 
   bytes are exactly what we needed; a direct socket has no such issue.)
 - Earlier dead ends (before the pcap): 7001 refused, 5000 = JSON RPC "Bad command", /v1 reset.
 
-## 0. The two ground-side protocols (don't confuse them)
-
-Both ride the **same GATT service `fff0`** and are demuxed by the first byte (SOF):
-
-| SOF | Protocol | Used by | Our use |
-|-----|----------|---------|---------|
-| `0x55` | **DUML** (the one you know from drones) | DJI Mimo app, all `reference/` BLE repos | ✅ this is our path |
-| `0xAA` | **R-SDK** (CRC16+CRC32, `0x00/0x19` connection-request pairing with numeric `verify_data`) | `Osmo-GPS-Controller-Demo` (RC/accessory SDK) | ❌ Nano "not supported yet", and it's control-only (no media) |
-
-We use DUML end-to-end. R-SDK is documented only so you recognize `0xAA` frames if the
-Nano emits them.
-
 ## 1. What's different from drone-side DUML
 
 You know the frame; here are the ground deltas so nothing surprises you:
@@ -204,7 +192,7 @@ osmo repos == sender App(02) → receiver WiFi(07).
 ### CRC (identical to drone DUML; two equivalent parameterizations)
 - **CRC8**: reflected, `init=0x77 poly=0x8C`  ≡ spec `init=0xEE poly=0x31 refin/refout`.
 - **CRC16**: reflected, `init=0x3692 poly=0x8408` ≡ spec `init=0x496C poly=0x1021 refin/refout`.
-- `reference/dji-remote/.../DjiCrc.kt` is a correct Kotlin impl **with unit tests** — we vendor it.
+- `https://github.com/dimadesu/dji-remote/blob/main/app/src/main/java/com/dimadesu/djiremote/dji/DjiCrc.kt` is a correct Kotlin impl **with unit tests** — we vendor it.
 
 `PackString(s)` = `[len:u8][utf8 bytes]`. Used for identifier / PIN / SSID / password.
 
@@ -319,15 +307,3 @@ UDP pkt = [8B udp hdr][12B routing hdr][DUML frame]
 ```
 osmo-download only regex-scrapes these (`CAM_\d{14}_\d{4}_D\.\w+`); the real `0x00/0x26`
 response TLV structure is undocumented — an opportunity to parse it properly.
-
-## 7. Reusable, already-correct code in `reference/`
-
-Pure-Kotlin, no Android/Compose deps → **vendor into Osmosis with attribution**:
-- `dji-remote/.../DjiCrc.kt` (+ `DjiCrcTest.kt`) — CRC8/CRC16
-- `dji-remote/.../ByteReader.kt`, `ByteWriter.kt` — LE/BE/u24 helpers
-- `dji-remote/.../DjiMessage.kt` (+ `DjiMessageTest.kt`) — DUML encode/decode
-- `dji-remote/.../DjiPayloads.kt` — `djiPackString`, pairing/wifi payload builders
-
-Python (portable logic, not code) for the UDP-9004 client + file-list scrape:
-- `osmo-download/.../file_list.py`, `duml.py`, `http_client.py`, `ble.py`.
-```

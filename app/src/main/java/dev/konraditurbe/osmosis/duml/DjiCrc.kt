@@ -1,6 +1,7 @@
 package dev.konraditurbe.osmosis.duml
 
-// Vendored from reference/dji-remote (com.dimadesu.djiremote.dji.DjiCrc), MIT.
+// Vendored from https://github.com/dimadesu/dji-remote (com.dimadesu.djiremote.dji.DjiCrc).
+// MIT License.
 // DJI DUML checksums. Same algorithm as drone-side DUML.
 object DjiCrc {
     // CRC-8: spec init=0xEE, poly=0x31, refIn=true, refOut=true.

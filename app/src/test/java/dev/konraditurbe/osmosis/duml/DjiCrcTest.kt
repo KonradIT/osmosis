@@ -3,7 +3,9 @@ package dev.konraditurbe.osmosis.duml
 import org.junit.Test
 import org.junit.Assert.*
 
-// Vendored from reference/dji-remote, repackaged. Cross-verifies our bit-by-bit CRC against
+// Vendored from https://github.com/dimadesu/dji-remote
+// MIT License.
+// Cross-verifies our bit-by-bit CRC against
 // the table-driven CRC from the osmo-download Python reference (ble.py).
 class DjiCrcTest {
 

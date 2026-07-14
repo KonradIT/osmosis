@@ -1,6 +1,7 @@
 package dev.konraditurbe.osmosis.duml
 
-// Vendored from reference/dji-remote (com.dimadesu.djiremote.dji.DjiMessage), MIT.
+// Vendored from https://github.com/dimadesu/dji-remote (com.dimadesu.djiremote.dji.DjiMessage).
+// MIT License.
 // BLE-variant DUML frame: SOF, len, ver, crc8, target(2 LE), id(2 -- see note), type(3 LE), payload, crc16(2 LE).
 //
 // NOTE on `id`: on the BLE channel this 16-bit field is a big-endian message id in the

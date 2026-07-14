@@ -1,6 +1,7 @@
 package dev.konraditurbe.osmosis.duml
 
-// Vendored from reference/dji-remote (com.dimadesu.djiremote.dji.ByteReader), MIT.
+// Vendored from https://github.com/dimadesu/dji-remote (com.dimadesu.djiremote.dji.ByteReader).
+// MIT License.
 class ByteReader(private val data: ByteArray) {
     private var pos = 0
 
