@@ -10,7 +10,6 @@ Third-party Android client to download videos and photos from DJI Osmo action / 
 
 <p align="center">
   <img src="./screenshots/Screenshot_20260714-201612_1.png" width="300"/>
-  <img src="./screenshots/Screenshot_20260714-210742_1.png" width="300"/>
 </p>
 
 Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK or the DJI R-SDK, and should also work with the rest of the DJI Osmo lineup (see [Supported cameras](#supported-cameras)). Also tested with the **Xtra Edge Pro**, a rebadged **DJI Osmo Action 5 Pro** made by DJI front company Xtra.
@@ -27,6 +26,8 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 - **Resumable download queue** — high-res downloads straight into your phone's gallery.
 - **Live status** — battery, shooting mode, and storage (internal / SD) shown in a status pill.
 - **Multi-camera** — remembers your cameras and shows which are currently in range.
+
+<img src="./screenshots/Screenshot_20260714-210742_1.png" width="300"/>
 
 ## Supported cameras
 
