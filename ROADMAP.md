@@ -117,3 +117,16 @@ camera SDK `libxtrasdk_jni.so` (pulled from the phone: `split_dynamic_pack_csdk.
   doubles as the safety check.
 - **When implemented:** gate behind an explicit confirm and test on a throwaway clip first — deletes
   are irreversible on the SD card.
+
+## 5. Osmo Nano: surface the dock's stats
+
+The Nano is a two-part device (camera unit + dock); the status pill currently shows only the camera
+unit's battery and the active store's space. Two dock-specific readouts to add:
+
+- **Dock SD card space** — the SD card lives in the dock. The camera's `0x02/0x80` storage frame
+  reports the *active* store only (internal vs SD); need to query/select the dock's SD store and show
+  its free/total alongside (or instead of) the camera-body figure.
+- **Dock battery %** — the camera unit (DUML sender `0x05`) pushes `0x0D/0x02` battery for **itself
+  only** (observed 100 % camera vs 24 % dock). The dock's battery isn't in the pushed frames, so it
+  needs a **separate query** (a second battery source / component id). Deferred earlier for exactly
+  this reason; pick the right sender/component to poll.
