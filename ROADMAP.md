@@ -111,10 +111,13 @@ camera SDK `libxtrasdk_jni.so` (pulled from the phone: `split_dynamic_pack_csdk.
   `Normal|Loop|ShotsMediaDeleter` → CSDK `MediaFileEx` bridge; the wire command is native.)
 - **Missing:** the exact **cmdId byte**. It's written several call-levels below `SendCompositePack`
   in the native frame builder; `llvm-objdump` grep only surfaced struct sizes/flags
-  (`0x30/0x18/0x40/0x80`), not the cmd. Getting it needs a Ghidra trace of the frame builder, or —
-  preferably — a **live datalink capture** of the official app deleting one file (it rides the
-  WiFi/UDP datalink, not BLE, so btsnoop won't see it; try PCAPdroid per-app mode). The capture
-  doubles as the safety check.
+  (`0x30/0x18/0x40/0x80`), not the cmd.
+- **⏸️ PARKED (2026-07-15) — both remaining paths blocked:**
+  - *Live datalink capture* of the official app: **infeasible** on this setup. The command rides the
+    WiFi/UDP datalink (not BLE), the phone is **not rooted** (no `tcpdump`), and PCAPdroid's VPN
+    conflicts with the app's `bindProcessToNetwork` (severs the camera link / can't see the bound
+    traffic). Only an over-the-air monitor-mode capture (laptop + WPA2 PSK) or root would work.
+  - *Ghidra trace* of the native frame builder for the cmdId — not yet done.
 - **When implemented:** gate behind an explicit confirm and test on a throwaway clip first — deletes
   are irreversible on the SD card.
 
@@ -135,7 +138,7 @@ unit's battery and the active store's space. Two dock-specific readouts to add:
 
 The Osmo Action (1) connects but its media list decoded empty. The **list is solved and shipped**;
 the **download is understood in outline but not confirmed on this camera**. Parked here for a clean
-resume. Diagnosis came from a user's app log + a decrypted **RTOS** log. Below, findings are split by confidence.
+resume. Diagnosis came from an app log + a decrypted **RTOS** log. Below, findings are split by confidence.
 
 ### ✅ Proven (hardware-verified and/or cross-confirmed against the camera's RTOS log)
 - **Connection is fine**: BLE pair → WiFi join → datalink handshake all succeed on the Action 1.
@@ -186,3 +189,26 @@ resume. Diagnosis came from a user's app log + a decrypted **RTOS** log. Below, 
 - Skip the `/v2` storage auto-detect for index-based cameras (it fires two failing HEADs).
 
 **Resume artifacts:** `reference/osmo-action/` (raw list blob + RTOS log).
+
+## 7. Retrieve highlight / moment markers — 🔬 RE'd to the SDK, cmd id blocked — ⏸️ PARKED (2026-07-15)
+
+DJI "highlight" marks (side-button presses during recording) are **NOT stored in the MP4** — proven
+by an exhaustive teardown of an Action 4 + Xtra clip: not in chapters/tags, not in the `dvtm` protobuf
+metadata track (per-frame telemetry only — orientation quat, ISO, shutter, WB), not in the `dbgi`
+(sensor-debug) track, not in `udta`, not as HEVC SEI. They live **on the camera** and are pulled on
+demand — confirmed because the Xtra app shows them in its *trim/editor* view (not playback).
+
+**Mechanism (RE'd from `libxtrasdk_jni.so`):**
+- KeyHandler **`PullHighLightAction`** → `SendGetPack<xtra::core::set_camera_expansion_cmd_pack>` — a
+  **generic `camera_expansion_cmd`** DUML command with **sub-type `0x4`** (from the disasm:
+  `orr w1, wzr, #0x4`). The same generic cmd serves `PullSuperSlowMotionPointAction`,
+  `PanoFusionTypeGet`, etc. — different sub-types.
+- Response `camera_expansion_cmd_rsp` → `xtra::sdk::HighLightMsg` = a list of
+  **`HighLightItem { startTimeMs, duration }`** (each mark is a time *range*, not a point). Surfaced to
+  Kotlin as `LctHighLightMsg`/`LctHighLightItem` (`getHighLightStartTimeMs`/`getHighLightDuration`).
+- **Read-only** (unlike delete) → safe to probe empirically once the cmd is known.
+
+**Missing:** the numeric **cmdset/cmdid of the generic `camera_expansion_cmd`** (buried in the pack
+serialization, same wall as #4). Blocked on the same two paths — a live datalink capture (infeasible,
+see #4) or a Ghidra trace. Parked. Resume with a capture (over-the-air/root) of the Xtra app opening a
+marked clip's trim view, or Ghidra on `SendGetPack<set_camera_expansion_cmd_pack>`.
