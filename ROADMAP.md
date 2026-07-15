@@ -164,11 +164,22 @@ Ground truth: the RTOS `FileIndexSending: 0x640251` (first) / `0x640241` (last) 
 `current video uuid:0x…` values match the decoded records exactly, in order. No path/filename
 strings at all — the name is *constructed* from the DCF dir/file (`DCIM/100MEDIA/DJI_<file>.MP4`).
 
-**To support it:**
-- Add an index-based list parser (a second path in `decodeManifest`): detect it (no DCIM path
-  strings + reassembled size == `8 + count*65`), emit records keyed on `FileIndex`.
-- Download via the older **`/v1?file_index=<idx>`** HTTP API (not `/v2?storage=&path=`). The Xtra app
-  had both endpoints; older cameras only expose the `/v1` index one. **Unverified** — needs a test on
-  the actual camera to confirm the exact URL + whether thumbnails are `/v1`-based too.
-- Fix paging for this format (single small page — the `batch==2` `0x40` offset is what triggers the
-  out-of-range error; skip it when the record format is index-based).
+**Progress:**
+- ✅ **List parser done + verified on hardware** (round 3, 2026-07-15): `decodeIndexList` detects the
+  format (no DCIM strings + size == `8 + count*recSize`) and emits records keyed on `FileIndex`; the
+  grid shows all 7 clips. Unit-test-locked (`DatalinkManifestTest`, fixture `action1_7.bin`). Also
+  fixed the collect-loop early-exit to count the index header (was running all 15 batches).
+- ❌ **Download: `/v1?file_index=` was wrong — the camera has no HTTP server.** Round-3 log: with WiFi
+  + UDP-9004 datalink both up, a TCP connect to `192.168.2.1:80` is **refused** (`ConnectException`).
+  The file *list* arrives over the datalink via **`DjiTransSrv`** (DJI Transfer Service), so older
+  cameras almost certainly transfer the file **bytes over the datalink too** (chunked DUML), not HTTP.
+  The `/v2`/`/v1` HTTP API is a newer-camera feature (Nano/Pocket 3/Action 5).
+
+**Remaining (download):**
+- Confirm there's truly no HTTP (quick port probe on `192.168.2.1` — :80/:8080/:8000 — while
+  connected), to rule out "HTTP on a non-80 port" (easy) vs "DUML transfer only" (big).
+- If DUML transfer: RE the `DjiTransSrv` file-download command (request bytes by `FileIndex` over UDP
+  9004 → chunked data frames → reassemble to the file). Same service that sent the list
+  (`DjiTransSrv_SendListFrag`); the file-data request is a sibling. Best captured from Mimo↔Action.
+- AP keepalive doesn't hold the Action's AP (`onLost` ~40 s after list) — needs a stronger/again keepalive.
+- Skip the bogus `/v2` storage auto-detect for index-based cameras (it fires two failing HEADs).
