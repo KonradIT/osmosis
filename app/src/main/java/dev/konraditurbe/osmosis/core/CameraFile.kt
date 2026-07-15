@@ -7,6 +7,7 @@ data class CameraFile(
     val storage: Int = 0,    // 0 = internal, 1 = SD
     val resLabel: String? = null, // e.g. "25fps" — fps from the DUML manifest record
     val proxyPath: String? = null, // low-res proxy clip (.LRF/.LRV) if the camera lists one
+    val fileIndex: Int? = null, // older index-based cameras (e.g. Osmo Action 1): download by index
 ) {
     val name: String get() = path.substringAfterLast('/')
     val ext: String get() = name.substringAfterLast('.', "").uppercase()
@@ -18,8 +19,14 @@ data class CameraFile(
         "${it.substring(0, 4)}-${it.substring(4, 6)}-${it.substring(6, 8)} ${it.substring(8, 10)}:${it.substring(10, 12)}"
     } ?: ""
 
-    fun urlPath(): String = "/v2?storage=$storage&path=$path"
-    fun thumbUrlPath(): String = "/v2?storage=$storage&path=$thumbPath"
+    // Older cameras (Osmo Action 1) address files by numeric index over the legacy /v1 API; newer
+    // ones use path + storage over /v2.
+    fun urlPath(): String =
+        fileIndex?.let { "/v1?file_index=$it" } ?: "/v2?storage=$storage&path=$path"
+
+    /** Thumbnail URL, or "" if none is known (index-based cameras don't expose one to us yet). */
+    fun thumbUrlPath(): String =
+        if (fileIndex != null || thumbPath.isEmpty()) "" else "/v2?storage=$storage&path=$thumbPath"
 
     /** URL of the low-res proxy for preview, or null if the camera doesn't provide one. */
     fun proxyUrlPath(): String? = proxyPath?.let { "/v2?storage=$storage&path=$it" }
