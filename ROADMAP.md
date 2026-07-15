@@ -148,11 +148,27 @@ comes back empty. Diagnosed 2026-07-15 from a user's app log + the camera's decr
   (RTOS session 2). Page 1 already delivered all 7, so it's harmless here, but the paging is wrong
   for index-based lists.
 
+**Record layout — REVERSE-ENGINEERED (2026-07-15, cross-confirmed against the RTOS log).** The
+reassembled `0x00/0x27` manifest is `[u32 count][u32 total_size]` then fixed **65-byte records**
+(here 8 + 7×65 = 463). Per record:
+
+| offset | type | field |
+|--------|------|-------|
+| `[0:4]`   | u32-LE | Unix timestamp |
+| `[8:12]`  | u32-LE | **FileIndex** (e.g. `0x640251`) — the download key |
+| `[10:14]` | 2×u16-LE | DCF dir / file number (`100` = `100MEDIA`) |
+| `[19:23]` | u32-LE | video UUID (matches the camera's Amba `DjiMovDmx` UUID) |
+| `[38:42]` | u32-LE | size-ish (~KB; a photo record reads ~0.6 MB) |
+
+Ground truth: the RTOS `FileIndexSending: 0x640251` (first) / `0x640241` (last) and all 7
+`current video uuid:0x…` values match the decoded records exactly, in order. No path/filename
+strings at all — the name is *constructed* from the DCF dir/file (`DCIM/100MEDIA/DJI_<file>.MP4`).
+
 **To support it:**
-- RE the 463-byte record layout (get a raw dump via the `onRawManifest` hook — enabled when "Save
-  logs" is on, drops `manifest_<ts>.bin` next to the logs). Decode file index, size, timestamp, UUID.
-- Add an index-based list parser (a second path in `decodeManifest`/`DatalinkClient`).
+- Add an index-based list parser (a second path in `decodeManifest`): detect it (no DCIM path
+  strings + reassembled size == `8 + count*65`), emit records keyed on `FileIndex`.
 - Download via the older **`/v1?file_index=<idx>`** HTTP API (not `/v2?storage=&path=`). The Xtra app
-  had both endpoints; older cameras only expose the `/v1` index one.
-- Fix paging for this format (single small page, or proper `FileIndex` continuation, not the `0x40`
-  offset).
+  had both endpoints; older cameras only expose the `/v1` index one. **Unverified** — needs a test on
+  the actual camera to confirm the exact URL + whether thumbnails are `/v1`-based too.
+- Fix paging for this format (single small page — the `batch==2` `0x40` offset is what triggers the
+  out-of-range error; skip it when the record format is index-based).
