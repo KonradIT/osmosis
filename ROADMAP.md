@@ -175,11 +175,25 @@ strings at all — the name is *constructed* from the DCF dir/file (`DCIM/100MED
   cameras almost certainly transfer the file **bytes over the datalink too** (chunked DUML), not HTTP.
   The `/v2`/`/v1` HTTP API is a newer-camera feature (Nano/Pocket 3/Action 5).
 
+**Download mechanism:**
+- Older cameras DO have HTTP — **`libdcam_http_server.so` = DJI's build of lighttpd/1.4.55 on `:80`**,
+  bound to `192.168.2.1`, `document-root=/mnt/media_rw/emulated`. Files are served as **plain static
+  DCF paths** (`GET /DCIM/100MEDIA/DJI_XXXX.MP4`) — **NOT** `/v1?file_index=` or `/v2?storage=&path=`
+  (those API wrappers are a newer-camera addition). So our round-3 `/v1` guess was wrong on two counts.
+- **The HTTP server is state-gated.** It's enabled by the `duss_proxy` plugin
+  (`plugins.conf`: `http_server_enable=1`, `activate_check=true`) and `dji_media_server` handles
+  "switch workmode" — so `:80` is only listening once the camera is activated and in the right
+  (playback/album) mode. That's why round-3's `:80` was **refused** (ConnectException) while the
+  datalink was up: the camera wasn't in a state where lighttpd was serving.
+- **Directory listing is disabled** (`dir-listing.activate = "disable"`) — can't `GET /DCIM/100MEDIA/`
+  for names, so the exact filename must be constructed from the index record's DCF dir/file, or the
+  real name obtained another way.
+
 **Remaining (download):**
-- Confirm there's truly no HTTP (quick port probe on `192.168.2.1` — :80/:8080/:8000 — while
-  connected), to rule out "HTTP on a non-80 port" (easy) vs "DUML transfer only" (big).
-- If DUML transfer: RE the `DjiTransSrv` file-download command (request bytes by `FileIndex` over UDP
-  9004 → chunked data frames → reassemble to the file). Same service that sent the list
-  (`DjiTransSrv_SendListFrag`); the file-data request is a sibling. Best captured from Mimo↔Action.
-- AP keepalive doesn't hold the Action's AP (`onLost` ~40 s after list) — needs a stronger/again keepalive.
+- Confirm the exact download URL + the trigger sequence from **DJI Mimo** (the app that actually pulls
+  media off the Action). Expect: send a workmode/album-mode DUML command →
+  lighttpd starts → `GET http://192.168.2.1/DCIM/<dir>/DJI_<file>.<ext>` (static).
+- Rework the index-camera download from `/v1?file_index=` to the static DCF path, once the naming +
+  trigger are confirmed. (Hold the `/v1` code until then.)
+- AP keepalive doesn't hold the Action's AP (`onLost` ~40 s after list) — needs strengthening.
 - Skip the bogus `/v2` storage auto-detect for index-based cameras (it fires two failing HEADs).
