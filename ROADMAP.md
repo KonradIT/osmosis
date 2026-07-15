@@ -131,69 +131,58 @@ unit's battery and the active store's space. Two dock-specific readouts to add:
   needs a **separate query** (a second battery source / component id). Deferred earlier for exactly
   this reason; pick the right sender/component to poll.
 
-## 6. Support the older Osmo Action generation (index-based file protocol)
+## 6. Support the older Osmo Action generation (index-based list) — ⏸️ PARKED (2026-07-15)
 
-The Osmo Action (1) connects fine (BLE pair → WiFi → datalink handshake all OK) but the media list
-comes back empty. Diagnosed 2026-07-15 from a user's app log + the camera's decrypted RTOS log:
+The Osmo Action (1) connects but its media list decoded empty. The **list is solved and shipped**;
+the **download is understood in outline but not confirmed on this camera**. Parked here for a clean
+resume. Diagnosis came from a user's app log + a decrypted **RTOS** log. Below, findings are split by confidence.
 
-- The **camera sends the list successfully** — RTOS: `DjiTransSrv_GetListInfo … FileNumToSend: 7,
-  SizeToSend: 463` then `SendList Frag Finish, FileSended: 7`. Our app receives exactly those 463 B
-  (`parsed 0 media files (463B)`, header `declared=7`).
-- **It's an older, index-based list format.** Files are addressed by a numeric **`FileIndex`**
-  (`0x640241`, `0x640251`, …), records are ~66 B, and there are **no `DCIM/DJI_…_D.MP4` path strings**
-  — so our path-anchored decoder (built for the Nano/Xtra format) finds 0 records. Predates the
-  protobuf-ish format; this is DJI's older `DjiTransSrv` file protocol.
-- **Multi-page bug for this family:** our `batch==2` request sends offset `0x40`, which the Action
-  reads as file index `0x40000001` → `GISInfo Offset out of range` → `DjiDCF_FileIdxNextGet fail`
-  (RTOS session 2). Page 1 already delivered all 7, so it's harmless here, but the paging is wrong
-  for index-based lists.
+### ✅ Proven (hardware-verified and/or cross-confirmed against the camera's RTOS log)
+- **Connection is fine**: BLE pair → WiFi join → datalink handshake all succeed on the Action 1.
+- **The camera sends the list successfully**: RTOS `FileNumToSend: 7, SizeToSend: 463` →
+  `SendList Frag Finish, FileSended: 7`; our app receives exactly those 463 B.
+- **The list is an older index-based format**: reassembled `0x00/0x27` = `[u32 count][u32 total_size]`
+  then fixed **65-byte records** (8 + 7×65 = 463), no path/filename strings. Per record:
 
-**Record layout — REVERSE-ENGINEERED (2026-07-15, cross-confirmed against the RTOS log).** The
-reassembled `0x00/0x27` manifest is `[u32 count][u32 total_size]` then fixed **65-byte records**
-(here 8 + 7×65 = 463). Per record:
+  | offset | type | field |
+  |--------|------|-------|
+  | `[0:4]`   | u32-LE   | Unix timestamp |
+  | `[8:12]`  | u32-LE   | **FileIndex** (`0x640251`…`0x640241`) |
+  | `[10:14]` | 2×u16-LE | DCF dir / file number (`100` = `100MEDIA`) |
+  | `[19:23]` | u32-LE   | video UUID (Amba `DjiMovDmx`) |
+  | `[38:42]` | u32-LE   | size-ish (~KB; a photo record reads ~0.6 MB) |
 
-| offset | type | field |
-|--------|------|-------|
-| `[0:4]`   | u32-LE | Unix timestamp |
-| `[8:12]`  | u32-LE | **FileIndex** (e.g. `0x640251`) — the download key |
-| `[10:14]` | 2×u16-LE | DCF dir / file number (`100` = `100MEDIA`) |
-| `[19:23]` | u32-LE | video UUID (matches the camera's Amba `DjiMovDmx` UUID) |
-| `[38:42]` | u32-LE | size-ish (~KB; a photo record reads ~0.6 MB) |
+  Cross-confirmed: RTOS `FileIndexSending: 0x640251`(first)/`0x640241`(last) and all 7
+  `current video uuid:0x…` match our decode exactly, in order.
+- **List parser shipped + hardware-verified** (`decodeIndexList`; round-3 grid shows all 7 clips) and
+  unit-test-locked (`DatalinkManifestTest`, fixture `action1_7.bin`). Collect-loop early-exit fixed to
+  count the index header.
+- **HTTP `:80` is refused** on the Action while WiFi + datalink are both up (round-3 `ConnectException`).
+- Paging bug: our `batch==2` `0x40` offset → RTOS `GISInfo Offset out of range` (harmless — page 1
+  already had all 7 — but wrong for index lists).
 
-Ground truth: the RTOS `FileIndexSending: 0x640251` (first) / `0x640241` (last) and all 7
-`current video uuid:0x…` values match the decoded records exactly, in order. No path/filename
-strings at all — the name is *constructed* from the DCF dir/file (`DCIM/100MEDIA/DJI_<file>.MP4`).
+### ⚠️ Inferred (NOT verified on the Action 1, which is an older/different generation)
+- Older cameras serve media over **static lighttpd/1.4.55 on `:80`** (`libdcam_http_server.so`,
+  `document-root=/mnt/media_rw/emulated`) as **plain DCF paths** (`GET /DCIM/100MEDIA/DJI_XXXX.MP4`) —
+  **not** `/v1?file_index=` or `/v2?storage=` (those are newer-camera API wrappers). Dir-listing is
+  disabled, so filenames can't be browsed.
+- The HTTP server is **state-gated**: enabled by the `duss_proxy` plugin (`http_server_enable=1`,
+  `activate_check=true`); `dji_media_server` handles `enter_playback` / "switch workmode". So `:80`
+  should only listen once the camera is **activated + in playback mode** → the likely cause of the
+  `:80` refusal.
+- ⇒ our round-3 `/v1?file_index=` download is almost certainly wrong; the real flow is probably a
+  workmode-switch DUML command → static DCF `GET`, with the filename built from the record's DCF
+  dir/file.
+- **Core open question:** is the file *transfer* actually HTTP (static, post-workmode) or DUML over the
+  datalink (`DjiTransSrv`, the same service that sent the list)? Both are plausible; unverified.
 
-**Progress:**
-- ✅ **List parser done + verified on hardware** (round 3, 2026-07-15): `decodeIndexList` detects the
-  format (no DCIM strings + size == `8 + count*recSize`) and emits records keyed on `FileIndex`; the
-  grid shows all 7 clips. Unit-test-locked (`DatalinkManifestTest`, fixture `action1_7.bin`). Also
-  fixed the collect-loop early-exit to count the index header (was running all 15 batches).
-- ❌ **Download: `/v1?file_index=` was wrong — the camera has no HTTP server.** Round-3 log: with WiFi
-  + UDP-9004 datalink both up, a TCP connect to `192.168.2.1:80` is **refused** (`ConnectException`).
-  The file *list* arrives over the datalink via **`DjiTransSrv`** (DJI Transfer Service), so older
-  cameras almost certainly transfer the file **bytes over the datalink too** (chunked DUML), not HTTP.
-  The `/v2`/`/v1` HTTP API is a newer-camera feature (Nano/Pocket 3/Action 5).
+### ⬜ Remaining (to tackle on resume)
+- **Confirm on the Action 1 itself** — the transport, the workmode/playback trigger, and the exact URL +
+  filename. Cleanest source: **DJI Mimo** (the app that does this). *Blocked* one WiFi capture of Mimo↔Action hands us the command + URL directly.
+- Deep-RE fallback: Ghidra the camera-service binaries for the `enter_playback`/workmode DUML
+  cmd.
+- Rework the index-camera download from the placeholder `/v1?file_index=` to the confirmed mechanism.
+- Fix the AP keepalive (doesn't hold the Action's AP; `onLost` ~40 s after the list).
+- Skip the `/v2` storage auto-detect for index-based cameras (it fires two failing HEADs).
 
-**Download mechanism:**
-- Older cameras DO have HTTP — **`libdcam_http_server.so` = DJI's build of lighttpd/1.4.55 on `:80`**,
-  bound to `192.168.2.1`, `document-root=/mnt/media_rw/emulated`. Files are served as **plain static
-  DCF paths** (`GET /DCIM/100MEDIA/DJI_XXXX.MP4`) — **NOT** `/v1?file_index=` or `/v2?storage=&path=`
-  (those API wrappers are a newer-camera addition). So our round-3 `/v1` guess was wrong on two counts.
-- **The HTTP server is state-gated.** It's enabled by the `duss_proxy` plugin
-  (`plugins.conf`: `http_server_enable=1`, `activate_check=true`) and `dji_media_server` handles
-  "switch workmode" — so `:80` is only listening once the camera is activated and in the right
-  (playback/album) mode. That's why round-3's `:80` was **refused** (ConnectException) while the
-  datalink was up: the camera wasn't in a state where lighttpd was serving.
-- **Directory listing is disabled** (`dir-listing.activate = "disable"`) — can't `GET /DCIM/100MEDIA/`
-  for names, so the exact filename must be constructed from the index record's DCF dir/file, or the
-  real name obtained another way.
-
-**Remaining (download):**
-- Confirm the exact download URL + the trigger sequence from **DJI Mimo** (the app that actually pulls
-  media off the Action). Expect: send a workmode/album-mode DUML command →
-  lighttpd starts → `GET http://192.168.2.1/DCIM/<dir>/DJI_<file>.<ext>` (static).
-- Rework the index-camera download from `/v1?file_index=` to the static DCF path, once the naming +
-  trigger are confirmed. (Hold the `/v1` code until then.)
-- AP keepalive doesn't hold the Action's AP (`onLost` ~40 s after list) — needs strengthening.
-- Skip the bogus `/v2` storage auto-detect for index-based cameras (it fires two failing HEADs).
+**Resume artifacts:** `reference/osmo-action/` (raw list blob + RTOS log).
