@@ -55,6 +55,10 @@ class DatalinkClient(
 
     /** Progress 0..100 through fetchFileList (handshake → registration → manifest), for a UI bar. */
     @Volatile var onFetchProgress: ((Int) -> Unit)? = null
+
+    /** Raw file-list blob (all datagrams, before reassembly/parse) — for diagnostics/RE of camera
+     *  families we don't parse yet (e.g. the older index-based Osmo Action list). Fired once per fetch. */
+    @Volatile var onRawManifest: ((ByteArray) -> Unit)? = null
     private var status = CameraStatus()
     private var lastHex80 = ""      // last 0x02/0x80 payload — recording ⇔ it keeps changing
     private var lastActive80 = 0L   // nanoTime of the last 0x02/0x80 change
@@ -136,6 +140,7 @@ class DatalinkClient(
         }
 
         val raw = blob.toByteArray()
+        onRawManifest?.invoke(raw) // diagnostics hook (dumped to a file when "Save logs" is on)
         val bytes = manifestBytes(raw) // reassemble the fragmented file-list frames (see manifestBytes)
         val files = decodeManifest(bytes)
         log("datalink: parsed ${files.size} media files (${bytes.size}B)")

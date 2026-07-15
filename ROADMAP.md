@@ -130,3 +130,29 @@ unit's battery and the active store's space. Two dock-specific readouts to add:
   only** (observed 100 % camera vs 24 % dock). The dock's battery isn't in the pushed frames, so it
   needs a **separate query** (a second battery source / component id). Deferred earlier for exactly
   this reason; pick the right sender/component to poll.
+
+## 6. Support the older Osmo Action generation (index-based file protocol)
+
+The Osmo Action (1) connects fine (BLE pair → WiFi → datalink handshake all OK) but the media list
+comes back empty. Diagnosed 2026-07-15 from a user's app log + the camera's decrypted RTOS log:
+
+- The **camera sends the list successfully** — RTOS: `DjiTransSrv_GetListInfo … FileNumToSend: 7,
+  SizeToSend: 463` then `SendList Frag Finish, FileSended: 7`. Our app receives exactly those 463 B
+  (`parsed 0 media files (463B)`, header `declared=7`).
+- **It's an older, index-based list format.** Files are addressed by a numeric **`FileIndex`**
+  (`0x640241`, `0x640251`, …), records are ~66 B, and there are **no `DCIM/DJI_…_D.MP4` path strings**
+  — so our path-anchored decoder (built for the Nano/Xtra format) finds 0 records. Predates the
+  protobuf-ish format; this is DJI's older `DjiTransSrv` file protocol.
+- **Multi-page bug for this family:** our `batch==2` request sends offset `0x40`, which the Action
+  reads as file index `0x40000001` → `GISInfo Offset out of range` → `DjiDCF_FileIdxNextGet fail`
+  (RTOS session 2). Page 1 already delivered all 7, so it's harmless here, but the paging is wrong
+  for index-based lists.
+
+**To support it:**
+- RE the 463-byte record layout (get a raw dump via the `onRawManifest` hook — enabled when "Save
+  logs" is on, drops `manifest_<ts>.bin` next to the logs). Decode file index, size, timestamp, UUID.
+- Add an index-based list parser (a second path in `decodeManifest`/`DatalinkClient`).
+- Download via the older **`/v1?file_index=<idx>`** HTTP API (not `/v2?storage=&path=`). The Xtra app
+  had both endpoints; older cameras only expose the `/v1` index one.
+- Fix paging for this format (single small page, or proper `FileIndex` continuation, not the `0x40`
+  offset).
