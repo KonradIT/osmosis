@@ -41,8 +41,7 @@ class MediaGridAdapter(
 
         val f = files[position]
         check.isChecked = selected.containsKey(position)
-        val thumbUrl = f.thumbUrlPath()
-        if (thumbUrl.isNotEmpty()) loader.load(thumbUrl, thumb) else thumb.setImageDrawable(null)
+        loader.load(f.thumbUrlPath(), thumb)
         val prefix = "%04d·%s".format(f.seq, f.ext) + if (selected[position] != null) " ✂" else ""
         meta.load(f, name, prefix)
 

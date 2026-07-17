@@ -497,7 +497,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     datalink = dl
                     dl.onStatus = { s -> main.post { onCameraStatus(s) } }
                     dl.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98 during the manifest
-                    dl.onRawManifest = { raw -> dumpRawManifest(raw) } // diagnostics (only writes when Save logs is on)
                     val files = runCatching { dl.fetchFileList("192.168.2.1") }
                         .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
                     if (files.isNotEmpty()) dl.startKeepAlive() // hold the AP up while browsing
@@ -834,19 +833,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val w = logWriter ?: return
         logWriter = null
         synchronized(w) { runCatching { w.flush(); w.close() } }
-    }
-
-    /** Diagnostics: with "Save logs" on, dump the raw file-list blob next to the logs so it can be
-     *  pulled and reverse-engineered — used for camera families we can't parse yet (e.g. the older
-     *  index-based Osmo Action list). No-op when logging is off. */
-    private fun dumpRawManifest(raw: ByteArray) {
-        if (logWriter == null) return
-        runCatching {
-            val name = "manifest_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.bin"
-            val file = java.io.File(logsDir(), name)
-            file.writeBytes(raw)
-            logLine("=== dumped raw manifest (${raw.size}B) to ${file.name} ===")
-        }.onFailure { android.util.Log.e("Osmosis", "dumpRawManifest failed", it) }
     }
 
     private fun short(u: java.util.UUID) = u.toString().substring(4, 8)

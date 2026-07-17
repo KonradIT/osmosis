@@ -55,10 +55,6 @@ class DatalinkClient(
 
     /** Progress 0..100 through fetchFileList (handshake → registration → manifest), for a UI bar. */
     @Volatile var onFetchProgress: ((Int) -> Unit)? = null
-
-    /** Raw file-list blob (all datagrams, before reassembly/parse) — for diagnostics/RE of camera
-     *  families we don't parse yet (e.g. the older index-based Osmo Action list). Fired once per fetch. */
-    @Volatile var onRawManifest: ((ByteArray) -> Unit)? = null
     private var status = CameraStatus()
     private var lastHex80 = ""      // last 0x02/0x80 payload — recording ⇔ it keeps changing
     private var lastActive80 = 0L   // nanoTime of the last 0x02/0x80 change
@@ -140,7 +136,6 @@ class DatalinkClient(
         }
 
         val raw = blob.toByteArray()
-        onRawManifest?.invoke(raw) // diagnostics hook (dumped to a file when "Save logs" is on)
         val bytes = manifestBytes(raw) // reassemble the fragmented file-list frames (see manifestBytes)
         val files = decodeManifest(bytes)
         log("datalink: parsed ${files.size} media files (${bytes.size}B)")
@@ -279,18 +274,10 @@ class DatalinkClient(
         return if (paths(bytes) >= paths(raw) && bytes.isNotEmpty()) bytes else raw
     }
 
-    /** Record count seen so far — lets the collect loop stop once the list stops growing. Counts
-     *  DCIM paths (newer format) or, if there are none, the index-based header count (older Action). */
-    private fun distinctPaths(blob: java.io.ByteArrayOutputStream): Int {
-        val bytes = manifestBytes(blob.toByteArray())
-        val paths = pathCountRe.findAll(String(bytes, Charsets.ISO_8859_1)).map { it.value }.toHashSet().size
-        if (paths > 0) return paths
-        if (bytes.size >= 8) { // index-based: [u32 count][u32 total_size == size]
-            val count = u32le(bytes, 0).toInt()
-            if (count in 1..100_000 && u32le(bytes, 4).toInt() == bytes.size) return count
-        }
-        return 0
-    }
+    /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
+    private fun distinctPaths(blob: java.io.ByteArrayOutputStream): Int =
+        pathCountRe.findAll(String(manifestBytes(blob.toByteArray()), Charsets.ISO_8859_1))
+            .map { it.value }.toHashSet().size
 
     private val primaryExts = setOf("MP4", "MOV", "JPG", "JPEG", "DNG", "OSV", "INSV", "HEIC")
     private val proxyExts = setOf("LRF", "LRV")
@@ -298,40 +285,6 @@ class DatalinkClient(
     /** Test seam: run the full raw-blob → frame-reassemble → decode pipeline on a captured manifest. */
     internal fun decodeManifestBlobForTest(rawBlob: ByteArray): List<CameraFile> =
         decodeManifest(manifestBytes(rawBlob))
-
-    /**
-     * Older index-based file list (Osmo Action 1 and kin): `[u32 count][u32 total_size]` then
-     * fixed-size records with NO path strings — files are addressed by a numeric FileIndex and
-     * downloaded via the legacy `/v1?file_index=` API. RE'd + RTOS-confirmed 2026-07-15 (ROADMAP #6):
-     * per record ts@[0:4], FileIndex@[8:12], DCF dir/file@[10:14], video UUID@[19:23]. Returns null
-     * when the bytes aren't this format, so the newer path-based decode runs instead.
-     */
-    private fun decodeIndexList(bytes: ByteArray): List<CameraFile>? {
-        if (bytes.size < 8 + 20) return null
-        val count = u32le(bytes, 0).toInt()
-        val total = u32le(bytes, 4).toInt()
-        if (count !in 1..100_000 || total != bytes.size) return null
-        val recSize = (total - 8) / count
-        if (recSize < 20 || recSize > 512 || 8 + count * recSize != total) return null
-        // This format has no DCIM path strings; if any are present it's the newer format — bail.
-        if (String(bytes, Charsets.ISO_8859_1).contains("DCIM/")) return null
-        val fmt = java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.US)
-            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
-        val out = ArrayList<CameraFile>(count)
-        for (k in 0 until count) {
-            val b = 8 + k * recSize
-            val ts = u32le(bytes, b)                    // Unix seconds
-            val fileIndex = u32le(bytes, b + 8).toInt() // /v1?file_index=<idx>
-            val dir = u16le(bytes, b + 10)              // DCF dir (100 = 100MEDIA)
-            val fnum = u16le(bytes, b + 12)             // file number
-            // Synthesize DJI_<ts>_<seq>_D.MP4 so date/sort/video-detection reuse the existing machinery;
-            // the actual download uses fileIndex, not this path. Extension unknown here → default MP4.
-            val path = "DCIM/%03dMEDIA/DJI_%s_%04d_D.MP4".format(dir, fmt.format(java.util.Date(ts * 1000)), fnum)
-            out.add(CameraFile(path = path, thumbPath = "", storage = 0, fileIndex = fileIndex))
-        }
-        log("datalink: decoded ${out.size} index-based records (legacy /v1 camera, e.g. Osmo Action)")
-        return out
-    }
 
     /**
      * Decode the reassembled manifest into one [CameraFile] per record. The manifest is a DJI TLV:
@@ -346,7 +299,6 @@ class DatalinkClient(
      * validate — an unknown model layout, or a manifest whose count includes proxy entries.
      */
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
-        decodeIndexList(bytes)?.let { return it } // older Osmo Action: index-based list (no path strings)
         val text = String(bytes, Charsets.ISO_8859_1)
         val declared = if (bytes.size >= 4) u32le(bytes, 0).toInt() else -1
         val nameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_[A-Z]\.([A-Za-z0-9]{2,4})""")
@@ -444,9 +396,6 @@ class DatalinkClient(
     private fun u32le(b: ByteArray, o: Int): Long =
         (b[o].toLong() and 0xFF) or ((b[o + 1].toLong() and 0xFF) shl 8) or
             ((b[o + 2].toLong() and 0xFF) shl 16) or ((b[o + 3].toLong() and 0xFF) shl 24)
-
-    private fun u16le(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
 
     private fun indexOf(hay: ByteArray, needle: ByteArray): Int {
         outer@ for (i in 0..hay.size - needle.size) {
