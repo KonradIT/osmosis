@@ -8,6 +8,8 @@ import org.junit.Assert.*
  *  - manifests/nano_45.bin — Osmo Nano, 45 records (44 video + 1 JPG). Includes the record whose
  *    DCIM path straddled a 0x00/0x27 frame boundary (0264_D) — the case that used to silently drop.
  *  - manifests/xtra_13.bin — Xtra Edge Pro / Action 5 Pro, 13 records (1 MP4 + 12 JPG).
+ *  - manifests/action1_7.bin — Osmo Action 1, 7 records in the older index-based format (no path
+ *    strings; files addressed by FileIndex, downloaded via /v1).
  * These lock in both the frame reassembly (10-byte 0x00/0x27 sub-header stripping) and the
  * count-validated record decode. Regenerate a fixture by dumping DatalinkClient's raw file-list blob.
  */
@@ -48,5 +50,20 @@ class DatalinkManifestTest {
         assertEquals("25fps", videos.single().resLabel)
         assertEquals(12, files.count { it.ext == "JPG" })
         assertTrue(files.filter { it.ext == "JPG" }.all { it.resLabel == null })
+    }
+
+    @Test
+    fun osmoAction1IndexListDecodesAll7() {
+        val files = decode("action1_7.bin", 9004)
+        assertEquals(7, files.size)
+        // Every record is index-based → carries a fileIndex and downloads via /v1?file_index=.
+        assertTrue(files.all { it.fileIndex != null })
+        assertTrue(files.all { it.urlPath().startsWith("/v1?file_index=") })
+        // FileIndex + descending order cross-checked against the camera's RTOS transfer log.
+        assertEquals(0x640251, files.first().fileIndex)
+        assertEquals(0x640241, files.last().fileIndex)
+        // Synthesized names carry the real date so sorting/date display work; no thumbnail URL yet.
+        assertTrue(files.first().path.startsWith("DCIM/100MEDIA/DJI_2019"))
+        assertTrue(files.all { it.thumbUrlPath().isEmpty() })
     }
 }
