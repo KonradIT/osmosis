@@ -9,3 +9,9 @@
 .externalNativeBuild
 .cxx
 /reference/
+
+# Signing — NEVER commit the keystore or its passwords
+*.jks
+*.keystore
+/keystore.properties
+app-keystore.jks
