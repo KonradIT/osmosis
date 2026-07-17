@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Landscape variant. The camera SELECTOR is identical to portrait (it already reads well wide).
+  The GALLERY hides the status pill (rotate to portrait to see it) and gives the grid the full
+  width, edge to edge. A thin top strip holds "Select all / none" on the left and the two download
+  progress bars (with their labels) on the right; the Download FAB stays bottom-right.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <!-- ===== CAMERA SELECTOR (shown on launch) — identical to portrait ===== -->
+    <LinearLayout
+        android:id="@+id/selectorGroup"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:padding="14dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingVertical="4dp"
+                android:text="Cameras"
+                android:textColor="@color/osmo_ink"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/switchSaveLogs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Save logs"
+                android:textColor="@color/osmo_muted"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/selectorHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="6dp"
+            android:textColor="@color/osmo_muted"
+            android:textSize="12sp" />
+
+        <com.google.android.material.progressindicator.LinearProgressIndicator
+            android:id="@+id/connectBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone"
+            app:indicatorColor="@color/osmo_accent"
+            app:trackColor="@color/osmo_track"
+            app:trackCornerRadius="3dp"
+            app:trackThickness="6dp" />
+
+        <ListView
+            android:id="@+id/cameraList"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:divider="@null"
+            android:dividerHeight="0dp"
+            android:scrollbarStyle="outsideOverlay" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnRescan"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Rescan"
+            app:icon="@android:drawable/ic_popup_sync" />
+    </LinearLayout>
+
+    <!-- ===== GALLERY (shown after connecting) — full-bleed grid, no pill ===== -->
+    <FrameLayout
+        android:id="@+id/gridGroup"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical">
+
+            <!-- Pill hidden in landscape (rotate to portrait to see it); kept so MainActivity's
+                 findViewById(statusPill) still resolves. -->
+            <dev.konraditurbe.osmosis.ui.StatusPillView
+                android:id="@+id/statusPill"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone" />
+
+            <!-- Thin top strip: Select all / none  +  the two progress bars -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="8dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAll"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Select all / none" />
+
+                <!-- Progress: invisible until a download runs; space reserved so the grid doesn't jump. -->
+                <LinearLayout
+                    android:id="@+id/progressArea"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:paddingVertical="4dp"
+                    android:visibility="invisible">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/overallText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginEnd="8dp"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:maxWidth="220dp"
+                            android:textColor="@color/osmo_muted"
+                            android:textSize="11sp" />
+
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                            android:id="@+id/overallBar"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            app:indicatorColor="@color/osmo_accent"
+                            app:trackColor="@color/osmo_track"
+                            app:trackCornerRadius="3dp"
+                            app:trackThickness="6dp" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/fileText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginEnd="8dp"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:maxWidth="220dp"
+                            android:textColor="@color/osmo_muted"
+                            android:textSize="11sp" />
+
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                            android:id="@+id/fileBar"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            app:indicatorColor="@color/osmo_green"
+                            app:trackColor="@color/osmo_track"
+                            app:trackCornerRadius="3dp"
+                            app:trackThickness="6dp" />
+                    </LinearLayout>
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Grid: full width, edge to edge -->
+            <GridView
+                android:id="@+id/grid"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false"
+                android:horizontalSpacing="2dp"
+                android:numColumns="6"
+                android:paddingBottom="92dp"
+                android:stretchMode="columnWidth"
+                android:verticalSpacing="2dp" />
+        </LinearLayout>
+
+        <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+            android:id="@+id/fabDownload"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="18dp"
+            android:text="Download"
+            android:textColor="@color/osmo_on_accent"
+            app:backgroundTint="@color/osmo_accent"
+            app:icon="@drawable/ic_download"
+            app:iconTint="@color/osmo_on_accent" />
+    </FrameLayout>
+</LinearLayout>
