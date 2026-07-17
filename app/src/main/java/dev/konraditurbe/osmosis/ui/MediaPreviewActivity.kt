@@ -11,9 +11,10 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.widget.Button
+import android.widget.ImageButton
 import android.widget.ImageView
-import android.widget.MediaController
 import android.widget.ProgressBar
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import android.widget.VideoView
@@ -46,6 +47,14 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var btnMarkIn: Button
     private lateinit var btnMarkOut: Button
     private lateinit var trimRow: View
+    private lateinit var controls: View
+    private lateinit var seekBar: SeekBar
+    private lateinit var txtCur: TextView
+    private lateinit var txtTotal: TextView
+    private lateinit var btnPlay: ImageButton
+    private lateinit var btnRew: ImageButton
+    private lateinit var btnFf: ImageButton
+    private var scrubbing = false
 
     private lateinit var file: CameraFile
     private var ip = "192.168.2.1"
@@ -78,6 +87,17 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnMarkIn = findViewById(R.id.btnMarkIn)
         btnMarkOut = findViewById(R.id.btnMarkOut)
         trimRow = findViewById(R.id.trimRow)
+        controls = findViewById(R.id.controls)
+        seekBar = findViewById(R.id.seekBar)
+        txtCur = findViewById(R.id.txtCur)
+        txtTotal = findViewById(R.id.txtTotal)
+        btnPlay = findViewById(R.id.btnPlay)
+        btnRew = findViewById(R.id.btnRew)
+        btnFf = findViewById(R.id.btnFf)
+
+        // Tap the media to hide/show the overlays (full-frame view).
+        videoView.setOnClickListener { toggleControls() }
+        photoView.setOnClickListener { toggleControls() }
 
         renderTop()
         btnQueue.text = queueLabel()
@@ -102,9 +122,21 @@ class MediaPreviewActivity : AppCompatActivity() {
         else -> "Add to Queue"
     }
 
-    /** Grab in/out points from the paused scrubber. Selection requires the video to be paused. */
+    /** Wire the custom player (transport + scrubber) and trim. Trim points come from the paused scrubber. */
     private fun setupTrim() {
         trimRow.visibility = View.VISIBLE
+
+        btnPlay.setOnClickListener { togglePlay() }
+        btnRew.setOnClickListener { seekBy(-5000) }
+        btnFf.setOnClickListener { seekBy(5000) }
+        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) { videoView.seekTo(progress); txtCur.text = mmss(progress.toLong()) }
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) { scrubbing = true }
+            override fun onStopTrackingTouch(sb: SeekBar) { scrubbing = false }
+        })
+
         btnMarkIn.setOnClickListener {
             if (videoView.isPlaying) { toast("Pause, then set the start point"); return@setOnClickListener }
             trimStartMs = videoView.currentPosition.toLong()
@@ -129,6 +161,42 @@ class MediaPreviewActivity : AppCompatActivity() {
     }
 
     private fun mmss(ms: Long): String { val s = ms / 1000; return "%d:%02d".format(s / 60, s % 60) }
+
+    private fun togglePlay() {
+        if (videoView.isPlaying) videoView.pause() else videoView.start()
+        updatePlayIcon()
+    }
+
+    private fun seekBy(deltaMs: Int) {
+        val dur = videoView.duration
+        val target = (videoView.currentPosition + deltaMs).coerceIn(0, if (dur > 0) dur else Int.MAX_VALUE)
+        videoView.seekTo(target)
+        seekBar.progress = target
+        txtCur.text = mmss(target.toLong())
+    }
+
+    private fun updatePlayIcon() = btnPlay.setImageResource(
+        if (videoView.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+    )
+
+    /** Tap the media to hide the title + controls for a full-frame view; tap again to bring them back. */
+    private fun toggleControls() {
+        val show = controls.visibility != View.VISIBLE
+        controls.visibility = if (show) View.VISIBLE else View.GONE
+        topInfo.visibility = if (show) View.VISIBLE else View.GONE
+    }
+
+    /** Keep the scrubber + current-time in sync while playing (skipped while the user is dragging). */
+    private val tick = object : Runnable {
+        override fun run() {
+            if (!scrubbing && !isFinishing) {
+                seekBar.progress = videoView.currentPosition
+                txtCur.text = mmss(videoView.currentPosition.toLong())
+            }
+            updatePlayIcon()
+            main.postDelayed(this, 250)
+        }
+    }
 
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 
@@ -162,12 +230,16 @@ class MediaPreviewActivity : AppCompatActivity() {
         Log.i("Osmosis", "preview stream $uri")
         videoView.visibility = VideoView.VISIBLE
         videoView.setVideoURI(uri)
-        videoView.setMediaController(MediaController(this).apply { setAnchorView(videoView) })
         videoView.setOnPreparedListener { mp ->
             Log.i("Osmosis", "preview PREPARED ${mp.videoWidth}x${mp.videoHeight}")
             mp.isLooping = true
             spinner.visibility = ProgressBar.GONE
             videoView.start()
+            seekBar.max = videoView.duration.coerceAtLeast(1)
+            txtTotal.text = mmss(videoView.duration.toLong())
+            updatePlayIcon()
+            main.removeCallbacks(tick)
+            main.post(tick)
         }
         videoView.setOnErrorListener { _, what, extra ->
             Log.i("Osmosis", "preview video ERROR what=$what extra=$extra")
@@ -239,11 +311,12 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        if (videoView.isPlaying) videoView.pause()
+        if (videoView.isPlaying) { videoView.pause(); updatePlayIcon() }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        main.removeCallbacks(tick)
         runCatching { videoView.stopPlayback() }
     }
 

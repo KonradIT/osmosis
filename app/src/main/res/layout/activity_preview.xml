@@ -1,92 +1,185 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!--
+  Full-bleed media player. The video/photo fills the whole screen; the title is a top overlay and
+  the playback + trim + queue controls are a translucent bottom overlay (custom controls, not the
+  system MediaController, so trim/transport/queue live together on the player). Tapping the media
+  toggles the overlays so the full frame is visible.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
     android:background="#000000">
 
-    <!-- Top: filename | date taken | resolution + fps -->
+    <VideoView
+        android:id="@+id/videoView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:visibility="gone" />
+
+    <ImageView
+        android:id="@+id/photoView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="preview"
+        android:scaleType="fitCenter"
+        android:visibility="gone" />
+
+    <ProgressBar
+        android:id="@+id/spinner"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:padding="16dp"
+        android:textColor="#CCCCCC"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
+    <!-- Top overlay: filename · date taken · resolution·fps -->
     <TextView
         android:id="@+id/topInfo"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#111111"
+        android:layout_gravity="top"
+        android:background="#CC111111"
+        android:ellipsize="middle"
+        android:maxLines="2"
         android:paddingHorizontal="12dp"
         android:paddingVertical="10dp"
         android:textColor="#FFFFFF"
-        android:textSize="13sp"
-        android:maxLines="2"
-        android:ellipsize="middle" />
+        android:textSize="13sp" />
 
-    <!-- Center: LRF video player OR photo, with a spinner while it loads -->
-    <FrameLayout
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1">
-
-        <VideoView
-            android:id="@+id/videoView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:layout_gravity="center"
-            android:visibility="gone" />
-
-        <ImageView
-            android:id="@+id/photoView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:scaleType="fitCenter"
-            android:contentDescription="preview"
-            android:visibility="gone" />
-
-        <ProgressBar
-            android:id="@+id/spinner"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center" />
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:padding="16dp"
-            android:textColor="#CCCCCC"
-            android:textSize="13sp"
-            android:visibility="gone" />
-    </FrameLayout>
-
-    <!-- Trim controls (videos only): grab in/out points from the paused scrubber position. -->
+    <!-- Bottom overlay: playback + trim + queue -->
     <LinearLayout
-        android:id="@+id/trimRow"
+        android:id="@+id/controls"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
+        android:layout_gravity="bottom"
+        android:background="#B3000000"
+        android:orientation="vertical"
         android:paddingHorizontal="12dp"
-        android:visibility="gone">
+        android:paddingTop="6dp"
+        android:paddingBottom="12dp">
 
-        <Button
-            android:id="@+id/btnMarkIn"
-            android:layout_width="0dp"
+        <!-- Video-only controls (scrubber + transport + trim); hidden for photos -->
+        <LinearLayout
+            android:id="@+id/trimRow"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginEnd="6dp"
-            android:text="[" />
+            android:orientation="vertical"
+            android:visibility="gone">
 
-        <Button
-            android:id="@+id/btnMarkOut"
-            android:layout_width="0dp"
+            <!-- Scrubber row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/txtCur"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="44dp"
+                    android:text="0:00"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp" />
+
+                <SeekBar
+                    android:id="@+id/seekBar"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/txtTotal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="44dp"
+                    android:gravity="end"
+                    android:text="0:00"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- Transport + trim row:  [   <<   play/pause   >>   ] -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnMarkIn"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="56dp"
+                    android:text="["
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <ImageButton
+                    android:id="@+id/btnRew"
+                    android:layout_width="52dp"
+                    android:layout_height="48dp"
+                    android:layout_marginHorizontal="4dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="rewind"
+                    android:src="@android:drawable/ic_media_rew"
+                    android:tint="#FFFFFF" />
+
+                <ImageButton
+                    android:id="@+id/btnPlay"
+                    android:layout_width="60dp"
+                    android:layout_height="48dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="play/pause"
+                    android:src="@android:drawable/ic_media_pause"
+                    android:tint="#FFFFFF" />
+
+                <ImageButton
+                    android:id="@+id/btnFf"
+                    android:layout_width="52dp"
+                    android:layout_height="48dp"
+                    android:layout_marginHorizontal="4dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="fast forward"
+                    android:src="@android:drawable/ic_media_ff"
+                    android:tint="#FFFFFF" />
+
+                <Button
+                    android:id="@+id/btnMarkOut"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="56dp"
+                    android:text="]"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnQueue"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="6dp"
-            android:text="]" />
+            android:layout_marginTop="6dp"
+            android:text="Add to Queue"
+            android:textColor="@color/osmo_on_accent"
+            app:backgroundTint="@color/osmo_accent"
+            app:icon="@drawable/ic_download"
+            app:iconGravity="textStart"
+            app:iconTint="@color/osmo_on_accent" />
     </LinearLayout>
-
-    <!-- Bottom: add/remove this item from the download queue -->
-    <Button
-        android:id="@+id/btnQueue"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_margin="12dp"
-        android:text="Add to Queue" />
-</LinearLayout>
+</FrameLayout>
