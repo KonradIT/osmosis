@@ -61,7 +61,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var position = -1
     private var queued = false
     private var resTag: String? = null // resolution, filled in async (moov for video, bounds for photo)
-    private var triedFull = false      // whether we've already fallen back from proxy to full-res
+    private var streamCandidates: List<String> = emptyList() // preview URLs, cheapest first
+    private var streamIdx = 0          // which candidate we're currently trying
     private var trimStartMs = -1L      // trim in/out points (ms), -1 = unset
     private var trimEndMs = -1L
 
@@ -215,9 +216,11 @@ class MediaPreviewActivity : AppCompatActivity() {
                 main.post { if (!isFinishing) renderTop() }
             }
         }.start()
-        // Prefer the low-res proxy the manifest actually lists (.LRF/.LRV); if the camera provides
-        // none, stream the full-res file — streaming handles any size either way.
-        startStream(file.proxyUrlPath() ?: file.urlPath())
+        // Try the low-res proxy first (listed .LRF/.LRV, or a derived .XRF sidecar the Xtra/Action 5
+        // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
+        streamCandidates = file.previewCandidates()
+        streamIdx = 0
+        startStream(streamCandidates[streamIdx])
     }
 
     /**
@@ -242,11 +245,11 @@ class MediaPreviewActivity : AppCompatActivity() {
             main.post(tick)
         }
         videoView.setOnErrorListener { _, what, extra ->
-            Log.i("Osmosis", "preview video ERROR what=$what extra=$extra")
-            if (!triedFull && path != file.urlPath()) {
-                triedFull = true
-                Log.i("Osmosis", "preview falling back to full-res stream")
-                startStream(file.urlPath())
+            Log.i("Osmosis", "preview ERROR what=$what extra=$extra (candidate ${streamIdx + 1}/${streamCandidates.size}: $path)")
+            if (streamIdx < streamCandidates.size - 1) {
+                streamIdx++
+                Log.i("Osmosis", "preview falling back to ${streamCandidates[streamIdx]}")
+                startStream(streamCandidates[streamIdx])
                 return@setOnErrorListener true
             }
             showStatus("Can't play this clip ($what/$extra)")

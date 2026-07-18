@@ -24,6 +24,36 @@ data class CameraFile(
     /** URL of the low-res proxy for preview, or null if the camera doesn't provide one. */
     fun proxyUrlPath(): String? = proxyPath?.let { "/v2?storage=$storage&path=$it" }
 
-    val isVideo: Boolean get() = ext in setOf("MP4", "MOV", "OSV", "INSV", "LRF", "LRV")
+    /**
+     * Low-res proxy extension pinned by camera family, read from the file-naming prefix (which is the
+     * family tell): the **Action family** (`CAM_` — Xtra / Action 5 Pro, and the 360) writes an
+     * **unlisted `.XRF`** sidecar; **DJI-proper** (`DJI_` — Nano) uses `.LRF`. Null for an unknown
+     * convention → no derived proxy, just stream the full-res file.
+     */
+    private fun proxyExt(): String? = when {
+        name.startsWith("CAM_") -> "XRF"
+        name.startsWith("DJI_") -> "LRF"
+        else -> null
+    }
+
+    /**
+     * Ordered URLs to try when streaming a *preview*, cheapest (smallest) first:
+     *  1. the manifest-listed proxy (the Nano/360 list their `.LRF`/`.LRV`);
+     *  2. else the **derived** sidecar proxy for this camera family — the Xtra / Action 5 Pro writes a
+     *     low-res `.XRF` next to each clip (same base name + folder) but does NOT list it in the
+     *     manifest, so we derive the path directly instead of probing several extensions;
+     *  3. the full-resolution file, as a last resort.
+     * Streaming the small proxy also dodges hardware-decoder limits (full-res 4:3 4K HEVC won't decode
+     * on weaker devices). Duplicates collapse, so this is normally just [proxy, full-res].
+     */
+    fun previewCandidates(): List<String> {
+        val urls = LinkedHashSet<String>()
+        proxyUrlPath()?.let { urls.add(it) }
+        proxyExt()?.let { urls.add("/v2?storage=$storage&path=${path.substringBeforeLast('.', path)}.$it") }
+        urls.add(urlPath())
+        return urls.toList()
+    }
+
+    val isVideo: Boolean get() = ext in setOf("MP4", "MOV", "OSV", "INSV", "LRF", "LRV", "XRF")
     val isImage: Boolean get() = ext in setOf("JPG", "JPEG", "DNG", "HEIC", "RAW")
 }
