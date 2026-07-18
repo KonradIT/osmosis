@@ -284,7 +284,7 @@ real 45-record Nano and 13-record Xtra blobs.
   (`DCIM/DJI_001/DJI_<ts>_<seq>_D.LRF` — a 960×720 MP4 with `moov` at the **end**; ~0.6 MB for ~1 s up
   to ~95–190 MB for long clips). **Read the proxy path from the manifest, don't derive it** —
   extension/availability vary by model (`.LRF` vs `.LRV`, or none).
-- **Xtra / Action 5** lists **no proxies** — preview falls back to streaming the full-res `/v2` MP4.
+- **Xtra / Action 5** lists a `.XRF` file, they swapped the L for an X, which is typical for a dji shell company to do. Same as the Osmo Nano.
 - Preview by streaming: `VideoView.setVideoURI("http://192.168.2.1/v2?…&path=<proxy-or-full>")`. Native
   `MediaPlayer` HTTP **does** honour `bindProcessToNetwork`, so it reaches the internet-less AP and
   range-fetches the `moov` off the end — any length, full scrub, zero download. Gotcha: a
@@ -304,7 +304,7 @@ real 45-record Nano and 13-record Xtra blobs.
 | HTTP API | `/v2` | `/v2` |
 | Naming | `DCIM/DJI_001/DJI_…` | `DCIM/CAM_001/CAM_…` |
 | Record stride | 361 B | 272 B |
-| Low-res proxy | `.LRF` listed | none (stream full-res) |
+| Low-res proxy | `.LRF` listed | `.XRF` listed |
 
 Shared and model-agnostic: pairing (`osmo` token), the DUML frame + CRC, the `0x00/0x26`→`0x00/0x27`
 list flow and its reassembly/decode, `/v2` HTTP, storage auto-detect, moov-derived resolution/duration,
