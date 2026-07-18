@@ -17,7 +17,7 @@ import dev.konraditurbe.osmosis.core.CameraStatus
 /**
  * Compact camera status card shown atop the gallery — ported from the Claude Design "Status Pill":
  * a white rounded card with a camera-name + battery-% header, a battery bar, then dot-labelled rows
- * for connection, mode and storage. Built in code (the app uses plain Views).
+ * for connection and storage. Built in code (the app uses plain Views).
  */
 class StatusPillView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null,
@@ -65,9 +65,6 @@ class StatusPillView @JvmOverloads constructor(
         rows.removeAllViews()
         row(GREEN, connection)
         row(storageDot(s), storageLabel(s))
-        // Recording indicator intentionally omitted: it was inferred from 0x02/0x80 packet activity
-        // (no clean flag byte), which is too flaky to display. Revisit once a real recording flag is
-        // found. CameraStatus.recording is still computed but unused here.
     }
 
     private fun storageDot(s: CameraStatus): Int {

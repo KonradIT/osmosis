@@ -50,18 +50,13 @@ class DatalinkClient(
     private lateinit var cam: InetAddress
     @Volatile private var keepAliveOn = false
 
-    /** Set to receive live camera status (battery/mode/recording/storage) parsed from status pushes. */
+    /** Set to receive live camera status (battery/storage/firmware) parsed from status pushes. */
     @Volatile var onStatus: ((CameraStatus) -> Unit)? = null
 
     /** Progress 0..100 through fetchFileList (handshake → registration → manifest), for a UI bar. */
     @Volatile var onFetchProgress: ((Int) -> Unit)? = null
     private var status = CameraStatus()
-    private var lastHex80 = ""      // last 0x02/0x80 payload — recording ⇔ it keeps changing
-    private var lastActive80 = 0L   // nanoTime of the last 0x02/0x80 change
     private var lastSig = ""        // last display signature fired to onStatus (throttles UI updates)
-    private val modeNames = mapOf(
-        0 to "Photo", 1 to "Video", 2 to "Playback", 3 to "SlowMo", 4 to "Timelapse", 5 to "Panorama",
-    )
 
     /** Handshake + register + list. Socket stays open on success. Empty list on failure. */
     fun fetchFileList(ip: String): List<CameraFile> {
@@ -146,13 +141,13 @@ class DatalinkClient(
     /**
      * Keep the datalink alive (ACK ~2×/s so the AP doesn't sleep) and, Mimo-style, poll the camera
      * for status — heartbeat 0x02/0x8E, state query 0x02/0xA0, status poll 0x02/0x61 — decoding the
-     * pushed status frames (battery/mode/recording/storage) as they arrive.
+     * pushed status frames (battery/storage/firmware) as they arrive.
      */
     fun startKeepAlive() {
         if (keepAliveOn) return
         keepAliveOn = true
         status = CameraStatus()
-        lastHex80 = ""; lastActive80 = 0L; lastSig = ""
+        lastSig = ""
         Thread {
             var tick = 0
             while (keepAliveOn) {
@@ -183,28 +178,20 @@ class DatalinkClient(
                 i += len
             }
         }
-        // Re-evaluate the recording decay even if no 0x80 arrived this pass, then fire on real change.
-        val rec = lastActive80 != 0L && System.nanoTime() - lastActive80 < 1_500_000_000L
-        if (rec != status.recording) status = status.copy(recording = rec)
         val sig = displaySig(status)
         if (sig != lastSig) { lastSig = sig; onStatus?.invoke(status) }
     }
 
     private fun displaySig(s: CameraStatus) =
-        "${s.batteryPercent}|${s.mode}|${s.recording}|${s.sdInserted}|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}"
+        "${s.batteryPercent}|${s.sdInserted}|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}"
 
     private fun applyStatusFrame(set: Int, id: Int, p: ByteArray): Boolean {
-        val hex = p.joinToString("") { "%02x".format(it) } // 0x80 recording detection diffs this
-
         when {
             set == 0x02 && id == 0x80 && p.size >= 13 -> {
-                // Recording ⇔ this frame keeps changing (no clean flag byte); decay handled in parseStatus.
-                if (hex != lastHex80) { lastHex80 = hex; lastActive80 = System.nanoTime() }
                 // Storage of the active store: total = u32-LE MiB @ byte 5, free = u32-LE MiB @ byte 9.
                 val total = u32le(p, 5).toInt()
                 val free = u32le(p, 9).toInt()
                 status = status.copy(
-                    mode = modeNames[p[0].toInt() and 0x0F] ?: "Mode${p[0].toInt() and 0x0F}",
                     storageTotalMb = if (total in 1..50_000_000) total else status.storageTotalMb,
                     storageFreeMb = if (free in 0..50_000_000) free else status.storageFreeMb,
                 ); return true
@@ -222,10 +209,6 @@ class DatalinkClient(
             set == 0x0D && id == 0x02 && p.size >= 21 -> {
                 val bp = p[20].toInt() and 0xFF
                 if (bp in 0..100) { status = status.copy(batteryPercent = bp); return true }
-            }
-            set == 0x02 && id == 0xA0 && p.size >= 8 -> {
-                status = status.copy(recordSeconds = (p[6].toInt() and 0xFF) or ((p[7].toInt() and 0xFF) shl 8))
-                return true
             }
         }
         return false
