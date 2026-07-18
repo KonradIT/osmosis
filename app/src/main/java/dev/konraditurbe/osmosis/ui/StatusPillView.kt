@@ -64,7 +64,6 @@ class StatusPillView @JvmOverloads constructor(
 
         rows.removeAllViews()
         row(GREEN, connection)
-        row(TEAL, "Mode · ${s.mode ?: "—"}")
         row(storageDot(s), storageLabel(s))
         // Recording indicator intentionally omitted: it was inferred from 0x02/0x80 packet activity
         // (no clean flag byte), which is too flaky to display. Revisit once a real recording flag is
@@ -112,7 +111,6 @@ class StatusPillView @JvmOverloads constructor(
         private const val GREEN = 0xFF52B788.toInt()
         private const val ORANGE = 0xFFE0A83E.toInt()
         private const val RED = 0xFFE05A4E.toInt()
-        private const val TEAL = 0xFF00838F.toInt()
         private const val GRAY = 0xFFD8D2C8.toInt()
         private const val TRACK = 0xFFE2DCD2.toInt()
     }
