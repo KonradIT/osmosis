@@ -36,6 +36,20 @@
                 android:textSize="22sp"
                 android:textStyle="bold" />
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnGps"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:checkable="true"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:text="🛰️"
+                android:textSize="15sp"
+                app:icon="@null" />
+
             <com.google.android.material.materialswitch.MaterialSwitch
                 android:id="@+id/switchSaveLogs"
                 android:layout_width="wrap_content"

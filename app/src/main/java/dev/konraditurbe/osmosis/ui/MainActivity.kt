@@ -39,7 +39,9 @@ import dev.konraditurbe.osmosis.net.DatalinkClient
 import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MediaDownloader
 import dev.konraditurbe.osmosis.net.MetaLoader
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.materialswitch.MaterialSwitch
+import dev.konraditurbe.osmosis.rsdk.GpsService
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -66,6 +68,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private lateinit var connectBar: LinearProgressIndicator
     private lateinit var savedCameras: SavedCameras
     private lateinit var statusPill: StatusPillView
+    private lateinit var btnGps: MaterialButton
+    private var pendingGpsTarget: Pair<String, String>? = null // (mac, name) awaiting location perms
     private var camRows: List<CamRow> = emptyList()
     private var currentStatus = CameraStatus()
     private val main = Handler(Looper.getMainLooper())
@@ -180,6 +184,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             prefs.edit().putBoolean("save_logs", checked).apply()
             if (checked) startFileLogging() else stopFileLogging()
         }
+
+        // 🛰️ GPS-sync mode (R-SDK): when on, picking a camera starts the GPS foreground service
+        // instead of the usual WiFi offload. Default off.
+        btnGps = findViewById(R.id.btnGps)
+        btnGps.isChecked = prefs.getBoolean("gps_mode", false)
+        btnGps.addOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("gps_mode", checked).apply() }
 
         btAdapter = (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
@@ -299,9 +309,30 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     private fun onCamRowClick(pos: Int) {
         val r = camRows.getOrNull(pos) ?: return
+        // 🛰️ GPS-sync mode: connect over R-SDK (BLE only, no WiFi) via the foreground service.
+        if (btnGps.isChecked) {
+            if (r.device != null || r.saved) startGpsMode(r.mac, r.name ?: r.mac)
+            else Toast.makeText(this, "${r.name ?: r.mac} isn't in range — turn it on, then Rescan", Toast.LENGTH_SHORT).show()
+            return
+        }
         val dev = r.device
         if (dev != null) onCameraChosen(dev)
         else Toast.makeText(this, "${r.name ?: r.mac} isn't in range — turn it on, then Rescan", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Start the R-SDK GPS-sync foreground service for [mac], requesting location/notification perms first. */
+    private fun startGpsMode(mac: String, name: String) {
+        val need = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.POST_NOTIFICATIONS)
+        val missing = need.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            pendingGpsTarget = mac to name
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQ_GPS_PERMS)
+            return
+        }
+        logLine("GPS sync: connecting R-SDK to $name ($mac)")
+        GpsService.start(this, mac, name)
+        Toast.makeText(this, "GPS sync starting for $name — approve on the camera if it prompts", Toast.LENGTH_LONG).show()
     }
 
     private fun onCamRowLongClick(pos: Int): Boolean {
@@ -402,6 +433,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_GPS_PERMS) {
+            val target = pendingGpsTarget; pendingGpsTarget = null
+            if (target != null && grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                startGpsMode(target.first, target.second)
+            } else logLine("GPS sync: location permission denied.")
+            return
+        }
         if (requestCode != REQ_PERMS) return
         if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             startCameraScan(select = true)
@@ -839,6 +877,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     companion object {
         private const val REQ_PERMS = 1001
+        private const val REQ_GPS_PERMS = 1002
     }
 }
 
