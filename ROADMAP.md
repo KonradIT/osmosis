@@ -212,3 +212,47 @@ demand — confirmed because the Xtra app shows them in its *trim/editor* view (
 serialization, same wall as #4). Blocked on the same two paths — a live datalink capture (infeasible,
 see #4) or a Ghidra trace. Parked. Resume with a capture (over-the-air/root) of the Xtra app opening a
 marked clip's trim view, or Ghidra on `SendGetPack<set_camera_expansion_cmd_pack>`.
+
+## 8. Camera control + live settings (mode / resolution / fps, shutter) — 🔬 building blocks known, unimplemented
+
+Turn Osmosis from a pure offloader into a light remote: **read** the camera's current shooting mode
+(video / photo / timelapse), resolution and frame rate, and **control** it — start/stop recording, take a
+photo, switch mode. Two halves:
+
+- **Read (status/settings).** We already subscribe to the camera-capability params over the datalink
+  (`camcap_mode_profile`, `camcap_video_format`, `camcap_fov`, `camcap_iso`, `cam_status`, … — see the
+  subscribe list in [`DatalinkClient`](app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt)),
+  and the `0x02/0x80` push carries live status. What's missing is the **exact field decode**: which bytes
+  give the current mode / resolution / frame rate. (The old `mode` guess — low nibble of `0x02/0x80`
+  byte 0 — was wrong and was removed; the real values live in the `camcap_*` params or a different offset,
+  and need mapping against ground truth: change mode/res/fps on the camera and diff the frames.)
+- **Write (control).** The command ids are known from the open-source RE
+  (`reference/osmo-download/src/osmo_download/duml.py`, camera cmdset
+  `0x02`): take-photo `0x02/0x01`, start-record `0x02/0x20`, stop-record `0x02/0x21`, set-mode `0x02/0x02`.
+  But they're firmware-analysis-derived and **unverified on the Nano/Xtra**, and the payloads (mode enum,
+  resolution/fps selector) aren't mapped. Sent over the same UDP datalink we use for the file list.
+
+**Remaining:** map the status fields against on-device ground truth; verify the `0x02` control commands on
+hardware (real-world side-effecting — test on a throwaway state); add a minimal control UI. Reference:
+`reference/osmo-download` (cmd ids) + `reference/Osmo-GPS-Controller-Demo` (`docs/protocol_data_segment.md`,
+camera control).
+
+## 9. R-SDK GPS push — optional Android background service — 🔬 reference impl exists, not ported
+
+Push the phone's GPS into the camera so clips are geotagged and can show the speed/route overlays, mirroring
+DJI's own **Osmo-GPS-Controller-Demo** (`reference/Osmo-GPS-Controller-Demo`) — an ESP32 R-SDK controller
+that does exactly this (shooting/record control, mode switch, **GPS push**).
+
+**What it takes:**
+- The R-SDK / accessory path uses a **different pairing than ours** — a numeric `verify_data` handshake
+  (control-only, not the media/credential `0x07/0x45` "osmo" pairing). That association has to be
+  implemented first. It's the **same prerequisite the BLE broadcast-wake needs** — the camera only honors an
+  accessory it R-SDK-paired with, which is why our media-path "WKP" wake broadcast was ignored and reverted.
+- Then push GPS frames periodically (lat/lon/alt/speed/heading/time) from Android's `FusedLocationProvider`,
+  per the demo's `docs/protocol_data_segment.md` (GPS push).
+- Ship it as an **optional foreground service** (Android requires a foreground service + notification for
+  continuous background location) that holds the R-SDK BLE link and streams location while recording.
+
+**Remaining:** RE + implement the R-SDK `verify_data` pairing; port the GPS-push frame; wrap it in a
+foreground service with a FusedLocation feed and a user toggle. The reference behavior is proven on the demo
+(documented for the Action 5 Pro / Xtra + Action 4); none of it is ported to Android yet.
