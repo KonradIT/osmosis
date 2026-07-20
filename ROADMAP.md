@@ -237,11 +237,11 @@ photo, switch mode. Two halves:
   give the current mode / resolution / frame rate. (The old `mode` guess — low nibble of `0x02/0x80`
   byte 0 — was wrong and was removed; the real values live in the `camcap_*` params or a different offset,
   and need mapping against ground truth: change mode/res/fps on the camera and diff the frames.)
-- **Write (control).** The command ids are known from the open-source RE
-  (`reference/osmo-download/src/osmo_download/duml.py`, camera cmdset
-  `0x02`): take-photo `0x02/0x01`, start-record `0x02/0x20`, stop-record `0x02/0x21`, set-mode `0x02/0x02`.
-  But they're firmware-analysis-derived and **unverified on the Nano/Xtra**, and the payloads (mode enum,
-  resolution/fps selector) aren't mapped. Sent over the same UDP datalink we use for the file list.
+- **Write (control).** The command ids are known (camera cmdset `0x02`): take-photo `0x02/0x01`,
+  start-record `0x02/0x20`, stop-record `0x02/0x21`, set-mode `0x02/0x02` — now documented with wire
+  examples in [MEDIA_PROTOCOL.md](MEDIA_PROTOCOL.md#camera-control) (from the Pocket 3 + osmo-download
+  repos). But they're firmware-/reference-derived and **unverified on the Nano/Xtra**, and the payloads
+  (mode enum, resolution/fps selector) aren't mapped. Sent over the same UDP datalink as the file list.
 
 **Remaining:** map the status fields against on-device ground truth; verify the `0x02` control commands on
 hardware (real-world side-effecting — test on a throwaway state); add a minimal control UI. Reference:
