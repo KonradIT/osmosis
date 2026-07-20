@@ -2,7 +2,8 @@
 
 Every DUML command we use / know for browsing, fetching, and controlling media on DJI Osmo cameras
 (WiFi UDP datalink + BLE control). From our app (`duml/`, `net/DatalinkClient`) and the reference repos
-(`reference/osmo-download`, `reference/DJI-Wifi-Connect/pocket3`). Each **DUML example** is a full, valid
+[osmo-download](https://github.com/SemiConscious/osmo-download) and
+[DJI-Wifi-Connect/pocket3](https://github.com/sniffingpickles/DJI-Wifi-Connect/tree/main/pocket3). Each **DUML example** is a full, valid
 frame (correct CRC8+CRC16) — paste it into <https://b3yond.d3vl.com/duml/> and it decodes.
 
 Transports: **BLE** = write GATT `fff5`, notify `fff4` (frame `[6:8]` msg-id is **big-endian**).
@@ -92,7 +93,7 @@ fps is present; **resolution / size / duration are not** — read those from the
 
 ## Camera control
 
-From `reference/DJI-Wifi-Connect/pocket3` + `reference/osmo-download`. Cmd Set `0x02`, App → Camera(`0x01`,
+From [DJI-Wifi-Connect/pocket3](https://github.com/sniffingpickles/DJI-Wifi-Connect/tree/main/pocket3) + [osmo-download](https://github.com/SemiConscious/osmo-download). Cmd Set `0x02`, App → Camera(`0x01`,
 id 0), over the datalink. **Derived from the DJI protocol standard — cmdIds solid, payloads may need
 per-model adjustment; not yet verified on our Nano/Xtra.**
 
