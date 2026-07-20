@@ -20,9 +20,39 @@ Gimbal `0x03`, WiFi `0x07`, DM368 `0x08`.
 - Dir / transport: App → Camera(`0x01`), datalink
 - Payload (page 1): `4a002a10 01000000 0000 01000000 2d00 0d0100 ffffffffffffffff 0001000000000000 000000`
 - Paging: page 2 `4a040e10 01000000 0000 01000000` · page 3 `4a002a10 02000000 0000 01000040 2d00 …`
-- Response: chunked `0x00/0x27` frames, each payload = `[10B sub-header 4A 01 xx xx <seq:u16LE@6> 00 00][chunk]`. **Strip the sub-header, concat chunks in order** → `[u32-LE count][records]`.
+- Response: chunked `0x00/0x27` frames, each payload = `[10B sub-header 4A 01 xx xx <seq:u16LE@6> 00 00][chunk]`. **Strip the sub-header, concat chunks in arrival order** → the manifest.
 - DUML example: <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000010000002d000d0100ffffffffffffffff0001000000000000000000000000008185>
-- Quirks: **Nano** = `DJI_` names, fixed 361 B/record. **Xtra / Action 5 Pro** = `CAM_`, 272 B/record. **Older Osmo Action (1/2/3)** = an *index* format: `[u32 count][u32 total_size]` + fixed 65 B records, **no path strings** (files keyed by numeric `FileIndex`). Paths carry no extension — only the filename field does.
+
+**Parsed — path-based** (Nano `DJI_` 361 B / Xtra `CAM_` 272 B, fixed stride): `[u32-LE count][record × count]`. Each record = an enum block (holds the fps rational) + length-prefixed strings. Anchor on the filename — the only field with an extension:
+
+```
+… 0b "DJI"/"CAM" 00×9   8A 01 <idx>   … <fps> … 12 01 00 13 00
+  0d <len:u8> <filename>              # DJI_20260329115359_0211_D.MP4  (has the extension)
+  1a <len:u8> 00 00 00 01 <media>     # DCIM/DJI_001/DJI_…_D           (NO extension)
+  1a <len:u8> 00 00 00 02 <thumb>     # MISC/THM/DJI_001/DJI_…_D
+  1a <len:u8> …                       # optional .LRF/.LRV proxy (Nano)
+```
+
+| token | field |
+|-------|-------|
+| `0b "DJI"/"CAM" 00×9` | record start |
+| `8A 01 <idx>` | record index |
+| `<u32-LE num><u32-LE den>` | fps rational, e.g. `a861 0000 e803 0000` = 25000/1000 = **25 fps** |
+| `0d <len> <name>` | filename (only field carrying the extension → record anchor) |
+| `1a <len> 00000001 <path>` | DCIM media path (no ext) |
+| `1a <len> 00000002 <path>` | MISC/THM thumb path |
+
+fps is present; **resolution / size / duration are not** — read those from the MP4 `moov` + HTTP `HEAD`.
+
+**Parsed — index-based** (older Osmo Action 1/2/3): header `[u32-LE count][u32-LE total_size]`, then fixed **65 B** records, **no path strings** (files keyed by numeric `FileIndex`):
+
+| offset | type | field |
+|--------|------|-------|
+| `[0:4]`   | u32-LE   | Unix timestamp |
+| `[8:12]`  | u32-LE   | **FileIndex** (`0x640251`…`0x640241`) |
+| `[10:14]` | 2×u16-LE | DCF dir / file number (`100` = `100MEDIA`) |
+| `[19:23]` | u32-LE   | video UUID (Amba `DjiMovDmx`) |
+| `[38:42]` | u32-LE   | size-ish (~KB; a photo record reads ~0.6 MB) |
 
 ---
 
