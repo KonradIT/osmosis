@@ -5,8 +5,10 @@ import dev.konraditurbe.osmosis.core.CameraFile
 import java.util.concurrent.Executors
 
 /**
- * Lazily fetches a file's size (Content-Length) and, for videos, duration (mvhd), then appends
- * them to a grid cell's label. Recycling-safe via the label tag; results are cached.
+ * Fills in a grid cell's size + (for videos) duration label. **Size** comes straight from the DUML
+ * manifest ([CameraFile.sizeBytes], record +38) with no network round-trip; only files the manifest
+ * didn't size (photos, unknown layouts) fall back to an HTTP HEAD. Duration still needs the MP4
+ * `mvhd`. Recycling-safe via the label tag; results are cached.
  */
 class MetaLoader(private val http: HttpClient) {
     private val exec = Executors.newFixedThreadPool(3)
@@ -20,7 +22,8 @@ class MetaLoader(private val http: HttpClient) {
         label.text = prefix
         label.tag = file.path
         exec.submit {
-            val size = http.head(file.urlPath())
+            // Size from the manifest (no probe) when we have it; else HTTP HEAD (photos / unknown layouts).
+            val size = if (file.sizeBytes > 0) file.sizeBytes else http.head(file.urlPath())
             val dur = if (file.isVideo) VideoMeta.durationMs(http, file) else -1
             val meta = buildString {
                 if (dur > 0) append(fmtDur(dur))

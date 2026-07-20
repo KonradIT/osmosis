@@ -50,6 +50,10 @@ class DatalinkClient(
     private lateinit var cam: InetAddress
     @Volatile private var keepAliveOn = false
 
+    // Extra DUML ops (e.g. delete) posted from other threads run here, drained on the keep-alive
+    // thread so the single DatagramSocket always has exactly one reader/writer.
+    private val pending = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+
     /** Set to receive live camera status (battery/storage/firmware) parsed from status pushes. */
     @Volatile var onStatus: ((CameraStatus) -> Unit)? = null
 
@@ -152,6 +156,7 @@ class DatalinkClient(
             var tick = 0
             while (keepAliveOn) {
                 runCatching {
+                    while (true) { (pending.poll() ?: break).run() } // run queued ops (e.g. delete) here
                     parseStatus(recvAll(200))
                     sendAck()
                     sendDuml(0x02, 0x8E, hex("00011400"), receiverType = 0x01, receiverId = 0)
@@ -212,6 +217,64 @@ class DatalinkClient(
             }
         }
         return false
+    }
+
+    /**
+     * Delete files by their manifest [handles] (DUML **0x00/0x28** — the file-management cmdset, same
+     * one the list `0x00/0x26` lives in; reverse-engineered from a Mimo↔Nano pcap). Runs on the
+     * keep-alive thread (the single socket owner) and blocks the caller up to ~4 s for the camera's
+     * reply. Returns the reply status word (**0x0000 = OK**), or null on timeout / no live session.
+     *
+     * The wire payload mirrors the captured frame exactly: `[count:u8][handle:u32-LE …][count:u32-LE]
+     * 00 [count:u32-LE] 01 01 00 00`. **Irreversible on the SD card** — the caller must confirm intent
+     * and pass only handles it means to destroy. See ROADMAP #4.
+     */
+    fun deleteFiles(handles: List<Long>): Int? {
+        if (handles.isEmpty() || !keepAliveOn) return null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val out = java.util.concurrent.atomic.AtomicInteger(-1)
+        pending.add(Runnable { out.set(sendDeleteAwait(handles)); latch.countDown() })
+        val done = latch.await(4, java.util.concurrent.TimeUnit.SECONDS)
+        return if (done && out.get() >= 0) out.get() else null
+    }
+
+    private fun sendDeleteAwait(handles: List<Long>): Int {
+        val b = java.io.ByteArrayOutputStream()
+        b.write(handles.size and 0xFF)               // count : u8
+        for (h in handles) b.write(le32(h.toInt()))  // handles : u32-LE each
+        b.write(le32(handles.size))                  // count : u32-LE
+        b.write(0x00)                                // (trailer byte, verbatim from the capture)
+        b.write(le32(handles.size))                  // count : u32-LE (composite outer count)
+        b.write(byteArrayOf(0x01, 0x01, 0x00, 0x00)) // trailer flags (storage/selector, verbatim)
+        val payload = b.toByteArray()
+        log("datalink: DELETE 0x00/0x28 n=${handles.size} payload=${payload.joinToString("") { "%02x".format(it) }}")
+        sendDuml(0x00, 0x28, payload, receiverType = 0x01, receiverId = 0)
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (System.nanoTime() < deadline) {
+            for (d in recvAll(200)) findRespStatus(d, 0x00, 0x28)?.let { return it }
+            sendAck()
+        }
+        return -1
+    }
+
+    /** Scan a datagram for a DUML response frame with [set]/[id] and return its leading status word. */
+    private fun findRespStatus(d: ByteArray, set: Int, id: Int): Int? {
+        var i = 0
+        while (i + 13 <= d.size) {
+            if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
+            val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+            if (len < 13 || i + len > d.size) { i++; continue }
+            if ((d[i + 9].toInt() and 0xFF) == set && (d[i + 10].toInt() and 0xFF) == id) {
+                val ps = i + 11; val pe = i + len - 2
+                return when {
+                    pe - ps >= 2 -> (d[ps].toInt() and 0xFF) or ((d[ps + 1].toInt() and 0xFF) shl 8)
+                    pe - ps >= 1 -> d[ps].toInt() and 0xFF
+                    else -> 0
+                }
+            }
+            i += len
+        }
+        return null
     }
 
     fun close() {
@@ -303,11 +366,14 @@ class DatalinkClient(
             val thumb = Regex("""MISC/THM/(?:DJI|CAM)_\d{3}/$qbase""").find(win)?.value?.plus(".scr")
                 ?: (mediaDir.replaceFirst("DCIM/", "MISC/THM/") + ".scr")
             val proxy = Regex("""$qbase\.(?:LRF|LRV)""").find(win)?.let { "$mediaDir.${it.value.substringAfterLast('.')}" }
-            val fps = if (ext in VIDEO_EXTS) fpsInRange(bytes, winStart, names[k].range.first) else null
+            val namePos = names[k].range.first
+            val fps = if (ext in VIDEO_EXTS) fpsInRange(bytes, winStart, namePos) else null
+            val handle = handleForName(bytes, namePos)
+            val sizeBytes = sizeForName(bytes, namePos, ext in VIDEO_EXTS)
             out.add(CameraFile(path = "$mediaDir.$ext", thumbPath = thumb, storage = 0,
-                resLabel = fps?.let { "${it}fps" }, proxyPath = proxy))
+                resLabel = fps?.let { "${it}fps" }, proxyPath = proxy, handle = handle, sizeBytes = sizeBytes))
         }
-        log("datalink: decoded $declared records (${out.count { it.resLabel != null }} with fps, ${out.count { it.proxyPath != null }} proxies)")
+        log("datalink: decoded $declared records (${out.count { it.resLabel != null }} with fps, ${out.count { it.proxyPath != null }} proxies, ${out.count { it.deletable }} deletable, ${out.count { it.sizeBytes > 0 }} sized)")
         return out
     }
 
@@ -342,8 +408,11 @@ class DatalinkClient(
             val thumb = thumbByBase[base] ?: (p.replaceFirst("DCIM/", "MISC/THM/") + ".scr")
             val fps = if (ext in VIDEO_EXTS) fpsFor(bytes, "$base.$ext") else null
             val proxy = proxyByBase[base]?.let { "$p.$it" }
+            val namePos = ext?.let { indexOf(bytes, "$base.$it".toByteArray(Charsets.ISO_8859_1)) } ?: -1
+            val handle = if (namePos >= 0) handleForName(bytes, namePos) else 0L
+            val sizeBytes = if (namePos >= 0) sizeForName(bytes, namePos, ext in VIDEO_EXTS) else 0L
             CameraFile(path = mediaPath, thumbPath = thumb, storage = 0,
-                resLabel = fps?.let { "${it}fps" }, proxyPath = proxy)
+                resLabel = fps?.let { "${it}fps" }, proxyPath = proxy, handle = handle, sizeBytes = sizeBytes)
         }
     }
 
@@ -379,6 +448,40 @@ class DatalinkClient(
     private fun u32le(b: ByteArray, o: Int): Long =
         (b[o].toLong() and 0xFF) or ((b[o + 1].toLong() and 0xFF) shl 8) or
             ((b[o + 2].toLong() and 0xFF) shl 16) or ((b[o + 3].toLong() and 0xFF) shl 24)
+
+    /**
+     * Position of a manifest record's **head** — its `0x40`-aligned handle dword (high byte `0x40`,
+     * next byte ≤ `0x1F`, low 6 bits clear: the Nano's file object ids live at `0x40104000`+ and
+     * decrement `0x40` per record) — for the file whose name starts at [namePos]. We take the dword
+     * nearest *before* the filename; -1 when none matches. This one anchor yields both the delete
+     * **handle** (at +0) and the file **size** (at +38), so a bad/absent match fail-safes both to
+     * "unknown" rather than guessing. Verified against a pcap: the three handles Mimo sent in a delete
+     * mapped to exactly the three files that vanished, and +38 matched each clip's byte size.
+     */
+    private fun recordStart(bytes: ByteArray, namePos: Int): Int {
+        var i = minOf(namePos, bytes.size) - 4
+        val lo = maxOf(0, namePos - 360)
+        while (i >= lo) {
+            val v = u32le(bytes, i)
+            if ((v ushr 24) == 0x40L && ((v ushr 16) and 0xFF) <= 0x1FL && (v and 0x3FL) == 0L) return i
+            i--
+        }
+        return -1
+    }
+
+    /** The delete handle (record head) for the file at [namePos], or 0 → non-deletable. */
+    private fun handleForName(bytes: ByteArray, namePos: Int): Long {
+        val p = recordStart(bytes, namePos)
+        return if (p >= 0) u32le(bytes, p) else 0L
+    }
+
+    /** Full media byte size from the record (+38, u32-LE) — **video records only** (photos lay out
+     *  differently); 0 when unavailable. Replaces an HTTP HEAD for the common case. */
+    private fun sizeForName(bytes: ByteArray, namePos: Int, isVideo: Boolean): Long {
+        if (!isVideo) return 0L
+        val p = recordStart(bytes, namePos)
+        return if (p >= 0 && p + 42 <= bytes.size) u32le(bytes, p + 38) else 0L
+    }
 
     private fun indexOf(hay: ByteArray, needle: ByteArray): Int {
         outer@ for (i in 0..hay.size - needle.size) {

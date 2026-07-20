@@ -23,6 +23,7 @@ class MediaGridAdapter(
     private val loader: ImageLoader,
     private val meta: MetaLoader,
     private val onOpen: (Int) -> Unit,
+    private val onLongPress: (Int) -> Unit = {},
 ) : BaseAdapter() {
 
     // position -> optional trim (null = whole file). Presence in the map = queued.
@@ -46,6 +47,7 @@ class MediaGridAdapter(
         meta.load(f, name, prefix)
 
         v.setOnClickListener { onOpen(position) }
+        v.setOnLongClickListener { onLongPress(position); true }
         return v
     }
 

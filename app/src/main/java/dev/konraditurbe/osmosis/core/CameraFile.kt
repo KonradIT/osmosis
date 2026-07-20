@@ -7,7 +7,12 @@ data class CameraFile(
     val storage: Int = 0,    // 0 = internal, 1 = SD
     val resLabel: String? = null, // e.g. "25fps" — fps from the DUML manifest record
     val proxyPath: String? = null, // low-res proxy clip (.LRF/.LRV) if the camera lists one
+    val handle: Long = 0L,   // camera-assigned delete handle (DUML 0x00/0x28); 0 = unknown → not deletable
+    val sizeBytes: Long = 0L, // full media byte size from the DUML manifest (record +38); 0 = unknown (probe HTTP)
 ) {
+    /** True once the manifest yielded a delete handle for this file (see DatalinkClient.deleteFiles). */
+    val deletable: Boolean get() = handle != 0L
+
     val name: String get() = path.substringAfterLast('/')
     val ext: String get() = name.substringAfterLast('.', "").uppercase()
     val timestamp: String get() = Regex("""_(\d{14})_""").find(name)?.groupValues?.get(1) ?: ""

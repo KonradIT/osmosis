@@ -563,10 +563,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val ml = MetaLoader(http)
         imageLoader = loader
         metaLoader = ml
-        val ad = MediaGridAdapter(files, loader, ml) { openPreview(it) }
+        val ad = MediaGridAdapter(files, loader, ml, onOpen = { openPreview(it) }, onLongPress = { onGridLongPress(it) })
         adapter = ad
         grid.adapter = ad
-        logLine("Grid ready: ${files.size} files. Tap a cell to preview + queue, then Download.")
+        logLine("Grid ready: ${files.size} files. Tap a cell to preview + queue, then Download. Long-press a cell to delete.")
     }
 
     private fun pillName() = "${currentModel.name} ${offloadSsid.substringAfterLast('-', "")}".trim()
@@ -600,6 +600,63 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         previewLauncher.launch(
             MediaPreviewActivity.intent(this, "192.168.2.1", f, position, ad.isQueued(position), ad.trimFor(position)))
     }
+
+    /**
+     * Long-press a cell → delete that file from the camera (DUML 0x00/0x28). Guarded by a confirm
+     * dialog and irreversible; only offered when the manifest yielded a delete handle for the file.
+     * The delete rides the open datalink (single socket owner is the keep-alive thread).
+     */
+    private fun onGridLongPress(position: Int) {
+        val ad = adapter ?: return
+        val f = ad.getItem(position)
+        if (!f.deletable) {
+            logLine("Delete: no handle for ${f.name} — not deletable.")
+            toast("Can't delete ${f.name} — no handle")
+            return
+        }
+        val dl = datalink ?: run { logLine("Delete: no live datalink session."); return }
+        val hx = "0x%08x".format(f.handle)
+        AlertDialog.Builder(this)
+            .setTitle("Delete from camera?")
+            .setMessage("${f.name}\nhandle $hx\n\nThis permanently deletes the file on the camera's card. It cannot be undone.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                logLine("DELETE requested: ${f.name} (handle $hx)")
+                Thread {
+                    val status = runCatching { dl.deleteFiles(listOf(f.handle)) }.getOrNull()
+                    main.post {
+                        when (status) {
+                            0 -> {
+                                logLine("DELETE OK (status 0x0000): ${f.name}")
+                                toast("Deleted ${f.name}")
+                                removeFromGrid(position)
+                            }
+                            null -> { logLine("DELETE: no response (timeout / no session)."); toast("Delete: no response") }
+                            else -> {
+                                logLine("DELETE failed: status 0x%04x for %s".format(status, f.name))
+                                toast("Delete failed (0x%04x)".format(status))
+                            }
+                        }
+                    }
+                }.start()
+            }
+            .show()
+    }
+
+    /**
+     * Drop one cell after a confirmed delete by rebuilding the grid without it. The remaining files'
+     * handles are zeroed: a delete can shift the camera's object table (Mimo re-lists for this very
+     * reason), so we require a reconnect to refresh handles before another delete — rather than risk
+     * acting on a stale one. Size labels and preview keep working.
+     */
+    private fun removeFromGrid(position: Int) {
+        val ad = adapter ?: return
+        val remaining = (0 until ad.count).filter { it != position }.map { ad.getItem(it).copy(handle = 0L) }
+        showGrid(remaining)
+    }
+
+    private fun toast(s: String) =
+        main.post { android.widget.Toast.makeText(this, s, android.widget.Toast.LENGTH_SHORT).show() }
 
     /** Returns the storage id (1=SD, 0=internal) that actually serves this file's path. */
     private fun detectStorage(f: CameraFile): Int {

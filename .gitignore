@@ -15,3 +15,11 @@
 *.keystore
 /keystore.properties
 app-keystore.jks
+
+# Packet captures (may contain WiFi creds) — never commit
+*.pcap
+*.pcapng
+# JVM/msys crash droppings
+hs_err_pid*.log
+replay_pid*.log
+*.stackdump
