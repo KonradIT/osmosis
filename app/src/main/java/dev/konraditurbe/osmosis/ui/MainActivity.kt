@@ -622,6 +622,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Delete") { _, _ ->
                 logLine("DELETE requested: ${f.name} (handle $hx)")
+                toast("Deleting ${f.name}…")
                 Thread {
                     val status = runCatching { dl.deleteFiles(listOf(f.handle)) }.getOrNull()
                     main.post {

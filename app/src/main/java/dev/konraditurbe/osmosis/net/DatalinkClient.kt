@@ -62,8 +62,14 @@ class DatalinkClient(
     private var status = CameraStatus()
     private var lastSig = ""        // last display signature fired to onStatus (throttles UI updates)
 
-    /** Handshake + register + list. Socket stays open on success. Empty list on failure. */
-    fun fetchFileList(ip: String): List<CameraFile> {
+    /**
+     * Open the udp/[port] datalink and bring the session up to the point commands are accepted: TCP
+     * poke, handshake (retry until the camera answers), drain heartbeats to learn its channel + start
+     * our sequence, then register (device-info, register, gimbal-init, param subscriptions). Leaves
+     * [sock] open and the send sequence synced on success. Shared by [fetchFileList] and the delete
+     * flow — the delete re-runs this so it rides the same fresh, in-window session the list does.
+     */
+    private fun openAndRegister(ip: String, subscribe: Boolean = true): Boolean {
         cam = InetAddress.getByName(ip)
         sock = DatagramSocket().apply { soTimeout = 200 }
         sessionId = Random.nextInt(0x1000, 0xFFFE)
@@ -85,7 +91,7 @@ class DatalinkClient(
             for (r in recvAll(350)) if (r.size >= 8 && (r[6].toInt() and 0xFF) == 0x00) { ok = true; break }
             if (ok) break
         }
-        if (!ok) { log("datalink: handshake FAILED on udp/$port"); sock.close(); return emptyList() }
+        if (!ok) { log("datalink: handshake FAILED on udp/$port"); runCatching { sock.close() }; return false }
         log("datalink: handshake OK on udp/$port")
         onFetchProgress?.invoke(8)
 
@@ -101,13 +107,22 @@ class DatalinkClient(
         recvAll(400); sendAck()
         sendDuml(0x03, 0xDA, hex("05ffffffff"), receiverType = 0x03, receiverId = 0)
         recvAll(400); sendAck()
-        var subId = 0x69DF
-        for ((i, p) in paramSubs.withIndex()) {
-            sendDuml(0x00, 0x99, subscription(p, subId), receiverType = 0x08, receiverId = 1)
-            subId++; recvAll(300); sendAck()
-            onFetchProgress?.invoke(22 + i * 3) // ramp through the 8 subscriptions
+        // Status subscriptions only feed the live pill; the delete session skips them to save ~4 s.
+        if (subscribe) {
+            var subId = 0x69DF
+            for ((i, p) in paramSubs.withIndex()) {
+                sendDuml(0x00, 0x99, subscription(p, subId), receiverType = 0x08, receiverId = 1)
+                subId++; recvAll(300); sendAck()
+                onFetchProgress?.invoke(22 + i * 3) // ramp through the 8 subscriptions
+            }
+            repeat(4) { recvAll(400); sendAck() }
         }
-        repeat(4) { recvAll(400); sendAck() }
+        return true
+    }
+
+    /** Handshake + register + list. Socket stays open on success. Empty list on failure. */
+    fun fetchFileList(ip: String): List<CameraFile> {
+        if (!openAndRegister(ip)) return emptyList()
         onFetchProgress?.invoke(50)
 
         // File-list request (0x00/0x26). Records stream back over several packets. Page the list up
@@ -221,24 +236,42 @@ class DatalinkClient(
 
     /**
      * Delete files by their manifest [handles] (DUML **0x00/0x28** — the file-management cmdset, same
-     * one the list `0x00/0x26` lives in; reverse-engineered from a Mimo↔Nano pcap). Runs on the
-     * keep-alive thread (the single socket owner) and blocks the caller up to ~4 s for the camera's
-     * reply. Returns the reply status word (**0x0000 = OK**), or null on timeout / no live session.
+     * one the list `0x00/0x26` lives in; reverse-engineered from a Mimo↔Nano pcap). Returns the reply
+     * status word (**0x0000 = OK**), or null on failure/timeout. **Irreversible on the SD card** — the
+     * caller must confirm intent and pass only handles it means to destroy. See ROADMAP #4.
      *
-     * The wire payload mirrors the captured frame exactly: `[count:u8][handle:u32-LE …][count:u32-LE]
-     * 00 [count:u32-LE] 01 01 00 00`. **Irreversible on the SD card** — the caller must confirm intent
-     * and pass only handles it means to destroy. See ROADMAP #4.
+     * Runs in a **fresh registered session**: the browse keep-alive loop advances our `udpSeq` past
+     * the window the camera will accept, and while reads (the list) still get answered, writes get
+     * silently dropped. So we tear the keep-alive session down and re-open exactly like the list fetch
+     * — the one path the camera reliably accepts — issue the delete there, then re-open for browse.
+     * Call on a background thread (blocks ~10 s).
      */
     fun deleteFiles(handles: List<Long>): Int? {
-        if (handles.isEmpty() || !keepAliveOn) return null
-        val latch = java.util.concurrent.CountDownLatch(1)
-        val out = java.util.concurrent.atomic.AtomicInteger(-1)
-        pending.add(Runnable { out.set(sendDeleteAwait(handles)); latch.countDown() })
-        val done = latch.await(4, java.util.concurrent.TimeUnit.SECONDS)
-        return if (done && out.get() >= 0) out.get() else null
+        if (handles.isEmpty()) return null
+        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return null
+        keepAliveOn = false
+        Thread.sleep(600)                // let the keep-alive loop finish its current recv and exit
+        runCatching { sock.close() }     // free udp/$port for the fresh session
+        val status = runCatching { freshSessionDelete(ip, handles) }
+            .getOrElse { log("datalink: delete session error: ${it.message}"); null }
+        // Reuse the (already open + registered) delete session for browse — no second re-open. It has
+        // no status subscriptions, so the pill freezes at its last values until the next reconnect.
+        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        return status
     }
 
-    private fun sendDeleteAwait(handles: List<Long>): Int {
+    private fun freshSessionDelete(ip: String, handles: List<Long>): Int? {
+        if (!openAndRegister(ip, subscribe = false)) { log("datalink: delete — fresh session open FAILED"); return null }
+        // Claim control the way Mimo does before its (working) delete — reads register without this,
+        // writes appear to need it. These are the session-setup commands seen in the pcap.
+        sendDuml(0x00, 0x01, ByteArray(0), receiverType = 0x01, receiverId = 0); recvAll(150); sendAck()
+        sendDuml(0x02, 0x09, hex("0000000000000000000003"), receiverType = 0x01, receiverId = 0); recvAll(150); sendAck()
+        repeat(2) { sendDuml(0x09, 0xA8, hex("00040200000000000000"), receiverType = 0x01, receiverId = 0); recvAll(150); sendAck() }
+        // Enter playback/album mode (Mimo's delete rode inside it): 0x00/0x34 + a 0x00/0x2b ping.
+        sendDuml(0x00, 0x34, hex("0101000000000000"), receiverType = 0x01, receiverId = 0)
+        repeat(3) { recvAll(150); sendAck() }
+        sendDuml(0x00, 0x2B, hex("0400"), receiverType = 0x10, receiverId = 0); recvAll(200); sendAck()
+
         val b = java.io.ByteArrayOutputStream()
         b.write(handles.size and 0xFF)               // count : u8
         for (h in handles) b.write(le32(h.toInt()))  // handles : u32-LE each
@@ -249,12 +282,29 @@ class DatalinkClient(
         val payload = b.toByteArray()
         log("datalink: DELETE 0x00/0x28 n=${handles.size} payload=${payload.joinToString("") { "%02x".format(it) }}")
         sendDuml(0x00, 0x28, payload, receiverType = 0x01, receiverId = 0)
-        val deadline = System.nanoTime() + 2_000_000_000L
+        val seen = java.util.LinkedHashSet<String>()
+        val deadline = System.nanoTime() + 3_000_000_000L
         while (System.nanoTime() < deadline) {
-            for (d in recvAll(200)) findRespStatus(d, 0x00, 0x28)?.let { return it }
+            for (d in recvAll(200)) {
+                findRespStatus(d, 0x00, 0x28)?.let { log("datalink: DELETE reply status=0x%04x".format(it)); return it }
+                collectCmds(d, seen)
+            }
             sendAck()
         }
-        return -1
+        log("datalink: DELETE no 0x00/0x28 reply; frames seen: $seen")
+        return null
+    }
+
+    /** Diagnostic: record the set/id of every DUML frame in a datagram (to see what the camera sends). */
+    private fun collectCmds(d: ByteArray, into: MutableSet<String>) {
+        var i = 0
+        while (i + 13 <= d.size) {
+            if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
+            val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+            if (len < 13 || i + len > d.size) { i++; continue }
+            into.add("%02x/%02x".format(d[i + 9].toInt() and 0xFF, d[i + 10].toInt() and 0xFF))
+            i += len
+        }
     }
 
     /** Scan a datagram for a DUML response frame with [set]/[id] and return its leading status word. */
