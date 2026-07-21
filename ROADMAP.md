@@ -95,31 +95,38 @@ approve → creds over BLE → grid, zero manual entry.
 - **Note:** the R-SDK/accessory family (`Osmo-GPS-Controller-Demo`) uses a different pairing with
   numeric `verify_data` and is control-only — not a media/credential path.
 
-## 4. Delete a specific file on the camera — 🔬 researched, one byte short (2026-07-14)
+## 4. Delete a specific file on the camera — ✅ DONE (2026-07-21)
 
-Confirmed possible; the RE is ~90 % done. Delete is a DUML command in the **same file-management
-cmdset as the file list** (`0x00`, where list = `0x00/0x26`), reverse-engineered from the real
-camera SDK `libxtrasdk_jni.so` (pulled from the phone: `split_dynamic_pack_csdk.apk` →
-`assets/white-dymlibs.zip` → `libxtrasdk_jni.so`).
+Long-press a grid cell → confirm → the file is deleted off the camera's card. Verified on **both**
+the Osmo Nano and the Xtra Edge Pro / Action 5 Pro (`status 0x0000`, file gone). Irreversible, so it's
+behind an explicit confirm dialog showing the filename + handle, and only offered for files we could
+resolve a handle for.
 
-- **Request type:** `xtra::core::delete_file_req`.
-- **Entry points** (`xtra::sdk::FileTransferManager`): `DeleteFiles` (specific files),
-  `DeleteMediaSubFiles` (a clip's main + sub/proxy together), `DeleteFilesAll` (all of a `FileType`).
-- **Transport:** `SendCompositePack<delete_file_req, MediaFile>` — batch/composite (many files per
-  op), versioned `XTRA_V1_CMD_VERSION`, takes a storage selector `pair<u8,u8>`, `MediaFile` refs, and
-  an async `FileActionResponse` callback. (The dex only has the Kotlin `MediaDeleterFactory` /
-  `Normal|Loop|ShotsMediaDeleter` → CSDK `MediaFileEx` bridge; the wire command is native.)
-- **Missing:** the exact **cmdId byte**. It's written several call-levels below `SendCompositePack`
-  in the native frame builder; `llvm-objdump` grep only surfaced struct sizes/flags
-  (`0x30/0x18/0x40/0x80`), not the cmd.
-- **⏸️ PARKED (2026-07-15) — both remaining paths blocked:**
-  - *Live datalink capture* of the official app: **infeasible** on this setup. The command rides the
-    WiFi/UDP datalink (not BLE), the phone is **not rooted** (no `tcpdump`), and PCAPdroid's VPN
-    conflicts with the app's `bindProcessToNetwork` (severs the camera link / can't see the bound
-    traffic). Only an over-the-air monitor-mode capture (laptop + WPA2 PSK) or root would work.
-  - *Ghidra trace* of the native frame builder for the cmdId — not yet done.
-- **When implemented:** gate behind an explicit confirm and test on a throwaway clip first — deletes
-  are irreversible on the SD card.
+**What cracked it:** a live **Mimo↔Nano capture** (PCAPdroid on an Android 10 tablet — the "infeasible"
+note was wrong; it grabs the UDP/9004 datalink DUML in the clear). The RE had it right: delete is
+`SendCompositePack<delete_file_req, MediaFile>` in the **same `0x00` cmdset as the list** — the missing
+byte is **cmdId `0x28`** (list = `0x00/0x26`, delete = `0x00/0x28`).
+
+- **Wire:** `0x00/0x28`, App→Camera. Payload `[count:u8][handle:u32-LE …][count:u32] 00 [count:u32]
+  01 01 00 00` (the tail is a storage selector, verbatim from the capture); reply `0x00/0x28` = `0000`
+  = OK. For one file both counts = 1.
+- **Handle:** a per-file object id at the **head of each manifest record**, read straight from the list
+  we already fetch. Anchored on the constant record marker `03 ff 19 06` (`handle = u32 at marker-8`) —
+  works for both layouts: Nano (`DJI_`, 361-byte records, handles step `0x40`) and Xtra/Action (`CAM_`,
+  272-byte records, handles step `0x10`). A `0x40`-alignment heuristic worked on the Nano but grabbed a
+  stray dword on the Xtra → `0xd6` "no such handle"; the marker anchor fixed it.
+  ([DatalinkClient.recordStart / deleteFiles](app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt))
+- **The catch — writes need a fresh session.** The browse keep-alive loop advances our `udpSeq` past the
+  window the camera accepts; reads still get answered but writes are silently dropped, and re-registration
+  itself seems to grant write access. So a delete tears the keep-alive session down and re-opens +
+  registers a fresh datalink (the same path the list fetch uses), issues the delete there, then keeps that
+  session for browse. Cost ≈ **9 s** per delete (the re-handshake; the delete itself is ~0.2 s); the
+  status pill freezes until the next reconnect (the delete session skips status subscriptions).
+
+**Known gaps:** photos on the Xtra decode with a different record shape and currently come through
+**non-deletable** (handle unresolved → fail-safe); videos delete on both. The delete is single-shot per
+handle (a delete reshuffles the camera's table, so we zero the remaining handles and require a reconnect
+to delete more). Batch/multi-select and photo support are follow-ups.
 
 ## 5. Osmo Nano: surface the dock's stats
 

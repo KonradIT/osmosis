@@ -50,10 +50,6 @@ class DatalinkClient(
     private lateinit var cam: InetAddress
     @Volatile private var keepAliveOn = false
 
-    // Extra DUML ops (e.g. delete) posted from other threads run here, drained on the keep-alive
-    // thread so the single DatagramSocket always has exactly one reader/writer.
-    private val pending = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
-
     /** Set to receive live camera status (battery/storage/firmware) parsed from status pushes. */
     @Volatile var onStatus: ((CameraStatus) -> Unit)? = null
 
@@ -171,7 +167,6 @@ class DatalinkClient(
             var tick = 0
             while (keepAliveOn) {
                 runCatching {
-                    while (true) { (pending.poll() ?: break).run() } // run queued ops (e.g. delete) here
                     parseStatus(recvAll(200))
                     sendAck()
                     sendDuml(0x02, 0x8E, hex("00011400"), receiverType = 0x01, receiverId = 0)
@@ -243,8 +238,8 @@ class DatalinkClient(
      * Runs in a **fresh registered session**: the browse keep-alive loop advances our `udpSeq` past
      * the window the camera will accept, and while reads (the list) still get answered, writes get
      * silently dropped. So we tear the keep-alive session down and re-open exactly like the list fetch
-     * — the one path the camera reliably accepts — issue the delete there, then re-open for browse.
-     * Call on a background thread (blocks ~10 s).
+     * ([openAndRegister]) — the one path the camera reliably accepts — issue the delete there, then
+     * keep that session for browse. Call on a background thread (blocks ~9 s, the re-handshake cost).
      */
     fun deleteFiles(handles: List<Long>): Int? {
         if (handles.isEmpty()) return null
@@ -262,49 +257,26 @@ class DatalinkClient(
 
     private fun freshSessionDelete(ip: String, handles: List<Long>): Int? {
         if (!openAndRegister(ip, subscribe = false)) { log("datalink: delete — fresh session open FAILED"); return null }
-        // Claim control the way Mimo does before its (working) delete — reads register without this,
-        // writes appear to need it. These are the session-setup commands seen in the pcap.
-        sendDuml(0x00, 0x01, ByteArray(0), receiverType = 0x01, receiverId = 0); recvAll(150); sendAck()
-        sendDuml(0x02, 0x09, hex("0000000000000000000003"), receiverType = 0x01, receiverId = 0); recvAll(150); sendAck()
-        repeat(2) { sendDuml(0x09, 0xA8, hex("00040200000000000000"), receiverType = 0x01, receiverId = 0); recvAll(150); sendAck() }
-        // Enter playback/album mode (Mimo's delete rode inside it): 0x00/0x34 + a 0x00/0x2b ping.
-        sendDuml(0x00, 0x34, hex("0101000000000000"), receiverType = 0x01, receiverId = 0)
-        repeat(3) { recvAll(150); sendAck() }
-        sendDuml(0x00, 0x2B, hex("0400"), receiverType = 0x10, receiverId = 0); recvAll(200); sendAck()
-
+        // Payload mirrors the captured frame: [count:u8][handle:u32-LE …][count:u32] 00 [count:u32]
+        // 01 01 00 00. The trailing 00 / 01 01 00 00 (storage selector) are verbatim from the capture.
         val b = java.io.ByteArrayOutputStream()
-        b.write(handles.size and 0xFF)               // count : u8
-        for (h in handles) b.write(le32(h.toInt()))  // handles : u32-LE each
-        b.write(le32(handles.size))                  // count : u32-LE
-        b.write(0x00)                                // (trailer byte, verbatim from the capture)
-        b.write(le32(handles.size))                  // count : u32-LE (composite outer count)
-        b.write(byteArrayOf(0x01, 0x01, 0x00, 0x00)) // trailer flags (storage/selector, verbatim)
-        val payload = b.toByteArray()
-        log("datalink: DELETE 0x00/0x28 n=${handles.size} payload=${payload.joinToString("") { "%02x".format(it) }}")
-        sendDuml(0x00, 0x28, payload, receiverType = 0x01, receiverId = 0)
-        val seen = java.util.LinkedHashSet<String>()
+        b.write(handles.size and 0xFF)
+        for (h in handles) b.write(le32(h.toInt()))
+        b.write(le32(handles.size))
+        b.write(0x00)
+        b.write(le32(handles.size))
+        b.write(byteArrayOf(0x01, 0x01, 0x00, 0x00))
+        log("datalink: DELETE 0x00/0x28 n=${handles.size}")
+        sendDuml(0x00, 0x28, b.toByteArray(), receiverType = 0x01, receiverId = 0)
         val deadline = System.nanoTime() + 3_000_000_000L
         while (System.nanoTime() < deadline) {
-            for (d in recvAll(200)) {
-                findRespStatus(d, 0x00, 0x28)?.let { log("datalink: DELETE reply status=0x%04x".format(it)); return it }
-                collectCmds(d, seen)
+            for (d in recvAll(200)) findRespStatus(d, 0x00, 0x28)?.let {
+                log("datalink: DELETE reply status=0x%04x".format(it)); return it
             }
             sendAck()
         }
-        log("datalink: DELETE no 0x00/0x28 reply; frames seen: $seen")
+        log("datalink: DELETE — no reply")
         return null
-    }
-
-    /** Diagnostic: record the set/id of every DUML frame in a datagram (to see what the camera sends). */
-    private fun collectCmds(d: ByteArray, into: MutableSet<String>) {
-        var i = 0
-        while (i + 13 <= d.size) {
-            if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
-            val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-            if (len < 13 || i + len > d.size) { i++; continue }
-            into.add("%02x/%02x".format(d[i + 9].toInt() and 0xFF, d[i + 10].toInt() and 0xFF))
-            i += len
-        }
     }
 
     /** Scan a datagram for a DUML response frame with [set]/[id] and return its leading status word. */
@@ -500,20 +472,24 @@ class DatalinkClient(
             ((b[o + 2].toLong() and 0xFF) shl 16) or ((b[o + 3].toLong() and 0xFF) shl 24)
 
     /**
-     * Position of a manifest record's **head** — its `0x40`-aligned handle dword (high byte `0x40`,
-     * next byte ≤ `0x1F`, low 6 bits clear: the Nano's file object ids live at `0x40104000`+ and
-     * decrement `0x40` per record) — for the file whose name starts at [namePos]. We take the dword
-     * nearest *before* the filename; -1 when none matches. This one anchor yields both the delete
-     * **handle** (at +0) and the file **size** (at +38), so a bad/absent match fail-safes both to
-     * "unknown" rather than guessing. Verified against a pcap: the three handles Mimo sent in a delete
-     * mapped to exactly the three files that vanished, and +38 matched each clip's byte size.
+     * Position of a manifest record's **head** for the file whose name starts at [namePos], or -1.
+     * Every record carries a constant marker `03 ff 19 06` at `head + 8`; the head holds the delete
+     * **handle** (u32-LE at +0) and, for videos, the byte **size** (+38). We anchor on the marker
+     * nearest *before* the filename — robust across the **Nano** (`DJI_`, 361-byte records, handles at
+     * `0x40104000`+ stepping `0x40`) and the **Xtra / Action family** (`CAM_`, 272-byte records,
+     * handles at `0x40040000`+ stepping `0x10`); the earlier `0x40`-aligned scan mis-read the Xtra
+     * (whose handles aren't `0x40`-aligned) and grabbed a stray dword → the camera rejected it (0xd6).
+     * Verified against a pcap: the three handles Mimo sent in a delete mapped to the three files that
+     * then vanished, and on the Xtra the marker-derived handle deletes where the aligned one did not.
      */
     private fun recordStart(bytes: ByteArray, namePos: Int): Int {
         var i = minOf(namePos, bytes.size) - 4
-        val lo = maxOf(0, namePos - 360)
+        val lo = maxOf(0, namePos - 400)
         while (i >= lo) {
-            val v = u32le(bytes, i)
-            if ((v ushr 24) == 0x40L && ((v ushr 16) and 0xFF) <= 0x1FL && (v and 0x3FL) == 0L) return i
+            if (bytes[i] == 0x03.toByte() && bytes[i + 1] == 0xFF.toByte() &&
+                bytes[i + 2] == 0x19.toByte() && bytes[i + 3] == 0x06.toByte()) {
+                return if (i - 8 >= 0) i - 8 else -1
+            }
             i--
         }
         return -1
