@@ -43,7 +43,7 @@ Gimbal `0x03`, WiFi `0x07`, DM368 `0x08`.
 | `1a <len> 00000001 <path>` | DCIM media path (no ext) |
 | `1a <len> 00000002 <path>` | MISC/THM thumb path |
 
-fps is present; **resolution / size / duration are not** — read those from the MP4 `moov` + HTTP `HEAD`.
+fps is present, and **byte size** (`u32-LE @ record +38`, video records) — no HTTP `HEAD` needed; **resolution / duration are not** — read those from the MP4 `moov`.
 
 **Parsed — index-based** (older Osmo Action 1/2/3): header `[u32-LE count][u32-LE total_size]`, then fixed **65 B** records, **no path strings** (files keyed by numeric `FileIndex`):
 
@@ -55,36 +55,45 @@ fps is present; **resolution / size / duration are not** — read those from the
 | `[19:23]` | u32-LE   | video UUID (Amba `DjiMovDmx`) |
 | `[38:42]` | u32-LE   | size-ish (~KB; a photo record reads ~0.6 MB) |
 
+### 2. Delete media
+- Cmd Set / ID: `0x00` / `0x28`  ·  App → Camera(`0x01`), datalink  ·  **irreversible on the card**
+- Payload: `[count:u8][handle:u32-LE × count][count:u32-LE] 00 [count:u32-LE] 01 01 00 00`  — delete 1 file `h`: `01 <h> 01000000 00 01000000 01010000`
+- `handle` = per-file object id from the manifest record head (below); the trailing `00 … 01 01 00 00` is a storage selector, verbatim from the capture.
+- Response: `0x00/0x28` → `0000` = OK  ·  `00d6` = no such handle
+- **Handle** — u32-LE at the record head, located by anchoring on the constant record marker `03 ff 19 06` (at head + 8, so `handle = u32 @ marker − 8`). Nano (`DJI_`, 361 B records) handles start `0x40104000` step `0x40`; Xtra / Action (`CAM_`, 272 B records) start `0x40040000` step `0x10`. Photo records lack the marker → non-deletable (fail-safe).
+- **Session** — accepted only on a **freshly-registered** datalink: the browse keep-alive advances our UDP seq past the camera's write window (reads still answer, writes are silently dropped), so tear keep-alive down and re-run the datalink-session open (handshake → register → subscribe) before sending. ~9 s. Verified on Nano + Xtra (`status 0000`, file removed).
+- DUML example (delete handle `0x40104480`): <https://b3yond.d3vl.com/duml/#551f044e020100a0400028018044104001000000000100000001010000a0d1>
+
 ---
 
 ## Datalink session (sent before the list, over UDP)
 
-### 2. Handshake  *(not DUML — routing payload)*
+### 3. Handshake  *(not DUML — routing payload)*
 - UDP packet type `0x00`, payload `b88764006400c005140000640000019001c005140000640014006400c00514000064000101040102`
 - Response: type `0x00` echo. Then drain heartbeats, learn `camera_channel` (heartbeat routing `[8:10]`); app UDP seq starts at `camera_channel + 8`.
 
-### 3. Device info
+### 4. Device info
 - Cmd Set / ID: `0x00` / `0x81`  ·  App → DM368(`0x08`, id 2), cmd_type `4`
 - Payload: `00 "APP" 00×37 02 00×8 02 08 00×10` (64 B)
 - DUML example: <https://b3yond.d3vl.com/duml/#554b0402024800a08000810041505000000000000000000000000000000000000000000000000000000000000000000000000000020000000000000000020800000000000000000000ad80>
 
-### 4. Register
+### 5. Register
 - Cmd Set / ID: `0x00` / `0x88`  ·  App → DM368(`0x08`, id 1)
 - Payload: `170008237b41505000000000000002`
 - DUML example: <https://b3yond.d3vl.com/duml/#551c041b022800a0400088170008237b41505000000000000002d9e6>
 
-### 5. Init
+### 6. Init
 - Cmd Set / ID: `0x03` / `0xDA`  ·  App → Gimbal(`0x03`)
 - Payload: `05ffffffff`
 - DUML example: <https://b3yond.d3vl.com/duml/#551204c7020300a04003da05ffffffff4490>
 
-### 6. Subscribe param
+### 7. Subscribe param
 - Cmd Set / ID: `0x00` / `0x99`  ·  App → DM368(`0x08`, id 1)
 - Payload: `02020000 <sub_id:u32LE> 00000000 <len:u16LE> 00 <name_len:u8> 00 <name padded to 20> 00000000`
 - Sent once per param: `camcap_mode_profile`, `camcap_video_format`, `camcap_fov`, `camcap_iso`, `camcap_photo_storage_format`, `camcap_color_mode`, `cam_storage`, `cam_status`
 - DUML example (`cam_status`): <https://b3yond.d3vl.com/duml/#5536043d022800a040009902020000df690000000000001a00000a0063616d5f7374617475730000000000000000000000000000ffe6>
 
-### 7. Get version
+### 8. Get version
 - Cmd Set / ID: `0x00` / `0x00`  ·  App → DM368(`0x08`, id 2), cmd_type `4`
 - Response: NUL-separated ASCII `sdk\0name\0firmware` — scrape the `NN.NN.NN.NN` firmware string.
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433024800a0800000017e>
@@ -97,32 +106,32 @@ From [DJI-Wifi-Connect/pocket3](https://github.com/sniffingpickles/DJI-Wifi-Conn
 id 0), over the datalink. **Derived from the DJI protocol standard — cmdIds solid, payloads may need
 per-model adjustment; not yet verified on our Nano/Xtra.**
 
-### 8. Take photo
+### 9. Take photo
 - Cmd Set / ID: `0x02` / `0x01`  ·  empty payload
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a00002017677>
 
-### 9. Start recording
+### 10. Start recording
 - Cmd Set / ID: `0x02` / `0x20`  ·  empty payload
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a0000220fd47>
 
-### 10. Stop recording
+### 11. Stop recording
 - Cmd Set / ID: `0x02` / `0x21`  ·  empty payload
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a00002217456>
 
-### 11. Set mode
+### 12. Set mode
 - Cmd Set / ID: `0x02` / `0x02`  ·  payload `[mode:u8]` — `0` Photo, `1` Video, `2` Playback, `3` SlowMo, `4` Timelapse, `5` Panorama
 - DUML example (Video): <https://b3yond.d3vl.com/duml/#550e0466020100a0000202017bb8>
 
-### 12. Camera heartbeat  *(Mimo sends ~15 Hz to keep the camera awake)*
+### 13. Camera heartbeat  *(Mimo sends ~15 Hz to keep the camera awake)*
 - Cmd Set / ID: `0x02` / `0x8E`  ·  cmd_type PUSH  ·  payload `00 01 14 00`
 - DUML example: <https://b3yond.d3vl.com/duml/#55110492020100a040028e00011400a858>
 
-### 13. Camera state query
+### 14. Camera state query
 - Cmd Set / ID: `0x02` / `0xA0`  ·  cmd_type PUSH  ·  empty payload
 - Response: 28 B — `recording_time_s` = `u16-LE @ byte 6`
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a00002a0f5c3>
 
-### 14. Camera status poll
+### 15. Camera status poll
 - Cmd Set / ID: `0x02` / `0x61`  ·  cmd_type PUSH  ·  empty payload
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a00002617014>
 
@@ -130,45 +139,45 @@ per-model adjustment; not yet verified on our Nano/Xtra.**
 
 ## Status pushes (camera → app, decoded not sent)
 
-### 15. Camera status
+### 16. Camera status
 - Cmd Set / ID: `0x02` / `0x80`  (~10 Hz push, 60 B)
 - Fields we read: **storage total** = `u32-LE MiB @ byte 5`, **free** = `@ byte 9`. `recording` = `byte1 & 0x01` (per Pocket 3 repo).
 - Quirks: reports the **active store only** (internal vs SD). Nano + Xtra.
 
-### 16. SD / storage
+### 17. SD / storage
 - Cmd Set / ID: `0x02` / `0xDC`  (22 B)  ·  `byte0 & 0x01` = SD present
 
-### 17. Battery
+### 18. Battery
 - Cmd Set / ID: `0x0D` / `0x02`  (34 B)  ·  percent = `byte 20`, millivolts = `u16-LE @ byte 1`
 
 ---
 
 ## Connection (BLE control — prerequisites to reach media)
 
-### 18. SetPairingPIN
+### 19. SetPairingPIN
 - Cmd Set / ID: `0x07` / `0x45`  ·  App → WiFi(`0x07`), BLE
 - Payload: `PackString(identifier)` + `PackString(token)` (`PackString` = `[len:u8][utf8]`; token `"osmo"`)
 - Response: `0x07/0x45` payload `00 01` = already paired · `00 02` = approval popup on camera; approval then arrives as a **`0x07/0x46` request** (flags `0x40`), which is the "go" signal.
 - DUML example: <https://b3yond.d3vl.com/duml/#553304c2020700a0400745203238346165356238643736623333373561303461363431376164373162656133046f736d6f8c02>
 
-### 19. ConnectToWiFi (wake AP)
+### 20. ConnectToWiFi (wake AP)
 - Cmd Set / ID: `0x07` / `0x47`  ·  App → WiFi(`0x07`), BLE
 - Payload: `PackString(ssid)` + `PackString(password)` — the camera's *own* creds
 - Response: `0x07/0x47` `00 00` = ok; AP comes up ~15 s later
 - DUML example (password redacted): <https://b3yond.d3vl.com/duml/#5528040d020700a04007470d4f736d6f4e616e6f2d433244380c78787878787878787878787827e1>
 
-### 20. GetWifiSsid
+### 21. GetWifiSsid
 - Cmd Set / ID: `0x07` / `0x07`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][PackString ssid]`
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a04007077472>
 
-### 21. GetWifiPassword
+### 22. GetWifiPassword
 - Cmd Set / ID: `0x07` / `0x0e`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][PackString passphrase]`
 - Quirks: **pace after GetWifiSsid by ~500 ms** (`fff5` is write-without-response). Verified on Xtra / Action 5 Pro; Nano rides the saved-password fallback.
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070eb5ef>
 
-### 22. GetWifiMac
+### 23. GetWifiMac
 - Cmd Set / ID: `0x07` / `0x0c`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][6-byte MAC]`
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070ca7cc>
