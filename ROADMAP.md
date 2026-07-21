@@ -123,10 +123,14 @@ byte is **cmdId `0x28`** (list = `0x00/0x26`, delete = `0x00/0x28`).
   session for browse. Cost ≈ **9 s** per delete (the re-handshake; the delete itself is ~0.2 s); the
   status pill freezes until the next reconnect (the delete session skips status subscriptions).
 
-**Known gaps:** photos on the Xtra decode with a different record shape and currently come through
-**non-deletable** (handle unresolved → fail-safe); videos delete on both. The delete is single-shot per
-handle (a delete reshuffles the camera's table, so we zero the remaining handles and require a reconnect
-to delete more). Batch/multi-select and photo support are follow-ups.
+**Known gaps:** **photos (both cameras) are non-deletable by design.** Video records carry the
+`03 ff 19 06` marker we anchor the handle on; photo records don't have it and lay out differently (the
+handle sits elsewhere, e.g. ~120 B before the name). Widening the search to reach it would instead latch
+onto the *neighbouring video's* marker → a wrong-file, irreversible delete, so we fail-safe to "can't
+delete" instead. (The 400 B window is tuned for this: it reaches a video's own marker at ~195 B but stops
+short of the next record's at ~473 B.) Safe photo support needs a dedicated photo-record anchor verified
+on both families. Also: delete is single-shot per handle (a delete reshuffles the camera's table, so we
+zero the remaining handles and require a reconnect to delete more). Batch/multi-select is a follow-up.
 
 ## 5. Osmo Nano: surface the dock's stats
 
