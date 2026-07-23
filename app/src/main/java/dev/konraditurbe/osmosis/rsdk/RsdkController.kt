@@ -33,6 +33,7 @@ class RsdkController(private val context: Context, private val listener: Listene
     private var gatt: GattClient? = null
     private var seq = 0
     private var connected = false
+    private var loggedForeignFrame = false  // one line per session, not per notification
     // Silence here has two very different causes — an unapproved popup, or a camera with no R-SDK at
     // all (DJI lists the Nano as unsupported and doesn't list the Pocket 3) — and they look identical
     // from our side, so the message names both rather than assuming the popup.
@@ -98,7 +99,21 @@ class RsdkController(private val context: Context, private val listener: Listene
     }
 
     override fun onNotification(sourceChar: UUID, raw: ByteArray, parsed: DjiMessage?) {
-        val f = RsdkProtocol.parse(raw) ?: return // ignore non-R-SDK / partial notifications
+        val f = RsdkProtocol.parse(raw)
+        if (f == null) {
+            // Not an R-SDK frame. Silence and "answered in a protocol we discard" are indistinguishable
+            // from the timeout alone, and a camera that rejects R-SDK is exactly the case that would
+            // answer here in media-path DUML (SOF 0x55, e0 = reject) instead. Say so, once.
+            if (!connected && !loggedForeignFrame) {
+                loggedForeignFrame = true
+                val sof = if (raw.isNotEmpty()) "0x%02X".format(raw[0].toInt() and 0xFF) else "empty"
+                listener.onLog(
+                    "R-SDK: camera answered with a non-R-SDK frame (SOF $sof, ${raw.size} B): " +
+                        raw.take(16).joinToString("") { "%02x".format(it) }
+                )
+            }
+            return
+        }
         when {
             f.cmdSet == RsdkProtocol.SET_GENERAL && f.cmdId == RsdkProtocol.ID_CONNECTION -> onConnectionFrame(f)
             f.cmdSet == RsdkProtocol.SET_CAMERA && f.cmdId == RsdkProtocol.ID_STATUS_PUSH ->
