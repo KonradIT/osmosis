@@ -43,8 +43,19 @@ Unrecognized models fall back to the common config (9004 + poke + WPA2) so **any
 attempted, not refused**; the selector tags unverified models `~experimental`.
 
 Status per model:
-- **Verified on hardware:** Osmo Nano (`0x19`, 9004, WPA2), Osmo Action 5 Pro / Xtra Edge Pro
-  (`0x15`, 10004, WPA2) — both re-confirmed after the brand→model switch.
+- **Verified on hardware:** Osmo Nano (`0x19`, 9004 + poke, WPA2) and **Xtra Edge Pro** (`0x15`,
+  **10004, no poke**, WPA2).
+- **⚠️ Correction (2026-07-23):** we previously listed "Osmo Action 5 Pro" as verified on 10004, but
+  that was **only ever confirmed on the Xtra Edge Pro** — a covert DJI rebrand which advertises the
+  *same* model id `0x15` yet has its **own OUI `EC:9E:EA`**. The port change looks like a rebrand
+  firmware change, not a DJI one, so a **genuine DJI Osmo Action 5 Pro is now treated as unverified**
+  and gets the DJI-standard 9004 + poke. Resolution is brand-aware
+  ([CameraModel.resolve](app/src/main/java/dev/konraditurbe/osmosis/ble/CameraModel.kt) takes
+  [Brand](app/src/main/java/dev/konraditurbe/osmosis/ble/Brand.kt)), pinned by
+  [CameraModelBrandTest](app/src/test/java/dev/konraditurbe/osmosis/ble/CameraModelBrandTest.kt).
+  Since either guess can be wrong on an untested unit, the datalink now **retries the alternate
+  config** (9004+poke ⇄ 10004/no-poke) when the handshake doesn't land, and logs which port answered
+  — so any test on a real Action 5 Pro / Action 4 / Action 6 self-corrects *and* reports the truth.
 - **Coded, unverified (no unit):** Osmo 360 (`0x17`, 9004, **WPA3** via `setWpa3Passphrase`) and
   Osmo Pocket 3 (`0x20`, 9004) — the Pocket 3 broadcasts **no** BLE manufacturer data, so detection
   falls back to the BLE local name. Pocket 4 (`0x21`) added to the map.

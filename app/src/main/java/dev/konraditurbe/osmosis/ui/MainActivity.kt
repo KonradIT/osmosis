@@ -301,7 +301,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val savedRows = saved.map { e ->
             val c = byMac[e.mac]
             CamRow(e.mac, c?.name ?: e.name,
-                c?.model ?: CameraModel.resolve(e.modelId.takeIf { it >= 0 }, e.name),
+                c?.model ?: CameraModel.resolve(e.modelId.takeIf { it >= 0 }, e.name, Brand.of(e.mac, e.name)),
                 inRange = c != null, saved = true, device = c?.device)
         }
         val newRows = scanned.filter { it.device.address !in savedMacs }.map { c ->
@@ -379,7 +379,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun onCameraChosen(device: BluetoothDevice) {
         val cam = discovered[device.address]
         currentBrand = Brand.of(device.address, cam?.name ?: safeName(device))
-        currentModel = cam?.model ?: CameraModel.resolve(null, safeName(device))
+        currentModel = cam?.model ?: CameraModel.resolve(null, safeName(device), currentBrand)
         currentModelId = cam?.modelId
         currentAddress = device.address
         offloadSsid = cam?.name ?: safeName(device) ?: "camera"
@@ -549,18 +549,34 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 setConnectProgress(58) // WiFi joined + bound
                 logLine("WiFi link: ip=${ip4?.hostAddress}")
                 Thread {
-                    // Datalink port + poke come from the model (e.g. Action 5 Pro = 10004/no-poke,
-                    // the rest = 9004/poke); the Xtra resolves to Action 5 Pro by its model byte.
-                    val dlPort = currentModel.datalinkPort
-                    val dlPoke = currentModel.tcpPoke
-                    logLine("=== media list [${currentModel.name}] via udp/$dlPort ===")
+                    // Datalink port + poke come from the model AND brand: 10004/no-poke was only ever
+                    // confirmed on the Xtra rebrand (own OUI EC:9E:EA), so a genuine DJI unit gets the
+                    // DJI-standard 9004+poke. Either guess can be wrong on an untested model, so if the
+                    // handshake never lands we retry the alternate config and log which port answered.
+                    fun open(m: CameraModel): Pair<DatalinkClient, List<CameraFile>> {
+                        logLine("=== media list [${m.name}] via udp/${m.datalinkPort} (poke=${m.tcpPoke}) ===")
+                        val c = DatalinkClient(::logLine, m.datalinkPort, m.tcpPoke)
+                        c.onStatus = { s -> main.post { onCameraStatus(s) } }
+                        c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
+                        val f = runCatching { c.fetchFileList("192.168.2.1") }
+                            .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
+                        return c to f
+                    }
+
                     datalink?.close()
-                    val dl = DatalinkClient(::logLine, dlPort, dlPoke)
+                    var (dl, files) = open(currentModel)
+                    if (!dl.handshakeOk) {
+                        val alt = currentModel.alternate()
+                        logLine("datalink: nothing answered on udp/${currentModel.datalinkPort} — trying udp/${alt.datalinkPort}")
+                        runCatching { dl.close() }
+                        val retry = open(alt)
+                        dl = retry.first; files = retry.second
+                        if (dl.handshakeOk) logLine(
+                            "datalink: *** ${currentModel.name} actually speaks udp/${alt.datalinkPort} " +
+                                "(poke=${alt.tcpPoke}) — please report so the model table can be fixed ***"
+                        )
+                    }
                     datalink = dl
-                    dl.onStatus = { s -> main.post { onCameraStatus(s) } }
-                    dl.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98 during the manifest
-                    val files = runCatching { dl.fetchFileList("192.168.2.1") }
-                        .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
                     if (files.isNotEmpty()) dl.startKeepAlive() // hold the AP up while browsing
                     // Files live on internal or SD; detect from the first and apply to all.
                     val storage = if (files.isNotEmpty()) detectStorage(files.first()) else 0
@@ -798,7 +814,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     override fun onHit(device: BluetoothDevice, rssi: Int, name: String?, modelGuess: String?, modelId: Int?) {
         val addr = device.address
-        val model = CameraModel.resolve(modelId, name)
+        // Brand matters, not just the model id: the Xtra rebrand shares model 0x0015 with the DJI
+        // Osmo Action 5 Pro but uses a different datalink port. Its OUI gives it away.
+        val model = CameraModel.resolve(modelId, name, Brand.of(addr, name))
         if (discovered.put(addr, Cam(device, name, Brand.of(addr, name), rssi, modelId, model)) == null) {
             logLine("found ${model.name} [${Brand.of(addr, name)}] (${name ?: addr}) rssi=$rssi" +
                 if (!model.verified) "  ~experimental" else "")

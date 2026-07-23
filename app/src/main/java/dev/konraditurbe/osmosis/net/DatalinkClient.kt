@@ -60,6 +60,11 @@ class DatalinkClient(
     private var lastSig = ""        // last display signature fired to onStatus (throttles UI updates)
     private var lastBattSig = ""    // dock-relevant bytes of 0x0d/02; log only on change (#5)
 
+    /** False when the datalink handshake never landed — i.e. wrong UDP port for this camera. Lets
+     *  the caller distinguish "no media" from "nothing answered" and retry the alternate port. */
+    @Volatile var handshakeOk = false
+        private set
+
     /**
      * Open the udp/[port] datalink and bring the session up to the point commands are accepted: TCP
      * poke, handshake (retry until the camera answers), drain heartbeats to learn its channel + start
@@ -68,6 +73,7 @@ class DatalinkClient(
      * flow — the delete re-runs this so it rides the same fresh, in-window session the list does.
      */
     private fun openAndRegister(ip: String, subscribe: Boolean = true): Boolean {
+        handshakeOk = false
         cam = InetAddress.getByName(ip)
         sock = DatagramSocket().apply { soTimeout = 200 }
         sessionId = Random.nextInt(0x1000, 0xFFFE)
@@ -90,6 +96,7 @@ class DatalinkClient(
             if (ok) break
         }
         if (!ok) { log("datalink: handshake FAILED on udp/$port"); runCatching { sock.close() }; return false }
+        handshakeOk = true
         log("datalink: handshake OK on udp/$port")
         onFetchProgress?.invoke(8)
 

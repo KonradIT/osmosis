@@ -17,6 +17,14 @@ data class CameraModel(
     val wpa3: Boolean = false,
     val verified: Boolean = false,
 ) {
+    /**
+     * The other datalink config to try when [datalinkPort] never answers: the whole line is either
+     * 9004 + TCP-7001 poke or 10004 with no poke, so one retry covers the unknown.
+     */
+    fun alternate(): CameraModel =
+        if (datalinkPort == 9004) copy(datalinkPort = 10004, tcpPoke = false, verified = false)
+        else copy(datalinkPort = 9004, tcpPoke = true, verified = false)
+
     companion object {
         val DEFAULT = CameraModel("DJI Osmo camera")
 
@@ -24,7 +32,8 @@ data class CameraModel(
             0x0010 to CameraModel("Osmo Action 2"),
             0x0012 to CameraModel("Osmo Action 3"),
             0x0014 to CameraModel("Osmo Action 4"),
-            0x0015 to CameraModel("Osmo Action 5 Pro", datalinkPort = 10004, tcpPoke = false, verified = true),
+            // NOT verified on a genuine DJI unit — see the Xtra note below. DJI-standard config.
+            0x0015 to CameraModel("Osmo Action 5 Pro"),
             0x0017 to CameraModel("Osmo 360", wpa3 = true, verified = true),
             0x0018 to CameraModel("Osmo Action 6"),
             0x0019 to CameraModel("Osmo Nano", verified = true),
@@ -32,8 +41,27 @@ data class CameraModel(
             0x0021 to CameraModel("Osmo Pocket 4"),
         )
 
-        /** Resolve by BLE model id; fall back to the BLE local name (e.g. the Pocket 3 sends no mfr data). */
-        fun resolve(modelId: Int?, name: String?): CameraModel {
+        /**
+         * Resolve by BLE model id, then the local name (the Pocket 3 sends no mfr data), then [brand].
+         *
+         * **Why brand matters:** the Xtra Edge Pro is a rebadged Osmo Action 5 Pro and advertises the
+         * *same* model id `0x0015`, but 10004/no-poke was only ever confirmed on the **Xtra** — that
+         * looks like a rebrand firmware change, not a DJI one. So the genuine DJI unit keeps the
+         * DJI-standard 9004 + poke (unverified until a real Action 5 Pro is tested), and the Xtra —
+         * identified hardware-side by its own OUI `EC:9E:EA` — gets the 10004 quirk. If either guess
+         * is wrong the datalink retries [alternate] and logs which port actually answered.
+         */
+        fun resolve(modelId: Int?, name: String?, brand: Brand = Brand.UNKNOWN): CameraModel {
+            val base = byIdOrName(modelId, name)
+            if (brand != Brand.XTRA) return base
+            val isEdgePro = modelId == 0x0015 || base.name.contains("Action 5")
+            return base.copy(
+                name = if (isEdgePro) "Xtra Edge Pro" else "Xtra ${base.name}",
+                datalinkPort = 10004, tcpPoke = false, verified = isEdgePro,
+            )
+        }
+
+        private fun byIdOrName(modelId: Int?, name: String?): CameraModel {
             BY_ID[modelId]?.let { return it }
             val n = name?.lowercase()?.replace(" ", "").orEmpty()
             return when {
