@@ -5,8 +5,10 @@ below, see [docs/01-protocol-map.md](docs/01-protocol-map.md).
 
 **Working today:** Osmo Nano (datalink UDP 9004) and Xtra Edge Pro / DJI Action 5 Pro
 (datalink UDP 10004) — full pipeline: BLE pair → wake AP → media list → thumbnail grid →
-LRF preview + download queue → resumable high-res `/v2` downloads. fps comes from the DUML
-manifest; resolution from the MP4 `moov`.
+LRF preview + download queue → resumable high-res `/v2` downloads. fps **and byte size** come from the
+DUML manifest (no HTTP `HEAD`); resolution from the MP4 `moov`. Also shipped (v0.5): **delete a file off
+the camera** (long-press → confirm, DUML `0x00/0x28` — #4) and **R-SDK GPS sync** (🛰️ toggle, streams the
+phone's GPS into the camera over BLE — #9, hardware-verified on an Action 5 Pro).
 
 ---
 
@@ -255,7 +257,7 @@ hardware (real-world side-effecting — test on a throwaway state); add a minima
 `reference/osmo-download` (cmd ids) + `reference/Osmo-GPS-Controller-Demo` (`docs/protocol_data_segment.md`,
 camera control).
 
-## 9. R-SDK GPS push — optional Android background service — 🚧 implemented, hardware-verification pending (branch `gps-sync-r-sdk-background`)
+## 9. R-SDK GPS push — optional Android background service — ✅ DONE, hardware-verified (2026-07-23, shipped in v0.5)
 
 Push the phone's GPS into the camera (geotag / speed + route overlays), porting DJI's own
 **Osmo-GPS-Controller-Demo** (`reference/Osmo-GPS-Controller-Demo`). **Implemented** behind the 🛰️ toggle
@@ -280,6 +282,25 @@ the `Mode - … - Rec - yes/no - gps: healthy/not healthy` notification + a Stop
 **LocationManager, not FusedLocationProvider** — no Google-Play-Services dependency, and it uniquely exposes
 the satellite count the GPS frame carries.
 
-**Remaining:** on-hardware verification against a **genuine Action 4 / Action 5 Pro** (the codec is proven;
-the BLE handshake, status decode, and GPS acceptance are not). Likely tweak point: the camera's approval
-frame field offsets. The Xtra probably won't honor R-SDK at all.
+**✅ Verified on a genuine DJI Osmo Action 5 Pro** (2026-07-23, by an external tester): BLE approval
+handshake, status decode and GPS acceptance all work, and the track lands in the recording.
+
+**Two bugs the field test exposed — both fixed:**
+- *Only the start location was recorded.* We subscribed to `GPS_PROVIDER` alone and seeded `latest` from
+  `getLastKnownLocation()`; when that provider doesn't deliver (backgrounded / cold start / ROM-dependent)
+  the seed never moved and we pushed **one cached fix at 1 Hz for the whole clip**. Now we subscribe to
+  **FUSED (API 31+) + GPS + NETWORK** and gate every push on the fix's *own* timestamp (`freshFix()`, <30 s),
+  so a stale seed can never pose as the live position.
+- *`gpsTime` read ~1 h behind.* Same root cause, not a timezone bug: we stamp the wall-clock from
+  `loc.time`, and that cached fix carried its own hour-old timestamp. (The protocol has **no timezone
+  field** at all — DJI's demo hardcodes `hour + 8` — so the camera stores a bare local wall-clock.)
+
+**Proven objectively, not by eyeballing:** the failing clip's `djmd` track decoded to **719 points with
+exactly 1 distinct position and 1 distinct timestamp** — a frozen feed, since a mere timezone error would
+still advance the clock. That track is **protobuf** (an earlier note here calling it encrypted was wrong);
+read it with [`pyosmogps`](https://github.com/francescocaponio/pyosmogps)
+(`python -m pyosmogps extract -r discard -f 10 clip.mp4 out.gpx`), which doubles as the regression harness:
+a healthy feed shows many distinct positions and advancing timestamps.
+
+**Remaining (optional):** a control UI on top of the live R-SDK session (record `0x1D/0x03`, mode
+`0x1D/0x04` — see #8). The Xtra rebrand probably won't honor R-SDK at all.
