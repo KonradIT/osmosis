@@ -23,3 +23,6 @@ app-keystore.jks
 hs_err_pid*.log
 replay_pid*.log
 *.stackdump
+
+# Pulled device logs (dump-logs.sh) — device-specific, not source.
+logs-dump/
