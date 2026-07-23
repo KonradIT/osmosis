@@ -56,15 +56,39 @@ class StatusPillView @JvmOverloads constructor(
     fun render(name: String, connection: String, s: CameraStatus) {
         nameView.text = name
         val pct = s.batteryPercent
-        batteryText.text = if (pct in 0..100) "$pct%" else "—"
+        // A charging bolt next to the percentage — the camera reports this while docked.
+        batteryText.text = when {
+            pct !in 0..100 -> "—"
+            s.charging -> "⚡ $pct%"
+            else -> "$pct%"
+        }
         batteryBar.progress = pct.coerceIn(0, 100)
         batteryBar.progressTintList = ColorStateList.valueOf(
-            when { pct < 0 -> TRACK; pct <= 15 -> RED; pct <= 35 -> ORANGE; else -> GREEN }
+            when { pct < 0 -> TRACK; s.charging -> GREEN; pct <= 15 -> RED; pct <= 35 -> ORANGE; else -> GREEN }
         )
 
         rows.removeAllViews()
         row(GREEN, connection)
         row(storageDot(s), storageLabel(s))
+        if (s.hasPowerInfo) row(if (s.charging) GREEN else GRAY, powerLabel(s))
+    }
+
+    /**
+     * Power line from the `0x0d/0x02` battery frame: pack voltage plus charge/draw current, and
+     * whether the dock is attached. The dock's *own* charge level isn't reported by the camera at all
+     * (ROADMAP #5), so we show the camera's power state rather than inventing a dock percentage.
+     */
+    private fun powerLabel(s: CameraStatus): String {
+        val volts = "%.2f V".format(s.batteryMilliVolts / 1000f)
+        val ma = s.batteryMilliAmps
+        val flow = when {
+            ma > 0 -> "charging %d mA".format(ma)
+            ma < 0 -> "drawing %d mA".format(-ma)
+            else -> "idle"
+        }
+        // Attached but not (yet) taking charge — seen mid-transition and when the pack is full.
+        val dock = if (s.docked && !s.charging) " · docked" else ""
+        return "$volts · $flow$dock"
     }
 
     private fun storageDot(s: CameraStatus): Int {

@@ -2,6 +2,7 @@ package dev.konraditurbe.osmosis.net
 
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.CameraStatus
+import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.duml.DjiMessage
 import dev.konraditurbe.osmosis.duml.OsmoCommands
 import java.net.DatagramPacket
@@ -57,6 +58,7 @@ class DatalinkClient(
     @Volatile var onFetchProgress: ((Int) -> Unit)? = null
     private var status = CameraStatus()
     private var lastSig = ""        // last display signature fired to onStatus (throttles UI updates)
+    private var lastBattSig = ""    // dock-relevant bytes of 0x0d/02; log only on change (#5)
 
     /**
      * Open the udp/[port] datalink and bring the session up to the point commands are accepted: TCP
@@ -163,6 +165,7 @@ class DatalinkClient(
         keepAliveOn = true
         status = CameraStatus()
         lastSig = ""
+        lastBattSig = ""
         Thread {
             var tick = 0
             while (keepAliveOn) {
@@ -187,6 +190,10 @@ class DatalinkClient(
                 if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
                 val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
                 if (len < 13 || i + len > d.size) { i++; continue }
+                // Verify the header CRC8 before believing this is a frame: a bare 0x55 scan happily
+                // matches raw bytes inside the handshake/routing headers (e.g. the 0xB887 channel
+                // constant), which invented a phantom "device 0x07/4 via 0xb8/87" in the log.
+                if (DjiCrc.computeCrc8(d.copyOfRange(i, i + 3)) != (d[i + 3].toInt() and 0xFF)) { i++; continue }
                 val set = d[i + 9].toInt() and 0xFF
                 val id = d[i + 10].toInt() and 0xFF
                 applyStatusFrame(set, id, d.copyOfRange(i + 11, i + len - 2))
@@ -197,8 +204,11 @@ class DatalinkClient(
         if (sig != lastSig) { lastSig = sig; onStatus?.invoke(status) }
     }
 
+    // Includes the power state so docking/undocking refreshes the pill even when the percentage
+    // hasn't moved; mV is bucketed to 0.05 V so normal ripple doesn't spam the UI.
     private fun displaySig(s: CameraStatus) =
-        "${s.batteryPercent}|${s.sdInserted}|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}"
+        "${s.batteryPercent}|${s.sdInserted}|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}" +
+            "|${s.docked}|${s.charging}|${s.batteryMilliVolts / 50}"
 
     private fun applyStatusFrame(set: Int, id: Int, p: ByteArray): Boolean {
         when {
@@ -222,8 +232,31 @@ class DatalinkClient(
                 if (!fw.isNullOrBlank()) { status = status.copy(firmware = fw); return true }
             }
             set == 0x0D && id == 0x02 && p.size >= 21 -> {
+                // The dock is NOT its own DUML device (docked vs undocked sessions only ever showed
+                // type 0x05 id 0), so the dock signal lives in this frame: u16@1 = pack mV,
+                // i32@5 = current mA (signed, -ve = discharging), @20 = percent, @27 = dock
+                // attached, @32 = taking charge. Confirmed over six live dock/undock transitions
+                // (ROADMAP #5). Logged on change only — a state line, not a 1 Hz stream.
+                if (p.size >= 34) {
+                    val mv = (p[1].toInt() and 0xFF) or ((p[2].toInt() and 0xFF) shl 8)
+                    val cur = ((p[5].toInt() and 0xFF) or ((p[6].toInt() and 0xFF) shl 8) or
+                        ((p[7].toInt() and 0xFF) shl 16) or ((p[8].toInt() and 0xFF) shl 24))
+                    val docked = (p[27].toInt() and 0xFF) != 0
+                    val charging = (p[32].toInt() and 0xFF) == 1
+                    status = status.copy(
+                        batteryMilliVolts = if (mv in 2000..5000) mv else status.batteryMilliVolts,
+                        batteryMilliAmps = cur, docked = docked, charging = charging,
+                    )
+                    val sig = "$docked|$charging|${if (cur == 0) "0" else if (cur < 0) "-" else "+"}"
+                    if (sig != lastBattSig) {
+                        lastBattSig = sig
+                        log("battery: %d%% %dmV %+dmA docked=%s charging=%s"
+                            .format(p[20].toInt() and 0xFF, mv, cur, docked, charging))
+                    }
+                }
                 val bp = p[20].toInt() and 0xFF
                 if (bp in 0..100) { status = status.copy(batteryPercent = bp); return true }
+                if (p.size >= 34) return true   // power fields decoded even if the % looked bogus
             }
         }
         return false

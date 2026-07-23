@@ -42,13 +42,12 @@ object OsmoCommands {
     // Captured order, once notifications are armed on fff4:
     //   0x00/0x2b `04 00`   <- FIRST, *before* pairing
     //   0x07/0x45 pair
-    //   0x53/0x10 `00 00 00 00`
-    //   0x00/0x32 `31 31 00 00 00`
-    //   0x07/0x39 `7a`
+    //   0x53/0x10 `00 00 00 00`   <- the camera answers 01 00 00 00 and wakes
     //   0x00/0x2b `01 01`   <- then repeating, ~0.5-1 s, as the session keepalive
     //   0x07/0x07 / 0x0e / 0x0c  (SSID / password / MAC)
-    // Notably Mimo NEVER sends 0x07/0x47 (ConnectToWiFi) — the command we used to "wake the AP",
-    // after which a sleeping camera drops us (GATT status=19).
+    // Mimo also sends 0x07/0x39 in here, but the camera rejects it (`e0`) for Mimo as well, so it's
+    // not replicated. And Mimo NEVER sends 0x07/0x47 (ConnectToWiFi) — the command we used to "wake
+    // the AP", after which a sleeping camera drops us (GATT status=19).
 
     const val TARGET_APP_TO_CAMERA = 0x0102     // App(0x02) -> Camera(0x01)
     const val TARGET_APP_TO_DM368 = 0x0802      // App(0x02) -> DM368(0x08)
@@ -88,13 +87,6 @@ object OsmoCommands {
     fun session5310(id: Int = 0x8053): ByteArray =
         command(0x53, 0x10, byteArrayOf(0, 0, 0, 0), target = TARGET_APP_TO_1C, id = id)
 
-    /**
-     * `0x07/0x39` — kept only for parity with Mimo's flow. The camera replies `e0` to **Mimo too**,
-     * so it is *not* load-bearing for the wake; don't read anything into its payload byte (Mimo's
-     * varies run to run: `7a`, `86`).
-     */
-    fun wifiEnable39(id: Int = 0x8039): ByteArray =
-        wifiQuery(0x39, byteArrayOf(0x7A), id = id)
 
     /**
      * App device-info blob ("APP" identity), mirroring osmo-download's 0x00/0x81 payload. Used to

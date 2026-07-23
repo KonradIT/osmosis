@@ -134,18 +134,46 @@ short of the next record's at ~473 B.) Safe photo support needs a dedicated phot
 on both families. Also: delete is single-shot per handle (a delete reshuffles the camera's table, so we
 zero the remaining handles and require a reconnect to delete more). Batch/multi-select is a follow-up.
 
-## 5. Osmo Nano: surface the dock's stats
+## 5. Osmo Nano: dock / power stats — ✅ DONE (2026-07-23)
 
-The Nano is a two-part device (camera unit + dock); the status pill currently shows only the camera
-unit's battery and the active store's space. Two dock-specific readouts to add:
+The status pill now shows the camera's **pack voltage, charge/draw current, and whether it's docked /
+charging** (⚡ next to the percentage, plus a `4.42 V · charging 352 mA` line). Decoded from the
+`0x0d/0x02` battery push, which we were previously reading exactly one byte of.
 
-- **Dock SD card space** — the SD card lives in the dock. The camera's `0x02/0x80` storage frame
-  reports the *active* store only (internal vs SD); need to query/select the dock's SD store and show
-  its free/total alongside (or instead of) the camera-body figure.
-- **Dock battery %** — the camera unit (DUML sender `0x05`) pushes `0x0D/0x02` battery for **itself
-  only** (observed 100 % camera vs 24 % dock). The dock's battery isn't in the pushed frames, so it
-  needs a **separate query** (a second battery source / component id). Deferred earlier for exactly
-  this reason; pick the right sender/component to poll.
+**The dock's own battery % is NOT exposed by the camera** — that part of this item is closed as
+*not possible*, not as *not done*. All three plausible homes were checked and excluded:
+
+| hypothesis | result |
+|---|---|
+| dock is its own DUML device (a second battery address) | ❌ docked vs undocked shows **only** `type 0x05, id 0` |
+| dock appears in the subscribable params | ❌ all **53** params enumerated; none battery/dock-related |
+| dock charge is a field in the battery frame | ❌ nothing in the 34 bytes tracks it (dock was at 25 %) |
+
+**What the battery frame does carry** — mapped by docking/undocking mid-session and watching which
+bytes moved (far stronger than comparing separate connections, since only the dock state varies):
+
+| offset | field | evidence |
+|--------|-------|----------|
+| `u16 @1` | pack voltage (mV) | 4421 charging ↔ 4297 under load |
+| `i32 @5` | current (mA, signed) | **+372/+352/+272 docked**, **−455/−474 on battery** |
+| `@20` | battery % | (already used) |
+| `u16 @17` | temperature? (45.0/47.0 °C) | plausible, unconfirmed |
+| `@27` | **dock attached** | `64` whenever physically docked |
+| `@32` | **charging** | `1` docked / `0` not, across 3 cycles |
+
+`@27` and `@32` are genuinely different signals: one transition showed `@27=64` (attached) with
+`@32=0` and only −175 mA — docked but not yet drawing charge. Hence `docked` and `charging` are
+separate flags in [CameraStatus](app/src/main/java/dev/konraditurbe/osmosis/core/CameraStatus.kt).
+
+**Still open (was the other half of this item):** *dock SD-card space*. The `0x02/0x80` frame reports
+the **active** store only; selecting/querying the dock's store is untouched and independent of the
+battery work above.
+
+**How the "dock is a separate device" theory died:** a temporary probe logged every DUML device address
+(`(id << 5) | type`, from the sender byte) the first time it spoke, on both transports, across docked
+and undocked connections. No second battery (`type 0x05`, `id != 0`) and no new address ever appeared —
+the dock speaks only *through* the camera's own battery frame. The probe was removed once it had
+answered that; it's in git history if a new accessory ever needs identifying.
 
 ## 6. Support the older Osmo Action generation (index-based list) — ⏸️ PARKED (2026-07-15)
 
@@ -311,13 +339,12 @@ Tap a sleeping Nano in the camera list and it wakes and offloads — no reaching
 
 **How it actually works (and how two wrong theories died):**
 - ❌ *DJI's `WKP` wake broadcast.* DJI documents one (`{10, 0xff, 'W','K','P', mac-reversed}`,
-  *Camera Power Mode Settings (001A)*) and we implemented it byte-exactly
-  ([CameraWaker](app/src/main/java/dev/konraditurbe/osmosis/ble/CameraWaker.kt), tests pin the frame,
-  including the trick that Android's `addManufacturerData` prepends a company id, so `'W','K'` must
-  ride *in* that field as `0x4B57`). It did nothing — an HCI snoop of Mimo shows **Mimo never
-  advertises at all**. That path is for the R-SDK *remote* deep-sleep case; it's kept but unwired.
+  *Camera Power Mode Settings (001A)*) and we implemented it byte-exactly. It did nothing — an HCI
+  snoop of Mimo shows **Mimo never advertises at all**. That path is for the R-SDK *remote*
+  deep-sleep case, so the implementation (and its `BLUETOOTH_ADVERTISE` permission) was removed;
+  it's recoverable from git history if a remote ever needs it.
 - ❌ *`0x07/0x39` as the AP bring-up.* The camera replies `e0` (reject) to **Mimo too**, so it isn't
-  load-bearing. Sent only for flow parity.
+  load-bearing and isn't sent.
 - ✅ **A sleeping Nano keeps advertising `ADV_IND`** under its own name. Mimo simply connects and
   drives it with DUML. The wake is a *command sequence*, not a broadcast.
 

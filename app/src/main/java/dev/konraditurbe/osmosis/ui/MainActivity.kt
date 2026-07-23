@@ -400,9 +400,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         logLine("OFFLOAD [$currentBrand] $offloadSsid (${device.address})")
         // No wake broadcast here: an HCI snoop of Mimo waking a sleeping Nano showed it never
         // advertises. The sleeping camera keeps advertising ADV_IND itself, and Mimo simply connects
-        // and drives it with DUML (0x00/0x2b -> pair -> 0x53/0x10 -> 0x07/0x39). That's the sequence
-        // we now follow in onReady/onPaired. DJI's WKP broadcast ([CameraWaker]) is for the *R-SDK
-        // remote* deep-sleep case and is deliberately not in this path.
+        // and drives it with DUML (0x00/0x2b -> pair -> 0x53/0x10). That's the sequence we follow in
+        // onReady/onPaired. (DJI also documents a 'WKP' wake *broadcast*; an HCI snoop proved Mimo
+        // never advertises, so it isn't used here — see ROADMAP #10.)
         val gc = GattClient(this, this)
         gattClient = gc
         gc.connect(device)
@@ -474,12 +474,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         logLine("Paired — running Mimo's post-pair sequence, then reading WiFi creds…")
         // Paced writes: fff5 is write-without-response, so back-to-back frames drop, and an immediate
         // one also races the pairing-approval ACK. Order + spacing mirror the Mimo HCI snoop:
-        //   0x53/0x10 -> 0x07/0x39 -> (creds) 0x07/0x07 -> 0x07/0x0e
-        // 0x53/0x10 is the one that matters: the camera answers 01 00 00 00 and wakes. 0x07/0x39 is
-        // sent only for parity — the camera rejects it (e0) for Mimo as well.
+        //   0x53/0x10 -> (creds) 0x07/0x07 -> 0x07/0x0e
+        // 0x53/0x10 is the one that matters: the camera answers 01 00 00 00 and wakes.
         val c = dev.konraditurbe.osmosis.duml.OsmoCommands
-        main.postDelayed({ gattClient?.writeCommand(c.session5310()); logLine("sent 0x53/0x10") }, 100)
-        main.postDelayed({ gattClient?.writeCommand(c.wifiEnable39()); logLine("sent 0x07/0x39 (parity with Mimo; camera rejects it for Mimo too)") }, 350)
+        main.postDelayed({ gattClient?.writeCommand(c.session5310()); logLine("sent 0x53/0x10 (wake)") }, 100)
         main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x07, id = 0x8007)) }, 900)
         main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x0E, id = 0x800E)) }, 1400)
         main.postDelayed({

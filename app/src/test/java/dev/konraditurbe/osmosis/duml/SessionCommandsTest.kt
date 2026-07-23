@@ -52,8 +52,8 @@ class SessionCommandsTest {
 
     @Test
     fun `wifi commands still address the wifi subsystem`() {
-        val f = OsmoCommands.wifiEnable39()
+        val f = OsmoCommands.wifiQuery(0x07)
         assertEquals(0x07, receiver(f))
-        assertEquals(0x07, cmdSet(f)); assertEquals(0x39, cmdId(f))
+        assertEquals(0x07, cmdSet(f)); assertEquals(0x07, cmdId(f))
     }
 }
