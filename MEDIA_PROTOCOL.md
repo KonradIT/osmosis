@@ -8,8 +8,10 @@ frame (correct CRC8+CRC16) — paste it into <https://b3yond.d3vl.com/duml/> and
 
 Transports: **BLE** = write GATT `fff5`, notify `fff4` (frame `[6:8]` msg-id is **big-endian**).
 **Datalink** = UDP (Nano `9004` + TCP-7001 poke first; Action 5 Pro / Xtra `10004`, no poke), DUML wrapped
-in `[8B udp hdr][12B routing hdr][frame]`. Addressing nibble `(id<<5)|type`: App `0x02`, Camera `0x01`,
-Gimbal `0x03`, WiFi `0x07`, DM368 `0x08`.
+in `[8B udp hdr][12B routing hdr][frame]`. Addressing byte `(id<<5)|type`: App `0x02`, Camera `0x01`,
+Gimbal `0x03`, Battery `0x05`, WiFi `0x07`, DM368 `0x08`, plus two session endpoints that are **not** the
+camera — `0xF0` (type `0x10`, id 7) and `0x1C` (type `0x1C`, id 0). Address the wake commands below to the
+camera by mistake and it answers `e0` (reject) and stays asleep; nothing else hints at what went wrong.
 
 ---
 
@@ -147,37 +149,97 @@ per-model adjustment; not yet verified on our Nano/Xtra.**
 ### 17. SD / storage
 - Cmd Set / ID: `0x02` / `0xDC`  (22 B)  ·  `byte0 & 0x01` = SD present
 
-### 18. Battery
-- Cmd Set / ID: `0x0D` / `0x02`  (34 B)  ·  percent = `byte 20`, millivolts = `u16-LE @ byte 1`
+### 18. Battery / power *(also the only place the dock reports in)*
+- Cmd Set / ID: `0x0D` / `0x02`  (34 B, ~1 Hz push)  ·  sender Battery(`0x05`), id `0`
+
+| offset | type | field | confidence |
+|--------|------|-------|------------|
+| `@1`  | `u16-LE` | pack voltage, mV (≈3300–4450 on a Nano) | confirmed |
+| `@5`  | `i32-LE` | current, mA — **signed**: `+` charging, `−` discharging | confirmed |
+| `@17` | `u16-LE` | temperature? (reads 45.0 / 47.0 °C) | plausible, unconfirmed |
+| `@20` | `u8`  | charge percent, 0–100 | confirmed |
+| `@27` | `u8`  | **dock attached** (`0x40` docked, `0` not) | confirmed |
+| `@32` | `u8`  | **taking charge** (`1` / `0`) | confirmed |
+
+- **The dock is not a separate DUML device.** Logging every sender address across docked and undocked
+  sessions, on both BLE and the datalink, never turned up a second battery (`type 0x05, id != 0`) or any
+  new address — so `@27` / `@32` here are the *only* dock signal on the wire.
+- `@27` and `@32` are genuinely different: one transition read `@27=0x40` with `@32=0` and only −175 mA —
+  physically docked but not yet drawing charge. Treat them as separate flags, not a single "charging" bit.
+- Mapped by docking/undocking a Nano mid-session and diffing the frame over six transitions.
+- **Not reported anywhere:** the dock's *own* charge level, and the dock's SD-card capacity — `0x02/0x80`
+  (#16) covers the **active** store only.
 
 ---
 
 ## Connection (BLE control — prerequisites to reach media)
 
-### 19. SetPairingPIN
+### Waking a sleeping camera
+
+A sleeping Osmo Nano **keeps advertising `ADV_IND`** under its own name, so there is no wake *broadcast*
+to send — DJI documents a `WKP` manufacturer-data advertisement, but an HCI snoop of Mimo waking a Nano
+shows Mimo never advertises at all. The wake is an ordinary **command sequence** over GATT `fff5`:
+
+| # | write | receiver | note |
+|---|-------|----------|------|
+| 1 | `0x00/0x2b` `04 00` | `0xF0` | first thing Mimo writes, **before** pairing |
+| 2 | `0x07/0x45` SetPairingPIN | `0x07` | see #22 |
+| 3 | `0x00/0x2b` `01 01` | `0xF0` | then repeating ~1 Hz, forever, as the keepalive |
+| 4 | `0x53/0x10` `00 00 00 00` | `0x1C` | camera answers `01 00 00 00` and **wakes** |
+
+Pace the writes ~100–500 ms apart: `fff5` is write-without-response, so back-to-back frames are dropped.
+Mimo does **not** send ConnectToWiFi (#23) anywhere in this flow.
+
+### 19. Session wake / keepalive
+- Cmd Set / ID: `0x00` / `0x2b`  ·  App(`0x02`) → **`0xF0`** (type `0x10`, id 7), BLE
+- Payload: `04 00` = open the session (sent once, pre-pairing) · `01 01` = keepalive (repeat ~1 Hz)
+- Quirks: the Nano drops an idle paired link after ~5–6 s, so the `01 01` ping must keep running for the
+  whole session. Re-sending SetPairingPIN instead (what we used to do) is noisier and gets a sleeping
+  camera to drop you.
+- DUML example (`04 00`, verbatim from a Mimo capture): <https://b3yond.d3vl.com/duml/#550f04a202f01bcb40002b04009ab9>
+- DUML example (`01 01` keepalive): <https://b3yond.d3vl.com/duml/#550f04a202f01bcb40002b0101abd6>
+
+### 20. Wake camera
+- Cmd Set / ID: `0x53` / `0x10`  ·  App(`0x02`) → **`0x1C`** (type `0x1C`, id 0), BLE
+- Payload: `00 00 00 00`
+- Response: `01 00 00 00` — the camera wakes ~2–3 s later and brings its AP up on its own
+- Quirks: this is the command that actually correlates with the wake. Addressed to Camera(`0x01`) it
+  answers `e0`. Send it **after** pairing; the same `rcv_type 28` shows up on the UDP datalink for
+  `0x53/0x15`, so `0x53` is a session/system set rather than a camera one.
+- DUML example (verbatim from a Mimo capture): <https://b3yond.d3vl.com/duml/#55110492021c1dcb40531000000000894a>
+
+### 21. WiFi enable *(does **not** work)*
+- Cmd Set / ID: `0x07` / `0x39`  ·  App → WiFi(`0x07`), BLE
+- Quirks: Mimo sends this, but the camera rejects it (`e0`) **for Mimo too**, so it is not load-bearing
+  for the wake and we don't send it. Listed only so it isn't re-derived from a capture as a lead.
+
+### 22. SetPairingPIN
 - Cmd Set / ID: `0x07` / `0x45`  ·  App → WiFi(`0x07`), BLE
 - Payload: `PackString(identifier)` + `PackString(token)` (`PackString` = `[len:u8][utf8]`; token `"osmo"`)
 - Response: `0x07/0x45` payload `00 01` = already paired · `00 02` = approval popup on camera; approval then arrives as a **`0x07/0x46` request** (flags `0x40`), which is the "go" signal.
 - DUML example: <https://b3yond.d3vl.com/duml/#553304c2020700a0400745203238346165356238643736623333373561303461363431376164373162656133046f736d6f8c02>
 
-### 20. ConnectToWiFi (wake AP)
+### 23. ConnectToWiFi (AP bring-up — fallback only)
 - Cmd Set / ID: `0x07` / `0x47`  ·  App → WiFi(`0x07`), BLE
 - Payload: `PackString(ssid)` + `PackString(password)` — the camera's *own* creds
 - Response: `0x07/0x47` `00 00` = ok; AP comes up ~15 s later
+- Quirks: **Mimo never sends this**, and on a *sleeping* camera it correlated with the link being
+  terminated (GATT `status=19`). The wake sequence above brings the AP up on its own, so keep this
+  only as a fallback for models that never surface creds over BLE (#24/#25).
 - DUML example (password redacted): <https://b3yond.d3vl.com/duml/#5528040d020700a04007470d4f736d6f4e616e6f2d433244380c78787878787878787878787827e1>
 
-### 21. GetWifiSsid
+### 24. GetWifiSsid
 - Cmd Set / ID: `0x07` / `0x07`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][PackString ssid]`
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a04007077472>
 
-### 22. GetWifiPassword
+### 25. GetWifiPassword
 - Cmd Set / ID: `0x07` / `0x0e`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][PackString passphrase]`
 - Quirks: **pace after GetWifiSsid by ~500 ms** (`fff5` is write-without-response). Verified on Xtra / Action 5 Pro; Nano rides the saved-password fallback.
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070eb5ef>
 
-### 23. GetWifiMac
+### 26. GetWifiMac
 - Cmd Set / ID: `0x07` / `0x0c`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][6-byte MAC]`
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070ca7cc>
