@@ -106,6 +106,40 @@ object RsdkProtocol {
         )
     }
 
+    /**
+     * Camera `device_id`s from DJI's own R-SDK docs (`protocol_data_segment.md`). This is the R-SDK's
+     * private identity space — **unrelated** to the BLE manufacturer model byte the media path uses,
+     * and deliberately kept here: it only ever appears inside an R-SDK session, so nothing outside
+     * the GPS feature should consult it.
+     *
+     * The table doubles as DJI's R-SDK support list. The Osmo Nano is listed as "not supported yet",
+     * and the Pocket 3 isn't listed at all — neither will reach this code, since there's no R-SDK
+     * session to have. The Xtra rebrand is an open question: it may answer as an Action 5 Pro
+     * (`0xFF44`), answer with an id of its own, or not speak R-SDK at all.
+     */
+    val DEVICE_IDS: Map<Int, String> = mapOf(
+        0xFF33 to "Osmo Action 4",
+        0xFF44 to "Osmo Action 5 Pro",
+        0xFF55 to "Osmo Action 6",
+        0xFF66 to "Osmo 360",
+    )
+
+    /**
+     * `device_id` (`uint32_t` @0) out of a Connection Request command frame. On the camera's own
+     * request — the one carrying `verify_mode = 2` — this is the *camera's* id, so it names the model
+     * we're actually talking to. Null if the payload is too short to hold one.
+     */
+    fun cameraDeviceId(payload: ByteArray): Int? {
+        if (payload.size < 4) return null
+        return (payload[0].toInt() and 0xFF) or ((payload[1].toInt() and 0xFF) shl 8) or
+            ((payload[2].toInt() and 0xFF) shl 16) or ((payload[3].toInt() and 0xFF) shl 24)
+    }
+
+    /** Human label for a [cameraDeviceId], flagging ids absent from DJI's published table. */
+    fun deviceIdLabel(deviceId: Int): String =
+        DEVICE_IDS[deviceId]?.let { "0x%04X (%s)".format(deviceId, it) }
+            ?: "0x%08X (UNKNOWN — not in DJI's table)".format(deviceId)
+
     private fun buf(n: Int) = ByteBuffer.allocate(n).order(ByteOrder.LITTLE_ENDIAN)
 
     /** Connection Request (0x00/0x19) — `connection_request_command_frame` (33 B). */

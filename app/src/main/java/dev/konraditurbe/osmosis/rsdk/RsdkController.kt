@@ -33,7 +33,12 @@ class RsdkController(private val context: Context, private val listener: Listene
     private var gatt: GattClient? = null
     private var seq = 0
     private var connected = false
-    private val approvalTimeout = Runnable { fail("Camera didn't approve the R-SDK connection (approve it on-screen, then retry)") }
+    // Silence here has two very different causes — an unapproved popup, or a camera with no R-SDK at
+    // all (DJI lists the Nano as unsupported and doesn't list the Pocket 3) — and they look identical
+    // from our side, so the message names both rather than assuming the popup.
+    private val approvalTimeout = Runnable {
+        fail("No R-SDK reply in 40s — approve the popup on-screen and retry, or this model may not support R-SDK")
+    }
 
     // Stable per-install controller identity (the camera remembers us by these).
     private val prefs = context.getSharedPreferences("osmosis", Context.MODE_PRIVATE)
@@ -108,8 +113,14 @@ class RsdkController(private val context: Context, private val listener: Listene
             if (f.payload.size > 4 && f.payload[4].toInt() != 0) fail("Camera rejected the connection (ret_code=${f.payload[4].toInt()})")
             return
         }
-        // Command frame = connection_request_command_frame: verify_mode @26, verify_data @27 (u16 LE).
+        // Command frame = connection_request_command_frame: device_id @0 (u32 LE), verify_mode @26,
+        // verify_data @27 (u16 LE). On the camera's own request the device_id is *its* model — the
+        // only place R-SDK names the camera. Logged, not acted on: model resolution for the media
+        // path stays with the BLE manufacturer byte, which every camera has.
         if (f.payload.size < 29) return
+        RsdkProtocol.cameraDeviceId(f.payload)?.let {
+            listener.onLog("R-SDK: camera device_id=${RsdkProtocol.deviceIdLabel(it)}")
+        }
         val verifyMode = f.payload[26].toInt() and 0xFF
         val verifyData = (f.payload[27].toInt() and 0xFF) or ((f.payload[28].toInt() and 0xFF) shl 8)
         if (verifyMode != 2) { listener.onLog("R-SDK: unexpected verify_mode=$verifyMode"); return }
