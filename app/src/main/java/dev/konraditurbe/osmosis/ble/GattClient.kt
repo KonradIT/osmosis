@@ -26,6 +26,9 @@ import java.util.UUID
 class GattClient(
     private val context: Context,
     private val listener: Listener,
+    // Media path arms pairing by writing [01 00] to fff4 before onReady. The R-SDK flow doesn't
+    // (it drives its own 0x00/0x19 handshake), so it connects with armPairing = false.
+    private val armPairing: Boolean = true,
 ) {
     interface Listener {
         fun onLog(s: String)
@@ -124,7 +127,10 @@ class GattClient(
 
         @Suppress("DEPRECATION")
         private fun writeNextCccd(g: BluetoothGatt) {
-            val ch = cccdQueue.poll() ?: run { armPairing(g); return }
+            val ch = cccdQueue.poll() ?: run {
+                if (armPairing) writeArmPairing(g) else listener.onReady(this@GattClient)
+                return
+            }
             val d = ch.getDescriptor(BleConstants.CCCD)
             if (d == null) {
                 listener.onLog("GATT: ${short(ch.uuid)} has no CCCD; skipping")
@@ -149,7 +155,7 @@ class GattClient(
             writeNextCccd(g)
         }
 
-        private fun armPairing(g: BluetoothGatt) {
+        private fun writeArmPairing(g: BluetoothGatt) {
             val ch = g.getService(BleConstants.SERVICE_FFF0)?.getCharacteristic(BleConstants.CHAR_FFF4)
             if (ch == null) {
                 listener.onReady(this@GattClient)

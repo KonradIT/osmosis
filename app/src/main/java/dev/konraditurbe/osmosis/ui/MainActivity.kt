@@ -30,6 +30,7 @@ import dev.konraditurbe.osmosis.ble.GattClient
 import dev.konraditurbe.osmosis.ble.OsmoScanner
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.CameraStatus
+import dev.konraditurbe.osmosis.core.FileLog
 import dev.konraditurbe.osmosis.core.SavedCameras
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.duml.DjiMessage
@@ -39,7 +40,9 @@ import dev.konraditurbe.osmosis.net.DatalinkClient
 import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MediaDownloader
 import dev.konraditurbe.osmosis.net.MetaLoader
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.materialswitch.MaterialSwitch
+import dev.konraditurbe.osmosis.rsdk.GpsService
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -52,7 +55,6 @@ import java.util.Locale
  */
 class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Listener {
 
-    @Volatile private var logWriter: java.io.Writer? = null // set when "Save logs" is on
     private lateinit var grid: GridView
     private lateinit var overallBar: ProgressBar
     private lateinit var fileBar: ProgressBar
@@ -66,6 +68,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private lateinit var connectBar: LinearProgressIndicator
     private lateinit var savedCameras: SavedCameras
     private lateinit var statusPill: StatusPillView
+    private lateinit var btnGps: MaterialButton
+    private var pendingGpsTarget: Pair<String, String>? = null // (mac, name) awaiting location perms
     private var camRows: List<CamRow> = emptyList()
     private var currentStatus = CameraStatus()
     private val main = Handler(Looper.getMainLooper())
@@ -181,6 +185,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             if (checked) startFileLogging() else stopFileLogging()
         }
 
+        // 🛰️ GPS-sync mode (R-SDK): when on, picking a camera starts the GPS foreground service
+        // instead of the usual WiFi offload. Default off.
+        btnGps = findViewById(R.id.btnGps)
+        btnGps.isChecked = prefs.getBoolean("gps_mode", false)
+        btnGps.addOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("gps_mode", checked).apply() }
+
         btAdapter = (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
         logLine("Osmosis $packageName started")
@@ -215,7 +225,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     override fun onDestroy() {
         super.onDestroy()
-        stopFileLogging()
+        // Deliberately NOT closing the log file here: GPS sync runs as a foreground service and the
+        // user is usually out with the Activity long gone, so the file has to stay open for it. Every
+        // line is flushed, so nothing is lost if the process dies; the toggle closes it explicitly.
         stopKeepalive()
         datalink?.close()
         scanner?.stop()
@@ -299,9 +311,30 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     private fun onCamRowClick(pos: Int) {
         val r = camRows.getOrNull(pos) ?: return
+        // 🛰️ GPS-sync mode: connect over R-SDK (BLE only, no WiFi) via the foreground service.
+        if (btnGps.isChecked) {
+            if (r.device != null || r.saved) startGpsMode(r.mac, r.name ?: r.mac)
+            else Toast.makeText(this, "${r.name ?: r.mac} isn't in range — turn it on, then Rescan", Toast.LENGTH_SHORT).show()
+            return
+        }
         val dev = r.device
         if (dev != null) onCameraChosen(dev)
         else Toast.makeText(this, "${r.name ?: r.mac} isn't in range — turn it on, then Rescan", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Start the R-SDK GPS-sync foreground service for [mac], requesting location/notification perms first. */
+    private fun startGpsMode(mac: String, name: String) {
+        val need = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.POST_NOTIFICATIONS)
+        val missing = need.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            pendingGpsTarget = mac to name
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQ_GPS_PERMS)
+            return
+        }
+        logLine("GPS sync: connecting R-SDK to $name ($mac)")
+        GpsService.start(this, mac, name)
+        Toast.makeText(this, "GPS sync starting for $name — approve on the camera if it prompts", Toast.LENGTH_LONG).show()
     }
 
     private fun onCamRowLongClick(pos: Int): Boolean {
@@ -402,6 +435,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_GPS_PERMS) {
+            val target = pendingGpsTarget; pendingGpsTarget = null
+            if (target != null && grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                startGpsMode(target.first, target.second)
+            } else logLine("GPS sync: location permission denied.")
+            return
+        }
         if (requestCode != REQ_PERMS) return
         if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             startCameraScan(select = true)
@@ -863,40 +903,20 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     private fun logLine(s: String) {
         android.util.Log.i("Osmosis", s) // always to logcat (adb logcat)
-        val w = logWriter ?: return       // ...and to the file only when "Save logs" is on
-        val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-        synchronized(w) { runCatching { w.write("[$ts] $s\n"); w.flush() } }
+        FileLog.write(s)                 // ...and to the file when "Save logs" is on
     }
 
-    /** Log dir in external files storage — pull with
-     *  `adb pull /sdcard/Android/data/$packageName/files/logs/` (or run-as on a debug build). */
-    private fun logsDir(): java.io.File = java.io.File(getExternalFilesDir(null), "logs").apply { mkdirs() }
+    /** Open a session log file. Shared with the background services via [FileLog], so GPS-sync lines
+     *  keep landing in the file after this Activity is gone. */
+    private fun startFileLogging() = FileLog.start(this)
 
-    /** Open a new timestamped .log for this session, keeping only the 5 newest files. */
-    private fun startFileLogging() {
-        if (logWriter != null) return
-        runCatching {
-            val dir = logsDir()
-            // keep the 4 newest existing, so after adding this one the total is 5 (delete the rest)
-            dir.listFiles { f -> f.isFile && f.name.endsWith(".log") }
-                ?.sortedByDescending { it.lastModified() }?.drop(4)?.forEach { it.delete() }
-            val name = "osmosis_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.log"
-            val file = java.io.File(dir, name)
-            logWriter = java.io.BufferedWriter(java.io.FileWriter(file, true))
-            logLine("=== saving logs to ${file.absolutePath} ===")
-        }.onFailure { android.util.Log.e("Osmosis", "startFileLogging failed", it) }
-    }
-
-    private fun stopFileLogging() {
-        val w = logWriter ?: return
-        logWriter = null
-        synchronized(w) { runCatching { w.flush(); w.close() } }
-    }
+    private fun stopFileLogging() = FileLog.stop()
 
     private fun short(u: java.util.UUID) = u.toString().substring(4, 8)
 
     companion object {
         private const val REQ_PERMS = 1001
+        private const val REQ_GPS_PERMS = 1002
     }
 }
 

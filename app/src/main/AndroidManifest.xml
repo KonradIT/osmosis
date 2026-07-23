@@ -9,7 +9,13 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <!-- Location: legacy BLE scan (<=30) AND the R-SDK GPS-sync feature (all SDKs). -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!-- R-SDK GPS sync: a location-typed foreground service streams phone GPS into the camera. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- WiFi: join the camera's AP (no internet) via WifiNetworkSpecifier. -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -42,5 +48,9 @@
         <activity
             android:name=".ui.MediaPreviewActivity"
             android:exported="false" />
+        <service
+            android:name=".rsdk.GpsService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
     </application>
 </manifest>
