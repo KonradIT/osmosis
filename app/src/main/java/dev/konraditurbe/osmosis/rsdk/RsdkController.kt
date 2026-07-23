@@ -64,8 +64,9 @@ class RsdkController(private val context: Context, private val listener: Listene
         gatt?.writeCommand(RsdkProtocol.frame(cmdSet, cmdId, cmdType, payload, useSeq))
     }
 
-    /** Push one GPS fix (0x00/0x17). Fields already in DJI units — see [RsdkProtocol.gpsPush]. */
-    fun sendGps(frame: ByteArray) { gatt?.writeCommand(frame) }
+    /** Push one GPS fix (0x00/0x17). Fields already in DJI units — see [RsdkProtocol.gpsPush].
+     *  Returns whether the BLE write was actually issued, so a silently dying link is visible. */
+    fun sendGps(frame: ByteArray): Boolean = gatt?.writeCommand(frame) ?: false
 
     fun gpsFrame(
         yearMonthDay: Int, hourMinuteSecond: Int, lon1e7: Int, lat1e7: Int, heightMm: Int,

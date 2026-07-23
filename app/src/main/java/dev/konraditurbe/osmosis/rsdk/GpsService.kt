@@ -43,16 +43,46 @@ class GpsService : Service(), RsdkController.Listener {
     private var status: RsdkProtocol.CameraStatus? = null
     private var connected = false
 
+    private var pushes = 0
+    private var lastWriteOk = true
+
+    /**
+     * The newest fix, but only if it's actually recent. `getLastKnownLocation` can hand back a fix
+     * that's hours old, and if provider updates never arrive we'd otherwise stream that one stale
+     * position at 1 Hz for the whole recording — which is exactly the "only the start location"
+     * symptom. Mirrors the demo's `is_current_gps_data_valid()` gate. Age is measured from the fix's
+     * own timestamp, so a stale seed can never masquerade as live.
+     */
+    private fun freshFix(maxAgeMs: Long = PUSH_MAX_AGE_MS): Location? {
+        val loc = latest ?: return null
+        return if (System.currentTimeMillis() - loc.time in 0..maxAgeMs) loc else null
+    }
+
     // Steady 1 Hz push using the latest fix — feeds the camera and keeps the BLE link alive.
     private val pushTick = object : Runnable {
         override fun run() {
-            val loc = latest
-            if (connected && loc != null) rsdk.sendGps(buildGpsFrame(loc))
+            val loc = if (connected) freshFix() else null
+            if (loc != null) {
+                val ok = rsdk.sendGps(buildGpsFrame(loc))
+                pushes++
+                // Health only — never the position. Log on change or every ~15 s so a stalled feed
+                // (or a dead BLE write) is diagnosable from logcat without leaking coordinates.
+                if (ok != lastWriteOk || pushes % 15 == 0) {
+                    val age = System.currentTimeMillis() - loc.time
+                    Log.i("Osmosis", "GPS: pushes=$pushes fixAge=${age}ms sats=$satellites write=${if (ok) "ok" else "FAILED"}")
+                }
+                lastWriteOk = ok
+            }
             main.postDelayed(this, 1000)
         }
     }
 
     private val locListener = LocationListener { loc ->
+        // Keep the freshest fix, but don't let a coarse network fix stomp a good, recent GPS one.
+        val cur = latest
+        if (cur != null && System.currentTimeMillis() - lastFixMs < 5_000 &&
+            loc.hasAccuracy() && cur.hasAccuracy() && loc.accuracy > 3f * cur.accuracy
+        ) return@LocationListener
         latest = loc; lastFixMs = System.currentTimeMillis(); updateNotification()
     }
 
@@ -82,11 +112,23 @@ class GpsService : Service(), RsdkController.Listener {
         startForegroundCompat(buildNotification())
 
         // Start location + satellite feed (permission checked by the caller before starting us).
+        // Subscribe to EVERY provider we can, not just GPS: on many devices GPS_PROVIDER delivers
+        // sparsely (or not at all once backgrounded), which used to leave us pushing the seeded
+        // last-known fix for the whole recording.
         locationManager = (getSystemService(LOCATION_SERVICE) as LocationManager).also { lm ->
-            runCatching { lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, locListener, mainLooper) }
-                .onFailure { Log.i("Osmosis", "GPS: location updates failed: ${it.message}") }
+            val wanted = buildList {
+                if (Build.VERSION.SDK_INT >= 31) add(LocationManager.FUSED_PROVIDER)
+                add(LocationManager.GPS_PROVIDER)
+                add(LocationManager.NETWORK_PROVIDER)
+            }
+            val live = wanted.filter { p ->
+                runCatching { lm.requestLocationUpdates(p, 1000L, 0f, locListener, mainLooper); true }
+                    .getOrElse { Log.i("Osmosis", "GPS: provider '$p' unavailable: ${it.message}"); false }
+            }
+            Log.i("Osmosis", "GPS: subscribed to providers=$live")
             runCatching { lm.registerGnssStatusCallback(gnssCallback, main) }
-            latest = runCatching { lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()
+            // Seed only for the notification — freshFix() decides whether it's recent enough to send.
+            latest = wanted.firstNotNullOfOrNull { p -> runCatching { lm.getLastKnownLocation(p) }.getOrNull() }
         }
 
         val device = (getSystemService(BluetoothManager::class.java))?.adapter?.getRemoteDevice(mac)
@@ -104,7 +146,24 @@ class GpsService : Service(), RsdkController.Listener {
     override fun onFailed(reason: String) { Log.i("Osmosis", "GPS: $reason"); stop() }
 
     // ---- GPS frame from a phone fix ------------------------------------------
+    /**
+     * The camera stores `hour_minute_second` as a **bare local wall-clock** — the protocol carries no
+     * timezone field at all (DJI's own reference demo hardcodes `hour + 8` for UTC+8). So we stamp the
+     * phone's local time and the recorded time is only as right as the phone's timezone; log which
+     * zone we used once, so a mismatch is diagnosable (an offset is not position data).
+     */
+    private fun logTimeZoneOnce() {
+        if (tzLogged) return
+        tzLogged = true
+        val tz = java.util.TimeZone.getDefault()
+        val offMin = tz.getOffset(System.currentTimeMillis()) / 60000
+        Log.i("Osmosis", "GPS: stamping local wall-clock from tz=${tz.id} (UTC%+03d:%02d); protocol has no timezone field"
+            .format(offMin / 60, kotlin.math.abs(offMin % 60)))
+    }
+    private var tzLogged = false
+
     private fun buildGpsFrame(loc: Location): ByteArray {
+        logTimeZoneOnce()
         val cal = Calendar.getInstance().apply { timeInMillis = loc.time }
         val ymd = (cal.get(Calendar.YEAR)) * 10000 + (cal.get(Calendar.MONTH) + 1) * 100 + cal.get(Calendar.DAY_OF_MONTH)
         val hms = cal.get(Calendar.HOUR_OF_DAY) * 10000 + cal.get(Calendar.MINUTE) * 100 + cal.get(Calendar.SECOND)
@@ -126,8 +185,10 @@ class GpsService : Service(), RsdkController.Listener {
     // ---- Notification --------------------------------------------------------
     private var cameraName = ""
 
-    private fun gpsHealthy(): Boolean =
-        latest != null && System.currentTimeMillis() - lastFixMs < 6000 && (latest?.hasAccuracy() != true || latest!!.accuracy < 50f)
+    private fun gpsHealthy(): Boolean {
+        val loc = freshFix(HEALTH_MAX_AGE_MS) ?: return false
+        return !loc.hasAccuracy() || loc.accuracy < 50f
+    }
 
     private fun buildNotification(): Notification {
         val mode = status?.modeName ?: if (connected) "—" else "connecting…"
@@ -171,6 +232,10 @@ class GpsService : Service(), RsdkController.Listener {
     companion object {
         private const val CHANNEL = "gps_sync"
         private const val NOTIF_ID = 42
+        /** Never stream a fix older than this — a stale seed must not pose as the live position. */
+        private const val PUSH_MAX_AGE_MS = 30_000L
+        /** Tighter bound for the notification's "gps: healthy" readout. */
+        private const val HEALTH_MAX_AGE_MS = 6_000L
         const val ACTION_STOP = "dev.konraditurbe.osmosis.GPS_STOP"
         const val EXTRA_MAC = "mac"
         const val EXTRA_NAME = "name"
