@@ -37,6 +37,65 @@ object OsmoCommands {
         return DjiMessage(TARGET_APP_TO_WIFI, id, type, payload).encode()
     }
 
+    // ---- Mimo's BLE session sequence (from an HCI snoop of Mimo waking a sleeping Nano) -------
+    //
+    // Captured order, once notifications are armed on fff4:
+    //   0x00/0x2b `04 00`   <- FIRST, *before* pairing
+    //   0x07/0x45 pair
+    //   0x53/0x10 `00 00 00 00`
+    //   0x00/0x32 `31 31 00 00 00`
+    //   0x07/0x39 `7a`
+    //   0x00/0x2b `01 01`   <- then repeating, ~0.5-1 s, as the session keepalive
+    //   0x07/0x07 / 0x0e / 0x0c  (SSID / password / MAC)
+    // Notably Mimo NEVER sends 0x07/0x47 (ConnectToWiFi) — the command we used to "wake the AP",
+    // after which a sleeping camera drops us (GATT status=19).
+
+    const val TARGET_APP_TO_CAMERA = 0x0102     // App(0x02) -> Camera(0x01)
+    const val TARGET_APP_TO_DM368 = 0x0802      // App(0x02) -> DM368(0x08)
+
+    // These two do NOT go to the camera. The receiver byte is `(id << 5) | type`, and an HCI diff of
+    // Mimo vs us showed we were addressing both to Camera(0x01) — the camera answered `e0` (reject)
+    // every time, which is why the wake never happened.
+    //   0x00/0x2b -> 0xF0 = type 0x10, id 7    (matches `rcv=16` seen on the UDP datalink)
+    //   0x53/0x10 -> 0x1C = type 0x1C, id 0    (matches `rcv_type=28` seen for 0x53/0x15)
+    const val TARGET_APP_TO_SESSION = 0xF002    // App(0x02) -> type 0x10 / id 7
+    const val TARGET_APP_TO_1C = 0x1C02         // App(0x02) -> type 0x1C / id 0
+
+    /** Generic command to an arbitrary cmdset/cmdId + target, mirroring [wifiQuery]'s framing. */
+    fun command(
+        cmdSet: Int, cmdId: Int, payload: ByteArray = ByteArray(0),
+        target: Int = TARGET_APP_TO_CAMERA, id: Int = 0x8000,
+    ): ByteArray {
+        val type = 0x40 or (cmdSet shl 8) or (cmdId shl 16)
+        return DjiMessage(target, id, type, payload).encode()
+    }
+
+    /**
+     * `0x00/0x2b` — the session/heartbeat frame Mimo opens with and then repeats. Payload `04 00`
+     * is what it sends first (before pairing) on a sleeping camera; `01 01` is the repeating form.
+     */
+    fun sessionPing(payload: ByteArray, id: Int = 0x802B): ByteArray =
+        command(0x00, 0x2B, payload, target = TARGET_APP_TO_SESSION, id = id)
+
+    val SESSION_WAKE: ByteArray = byteArrayOf(0x04, 0x00)
+    val SESSION_KEEPALIVE: ByteArray = byteArrayOf(0x01, 0x01)
+
+    /**
+     * `0x53/0x10` `00 00 00 00` -> type 0x1C. The camera answers `01 00 00 00` for Mimo; addressed
+     * to the camera instead it answers `e0` (reject). This is the command that actually correlates
+     * with the camera waking.
+     */
+    fun session5310(id: Int = 0x8053): ByteArray =
+        command(0x53, 0x10, byteArrayOf(0, 0, 0, 0), target = TARGET_APP_TO_1C, id = id)
+
+    /**
+     * `0x07/0x39` — kept only for parity with Mimo's flow. The camera replies `e0` to **Mimo too**,
+     * so it is *not* load-bearing for the wake; don't read anything into its payload byte (Mimo's
+     * varies run to run: `7a`, `86`).
+     */
+    fun wifiEnable39(id: Int = 0x8039): ByteArray =
+        wifiQuery(0x39, byteArrayOf(0x7A), id = id)
+
     /**
      * App device-info blob ("APP" identity), mirroring osmo-download's 0x00/0x81 payload. Used to
      * answer the camera's inbound 0x00/0x81 device-info exchange so it accepts us as a live app.

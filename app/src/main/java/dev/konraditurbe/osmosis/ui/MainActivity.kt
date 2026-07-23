@@ -127,22 +127,28 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private val typeCounts = HashMap<Int, Int>()
     private val reqSeen = HashSet<Int>() // inbound request types already logged
 
-    // BLE keepalive: the Nano drops an idle paired link after ~5-6s. Re-send a benign frame
-    // (SetPairingPIN, which it just answers ALREADY PAIRED) every 2s to keep the session alive.
+    // BLE keepalive: the Nano drops an idle paired link after ~5-6s, so we ping it ~1 Hz.
     private var keepaliveOn = false
     private var lastPairStatus = -99
     private val keepalive = object : Runnable {
         override fun run() {
-            gattClient?.writeCommand(dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin))
-            main.postDelayed(this, 2000)
+            // Mimo keeps the paired link alive with 0x00/0x2b `01 01` roughly every 0.5-1 s (HCI
+            // snoop), not by re-sending SetPairingPIN as we used to — re-pairing every tick is both
+            // noisier and, on a sleeping camera, part of what got us dropped.
+            gattClient?.writeCommand(
+                dev.konraditurbe.osmosis.duml.OsmoCommands.sessionPing(
+                    dev.konraditurbe.osmosis.duml.OsmoCommands.SESSION_KEEPALIVE
+                )
+            )
+            main.postDelayed(this, 1000)
         }
     }
 
     private fun startKeepalive() {
         if (keepaliveOn) return
         keepaliveOn = true
-        logLine("keepalive: started (2s)")
-        main.postDelayed(keepalive, 2000)
+        logLine("keepalive: started (0x00/0x2b every 1s, Mimo-style)")
+        main.postDelayed(keepalive, 1000)
     }
 
     private fun stopKeepalive() {
@@ -392,6 +398,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         connecting = true
         setConnectProgress(3) // tap → connecting
         logLine("OFFLOAD [$currentBrand] $offloadSsid (${device.address})")
+        // No wake broadcast here: an HCI snoop of Mimo waking a sleeping Nano showed it never
+        // advertises. The sleeping camera keeps advertising ADV_IND itself, and Mimo simply connects
+        // and drives it with DUML (0x00/0x2b -> pair -> 0x53/0x10 -> 0x07/0x39). That's the sequence
+        // we now follow in onReady/onPaired. DJI's WKP broadcast ([CameraWaker]) is for the *R-SDK
+        // remote* deep-sleep case and is deliberately not in this path.
         val gc = GattClient(this, this)
         gattClient = gc
         gc.connect(device)
@@ -460,12 +471,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun onPaired() {
         if (!offloadMode || credsRequested) return
         credsRequested = true
-        logLine("Paired — requesting WiFi credentials over BLE (0x07/07 SSID, 0x07/0e password)…")
-        // Paced writes: fff5 is write-without-response, so back-to-back queries drop, and an immediate
-        // one also races the pairing-approval ACK. Space them out; the 0x07/0e reply drives the join
-        // (handled in onNotification), 0x07/07 just refreshes the SSID.
-        main.postDelayed({ gattClient?.writeCommand(dev.konraditurbe.osmosis.duml.OsmoCommands.wifiQuery(0x07, id = 0x8007)) }, 600)
-        main.postDelayed({ gattClient?.writeCommand(dev.konraditurbe.osmosis.duml.OsmoCommands.wifiQuery(0x0E, id = 0x800E)) }, 1100)
+        logLine("Paired — running Mimo's post-pair sequence, then reading WiFi creds…")
+        // Paced writes: fff5 is write-without-response, so back-to-back frames drop, and an immediate
+        // one also races the pairing-approval ACK. Order + spacing mirror the Mimo HCI snoop:
+        //   0x53/0x10 -> 0x07/0x39 -> (creds) 0x07/0x07 -> 0x07/0x0e
+        // 0x53/0x10 is the one that matters: the camera answers 01 00 00 00 and wakes. 0x07/0x39 is
+        // sent only for parity — the camera rejects it (e0) for Mimo as well.
+        val c = dev.konraditurbe.osmosis.duml.OsmoCommands
+        main.postDelayed({ gattClient?.writeCommand(c.session5310()); logLine("sent 0x53/0x10") }, 100)
+        main.postDelayed({ gattClient?.writeCommand(c.wifiEnable39()); logLine("sent 0x07/0x39 (parity with Mimo; camera rejects it for Mimo too)") }, 350)
+        main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x07, id = 0x8007)) }, 900)
+        main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x0E, id = 0x800E)) }, 1400)
         main.postDelayed({
             if (offloadTriggered) return@postDelayed
             val addr = currentAddress
@@ -489,10 +505,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         if (!offloadMode || offloadTriggered) return
         offloadTriggered = true
         setConnectProgress(28) // paired → waking the AP
-        logLine("OFFLOAD: paired -> waking AP via ConnectToWiFi(0x07/47)")
-        gattClient?.writeCommand(
-            dev.konraditurbe.osmosis.duml.OsmoCommands.connectWifi(offloadSsid, offloadPass)
-        )
+        // The wake/AP now comes from the session sequence in onPaired() (0x00/0x2b to 0xF0, then
+        // 0x53/0x10 to 0x1C). ConnectToWiFi (0x07/0x47) is NOT in Mimo's flow at all and correlated
+        // with a sleeping camera terminating the link (status=19), so it's only a fallback for
+        // models that never surfaced creds over BLE.
+        if (offloadPass.isEmpty()) {
+            logLine("OFFLOAD: no BLE creds — falling back to ConnectToWiFi(0x07/47)")
+            gattClient?.writeCommand(
+                dev.konraditurbe.osmosis.duml.OsmoCommands.connectWifi(offloadSsid, offloadPass)
+            )
+        } else {
+            logLine("OFFLOAD: paired -> AP up via the session sequence (0x00/0x2b + 0x53/0x10)")
+        }
         // AP needs a few seconds to come up; the WifiNetworkSpecifier dialog keeps searching
         // until it appears, so a modest delay before requesting the network is fine.
         main.postDelayed({ promptWifiConsent(offloadSsid, offloadPass) }, 3000)
@@ -788,9 +812,31 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     override fun onReady(gatt: GattClient) {
         if (offloadMode) setConnectProgress(15) // GATT connected + services ready
-        val frame = dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin)
-        val ok = gatt.writeCommand(frame)
-        logLine("READY — sent SetPairingPIN(pin=\"$pairPin\") ok=$ok")
+        // Mimo opens with 0x00/0x2b `04 00` *before* pairing — it's the first thing it writes to a
+        // sleeping camera (HCI snoop). Pairing follows a beat later so the two writes don't collide
+        // on fff5 (write-without-response drops back-to-back frames).
+        val woke = gatt.writeCommand(
+            dev.konraditurbe.osmosis.duml.OsmoCommands.sessionPing(
+                dev.konraditurbe.osmosis.duml.OsmoCommands.SESSION_WAKE
+            )
+        )
+        logLine("READY — sent session wake 0x00/0x2b[04 00] ok=$woke")
+        main.postDelayed({
+            val frame = dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin)
+            val ok = gattClient?.writeCommand(frame) ?: false
+            logLine("sent SetPairingPIN(pin=\"$pairPin\") ok=$ok")
+        }, 120)
+        // The keepalive used to re-send SetPairingPIN every 2 s, which doubled as a retry if the
+        // first write dropped (fff5 is write-without-response). Now that it pings 0x00/0x2b instead,
+        // retry explicitly until the camera answers — but stop once paired, so we don't re-pair.
+        for (delay in longArrayOf(2500, 5000)) {
+            main.postDelayed({
+                if (!credsRequested && lastPairStatus == -99 && gattClient != null) {
+                    logLine("pairing: no reply yet — re-sending SetPairingPIN")
+                    gattClient?.writeCommand(dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin))
+                }
+            }, delay)
+        }
     }
 
     override fun onNotification(sourceChar: java.util.UUID, raw: ByteArray, parsed: DjiMessage?) {
@@ -825,7 +871,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             when (parsed.cmdId) {
                 0x45 -> {
                     val status = if (p.size >= 2) p[1].toInt() and 0xFF else -1
-                    if (status != lastPairStatus) { // keepalive re-asks every 2s; only log changes
+                    if (status != lastPairStatus) { // retries may re-ask; only log changes
                         lastPairStatus = status
                         val meaning = when (status) {
                             0x01 -> "ALREADY PAIRED"

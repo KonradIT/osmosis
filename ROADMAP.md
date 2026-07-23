@@ -304,3 +304,40 @@ a healthy feed shows many distinct positions and advancing timestamps.
 
 **Remaining (optional):** a control UI on top of the live R-SDK session (record `0x1D/0x03`, mode
 `0x1D/0x04` — see #8). The Xtra rebrand probably won't honor R-SDK at all.
+
+## 10. Wake a sleeping camera over BLE — ✅ DONE, verified on the Nano (2026-07-23)
+
+Tap a sleeping Nano in the camera list and it wakes and offloads — no reaching for the power button.
+
+**How it actually works (and how two wrong theories died):**
+- ❌ *DJI's `WKP` wake broadcast.* DJI documents one (`{10, 0xff, 'W','K','P', mac-reversed}`,
+  *Camera Power Mode Settings (001A)*) and we implemented it byte-exactly
+  ([CameraWaker](app/src/main/java/dev/konraditurbe/osmosis/ble/CameraWaker.kt), tests pin the frame,
+  including the trick that Android's `addManufacturerData` prepends a company id, so `'W','K'` must
+  ride *in* that field as `0x4B57`). It did nothing — an HCI snoop of Mimo shows **Mimo never
+  advertises at all**. That path is for the R-SDK *remote* deep-sleep case; it's kept but unwired.
+- ❌ *`0x07/0x39` as the AP bring-up.* The camera replies `e0` (reject) to **Mimo too**, so it isn't
+  load-bearing. Sent only for flow parity.
+- ✅ **A sleeping Nano keeps advertising `ADV_IND`** under its own name. Mimo simply connects and
+  drives it with DUML. The wake is a *command sequence*, not a broadcast.
+
+**The sequence** (mirrored in `onReady`/`onPaired`), and the bug that hid it — the DUML receiver byte
+is `(id << 5) | type`, and these two commands are **not addressed to the camera**:
+
+| step | cmd | receiver | reply |
+|------|-----|----------|-------|
+| 1 | `0x00/0x2b` `04 00` (before pairing) | **`0xF0`** = type `0x10`, id 7 | — |
+| 2 | `0x07/0x45` SetPairingPIN | `0x07` | `00 01` |
+| 3 | **`0x53/0x10`** `00 00 00 00` | **`0x1C`** = type `0x1C`, id 0 | **`01 00 00 00`** ← wakes it |
+| 4 | `0x00/0x2b` `01 01`, ~1 Hz | `0xF0` | keepalive |
+
+Addressed to Camera (`0x01`) instead — as we first did — every one of them is answered `e0` and the
+camera never wakes. Pinned by
+[SessionCommandsTest](app/src/test/java/dev/konraditurbe/osmosis/duml/SessionCommandsTest.kt), because
+the failure is *silent*. `0x07/0x47` ConnectToWiFi (never used by Mimo, and correlated with a sleeping
+camera dropping us, `status=19`) is now only a fallback when no creds came over BLE.
+
+**Method note:** cracked by an HCI snoop (`settings put global bluetooth_hci_log 1` → `adb bugreport`
+→ `FS/data/misc/bluetooth/logs/btsnoop_hci.log`) of **Mimo and Osmosis back to back, with the wake
+button-press wall-clock noted**, then diffing the two frame streams. The timestamps are local
+wall-clock (decode with `utcfromtimestamp`). Same technique that cracked #3.
