@@ -26,26 +26,81 @@ camera by mistake and it answers `e0` (reject) and stays asleep; nothing else hi
 - Response: chunked `0x00/0x27` frames, each payload = `[10B sub-header 4A 01 xx xx <seq:u16LE@6> 00 00][chunk]`. **Strip the sub-header, concat chunks in arrival order** → the manifest.
 - DUML example: <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000010000002d000d0100ffffffffffffffff0001000000000000000000000000008185>
 
-**Parsed — path-based** (Nano `DJI_` 361 B / Xtra `CAM_` 272 B, fixed stride): `[u32-LE count][record × count]`. Each record = an enum block (holds the fps rational) + length-prefixed strings. Anchor on the filename — the only field with an extension:
+**Parsed — DJI CompositePack (TLV).** The reassembled manifest opens with a `u32-LE` file count (present on the Nano/Xtra/Pocket 3; **`0` on the Action 5/6** — count the records instead), then one record per file. Every field is **length-delimited**, so you read *tag → length → value* — there is no need to recognise what a filename looks like, and no regex. The self-identifying anchor is the **media-path** field; the filename is read only for its extension:
 
 ```
-… 0b "DJI"/"CAM" 00×9   8A 01 <idx>   … <fps> … 12 01 00 13 00
-  0d <len:u8> <filename>              # DJI_20260329115359_0211_D.MP4  (has the extension)
-  1a <len:u8> 00 00 00 01 <media>     # DCIM/DJI_001/DJI_…_D           (NO extension)
-  1a <len:u8> 00 00 00 02 <thumb>     # MISC/THM/DJI_001/DJI_…_D
-  1a <len:u8> …                       # optional .LRF/.LRV proxy (Nano)
+0d <len:u8>              <ascii>        # filename "<base>.<ext>"  (read for the ext only)
+1a <total:u8> 00 00 00 01 <ascii>       # media path, ascii = total-6 bytes, "DCIM/…" (NO ext)
+1a <total:u8> 00 00 00 02 <ascii>       # thumb path,  "MISC/THM/…"
 ```
 
-| token | field |
-|-------|-------|
-| `0b "DJI"/"CAM" 00×9` | record start |
-| `8A 01 <idx>` | record index |
-| `<u32-LE num><u32-LE den>` | fps rational, e.g. `a861 0000 e803 0000` = 25000/1000 = **25 fps** |
-| `0d <len> <name>` | filename (only field carrying the extension → record anchor) |
-| `1a <len> 00000001 <path>` | DCIM media path (no ext) |
-| `1a <len> 00000002 <path>` | MISC/THM thumb path |
+Handle + size hang off a **record marker `03 ff 19 06` at `head+8`**, present on **video records only** (photos have none → no handle, no size):
 
-fps is present, and **byte size** (`u32-LE @ record +38`, video records) — no HTTP `HEAD` needed; **resolution / duration are not** — read those from the MP4 `moov`.
+| field | where | notes |
+|-------|-------|-------|
+| media path | `1a … 00 00 00 01` value | `DCIM/<folder>/<base>`, no extension |
+| thumb path | `1a … 00 00 00 02` value | `MISC/THM/<folder>/<base>` |
+| extension  | `0d` filename field | the only field carrying `.MP4`/`.JPG`/… |
+| delete handle | `u32-LE @ head` (`head = marker − 8`) | feeds `0x00/0x28` (§2); `0` = photo, not deletable |
+| byte size | `u32-LE @ head+38` | **video only, and Nano only** — see caveat |
+| fps | rational `<u32 num><u32 den>` near the record | `a861 0000 e803 0000` = 25000/1000 = **25 fps** |
+
+- **Naming is irrelevant to the parse.** Because the path/name are read by length, the camera's *Naming Management* custom **Folder** and **File** prefixes decode exactly like stock — `DCIM/DJI_001/DJI_…_D.MP4` (stock), `DCIM/DJI_001/DJI_…_D_OP3.MP4` (Pocket 3), `DCIM/DJI_001_OA5/DJI_…_D_DOA5.MP4` (Action 5, custom folder + file suffix), `…_D_A01.MP4` (a user-typed `A01`) — all the same.
+- **Size caveat:** `head+38` is a real per-file size only where it *varies* across the list (the Nano). The whole Action family (Xtra / OA5 / OA6 / Pocket 3) parks a per-camera **constant** there, so trust it only when video sizes differ — otherwise fall back to an HTTP `HEAD`. **Resolution / duration** aren't in the manifest at all → read those from the MP4 `moov`.
+
+**Read it in Python** (`struct` for the little-endian ints; the buffer is the reassembled `0x00/0x27` payload):
+
+```python
+import struct
+
+def read_path(buf, i, sub, prefix):
+    """A path TLV at buf[i]: 1a [total] 00 00 00 <sub> <ascii>, ascii = total-6 bytes."""
+    if buf[i:i+1] != b"\x1a" or buf[i+2:i+5] != b"\x00\x00\x00" or buf[i+5] != sub:
+        return None
+    slen = buf[i+1] - 6
+    value = buf[i+6 : i+6+slen]
+    return (value, i+6+slen) if slen >= len(prefix) and value.startswith(prefix) else None
+
+def decode_manifest(buf):
+    # 1) enumerate media records by their most self-identifying field, the DCIM media path.
+    medias, i = [], 0
+    while i < len(buf):
+        f = read_path(buf, i, sub=1, prefix=b"DCIM/")
+        if f: medias.append((i, f[1], f[0].decode())); i = f[1]
+        else: i += 1
+
+    files = []
+    for k, (pos, end, path) in enumerate(medias):
+        lo = medias[k-1][1] if k else 0                       # this record's byte window…
+        hi = medias[k+1][0] if k+1 < len(medias) else len(buf)
+        folder, base = path.split("/")[1], path.rsplit("/", 1)[-1]
+
+        ext, j = "", lo                                       # extension from the 0d filename field
+        while j < hi - 2:
+            if buf[j] == 0x0D and buf[j+2:j+2+len(base)+1] == (base + ".").encode():
+                ext = buf[j+2+len(base)+1 : j+2+buf[j+1]].decode().upper(); break
+            j += 1
+
+        handle = size = 0                                     # handle/size behind the video marker
+        m = buf.find(b"\x03\xff\x19\x06", lo, hi)
+        if m != -1:
+            head = m - 8
+            handle = struct.unpack_from("<I", buf, head)[0]
+            if ext in ("MP4", "MOV"):
+                size = struct.unpack_from("<I", buf, head + 38)[0]   # Nano-only; else HTTP HEAD
+
+        files.append(dict(folder=folder, name=f"{base}.{ext}" if ext else base,
+                          handle=handle, size=size))
+    return files
+
+manifest_bytes = b""            # <- reassembled 0x00/0x27 payload from the camera
+media_files = decode_manifest(manifest_bytes)
+
+count = struct.unpack_from("<I", manifest_bytes, 0)[0] if manifest_bytes else 0
+print(f"File count: {count or len(media_files)}")   # header count, or record count (Action 5/6 = 0)
+for f in media_files:
+    print(f"Folder {f['folder']} - Name {f['name']} - Size {f['size']}")
+```
 
 **Parsed — index-based** (older Osmo Action 1/2/3): header `[u32-LE count][u32-LE total_size]`, then fixed **65 B** records, **no path strings** (files keyed by numeric `FileIndex`):
 
