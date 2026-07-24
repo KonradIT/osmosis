@@ -93,10 +93,39 @@ class CompositeManifestTest {
             assertEquals("delete handle for $path", handle, f.handle)
             assertEquals("MP4", f.ext)
             assertTrue("a video record must be deletable", f.deletable)
-            // head+38 size is unverified on these layouts, so it's left 0 (the app HTTP-HEADs it)
-            // rather than shown as a bogus figure.
-            assertEquals("size must be 0 (not the head+38 constant)", 0L, f.sizeBytes)
         }
+    }
+
+    // The full 2-record OA5 manifest (custom prefix `_DOA5`), captured via the on-device hex dump.
+    // Both records carry the same head+38 value — the per-camera constant that must be rejected as a
+    // size so the app HTTP-HEADs the real one.
+    private val oa5Manifest = hex(
+        "0000000008000000000000000000000002000000140400004738f85cb8381a03200004400800031003ff19060000004b011a" +
+        "35000000014443494d2f444a495f3030315f4f41352f444a495f32303236303732343037303231345f303030325f445f444f" +
+        "4135001b0a0000000201000312131a39000000024d4953432f54484d2f444a495f3030315f4f41352f444a495f3230323630" +
+        "3732343037303231345f303030325f445f444f4135001b0a000000020201140215030001ea86b08a04000001013d07001000" +
+        "080003040b01790000000000000000001700183300000030750000e903000030750000e903000015140207061d020700c900" +
+        "0000001801110000000000370000000000010000210500000000220500000000260500000000280600000001002b05000000" +
+        "002a05000000000b444a49000000000000000000008a01020000000240000012010013000d22444a495f3230323630373234" +
+        "3037303231345f303030325f445f444f41352e4d503400ccb9ba5c6b180502100004400600031003ff19060000004d011a35" +
+        "000000014443494d2f444a495f3030315f4f41352f444a495f32303236303532363233313432355f303030315f445f444f41" +
+        "35001b0a0000000201000312131a39000000024d4953432f54484d2f444a495f3030315f4f41352f444a495f323032363035" +
+        "32363233313432355f303030315f445f444f4135001b0a00000002020114021503000140cc80f604000001013d0700100006" +
+        "000304cdfe5d0000000000000000001700183300000030750000e903000030750000e903000010190e1707200e1700c90000" +
+        "00001801110000000000370000000000010000210500000000220500000000260500000000280600000001002b0500000000" +
+        "2a05000000000b444a49000000000000000000008a01010000000140000012010013000c010d22444a495f32303236303532" +
+        "363233313432355f303030315f445f444f41352e4d503400"
+    )
+
+    @Test
+    fun `an all-identical head+38 size is rejected as the per-camera constant`() {
+        val files = DatalinkClient({}, 9004, true).decodeCompositeForTest(oa5Manifest)
+        assertEquals(2, files.size)
+        // Correct suffixed-folder download paths…
+        assertTrue(files.all { it.path.startsWith("DCIM/DJI_001_OA5/DJI_") && it.path.endsWith("_DOA5.MP4") })
+        assertTrue(files.all { it.deletable })
+        // …and no bogus size: both records shared 1245982517 at head+38, so it's dropped to 0.
+        assertTrue("the constant head+38 size must be rejected", files.all { it.sizeBytes == 0L })
     }
 
     @Test

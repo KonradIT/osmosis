@@ -461,13 +461,11 @@ class DatalinkClient(
         return out
     }
 
-    // Filename token. The trailing `(?:_[A-Z0-9]+)*` is the per-model suffix DJI appends after the
-    // frame-type letter: none on the Nano/Xtra (`…_0022_D.MP4`), `_OP3` on the Pocket 3
-    // (`…_0015_D_OP3.MP4`), `_DOA5`/`_DOA6` on the Action 5 Pro / Action 6 (`…_0002_D_DOA5.MP4`).
+    // Filename token. The trailing `(?:_[A-Z0-9]+)*` is an optional per-camera suffix — absent on
+    // stock media (`…_0022_D.MP4`), present when the user sets a **custom file prefix** (a firmware
+    // feature): `_OP3` on the Pocket 3, `_DOA5`/`_DOA6` on the Action 5 Pro / 6 (`…_0002_D_DOA5.MP4`).
+    // The optional group matches both, so custom-prefixed and stock lists decode the same.
     private val compNameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_[A-Z](?:_[A-Z0-9]+)*(?:\.[A-Za-z0-9]{2,4})?""")
-
-    // Classic naming (no model suffix) — the only layout whose byte size is verified at head+38.
-    private val classicNameRe = Regex(""".*_\d{4}_[A-Z]""")
 
     /**
      * Structural decoder for DJI's **CompositePack** media manifest — the record format the delete
@@ -517,7 +515,14 @@ class DatalinkClient(
             val hi = if (k + 1 < anchors.size) anchors[k + 1].pos else bytes.size
             parseCompositeRecord(bytes, a.pos, a.name, lo, hi)?.let { byPath.putIfAbsent(it.path, it) }
         }
-        return byPath.values.toList()
+        val files = byPath.values.toList()
+        // Vet the head+38 size: on the Nano/Xtra it's the real per-file size (all different); on the
+        // Pocket 3 / OA5 / OA6 it's a per-camera constant. If every sized video reports the *same*
+        // size, it's that constant — drop it so the app HTTP-HEADs the true size instead of showing a
+        // bogus one. (Naming can't tell these apart: stock Action media is suffix-less like the Nano.)
+        val sizedVideos = files.filter { it.sizeBytes > 0L && it.ext in VIDEO_EXTS }
+        val sizeIsConstant = sizedVideos.size >= 2 && sizedVideos.mapTo(HashSet()) { it.sizeBytes }.size == 1
+        return if (sizeIsConstant) files.map { it.copy(sizeBytes = 0L) } else files
     }
 
     /** Resolve one record from its filename anchor. Paths and handle are searched across the whole
@@ -566,11 +571,10 @@ class DatalinkClient(
         val thumbPath = (thumb ?: mediaDir.replaceFirst("DCIM/", "MISC/THM/")) + ".scr"
         val isVideo = ext in VIDEO_EXTS
         val handle = if (hasMarker) u32le(bytes, head) else 0L
-        // Byte size sits at head+38 only on the classic (suffix-less) layout; on the Pocket 3 / OA5 /
-        // OA6 that offset is a per-camera constant, so leave size 0 (the app HTTP-HEADs it) rather
-        // than show a bogus figure. Their real size offset is unmapped — a later refinement.
-        val size = if (isVideo && hasMarker && head + 42 <= bytes.size &&
-            classicNameRe.matches(base)) u32le(bytes, head + 38) else 0L
+        // head+38 is the real byte size on the Nano/Xtra, but a per-camera *constant* on the Pocket 3
+        // / OA5 / OA6 (their true size offset is unmapped). The candidate is read here and vetted
+        // across the whole manifest in [decodeComposite] — an all-identical set is the constant.
+        val size = if (isVideo && hasMarker && head + 42 <= bytes.size) u32le(bytes, head + 38) else 0L
         val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, namePos) else null
         val proxy = Regex(Regex.escape(base) + """\.(?:LRF|LRV|XRF)""")
             .find(String(bytes, lo, hi - lo, Charsets.ISO_8859_1))
