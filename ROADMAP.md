@@ -115,9 +115,6 @@ Status per model:
   branch, awaiting a test. Cheapest first experiment: turn WiFi on from the OA4's own menu, then tap it.
 - **Best-effort default (no data source):** Osmo Action 2 / 3 — Mimo cameras that get the 9004/poke/WPA2
   default and the `~experimental` tag. Confirming each needs a PCAPdroid capture of Mimo or the unit.
-- **Also seen in the wild (out of scope):** a **DJI Neo 2** drone (`0x007e`) pairs over the same BLE, but
-  returns **no WiFi password** to `0x07/0x0e` — the app correctly falls back to a manual prompt. It's a
-  drone, not an Osmo camera, so it's noted, not supported.
 
 Shared, already model-agnostic: pairing (`osmo` token), `/v2` HTTP, `DJI_`/`CAM_` naming, per-list
 storage detect, and the preview/trim/stream flow. **Remaining:** the **Action 4** AP bring-up and the
