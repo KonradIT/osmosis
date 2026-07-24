@@ -3,12 +3,18 @@
 Planned work, in rough priority order. For the reverse-engineered protocol details referenced
 below, see [docs/01-protocol-map.md](docs/01-protocol-map.md).
 
-**Working today:** Osmo Nano (datalink UDP 9004) and Xtra Edge Pro / DJI Action 5 Pro
-(datalink UDP 10004) — full pipeline: BLE pair → wake AP → media list → thumbnail grid →
-LRF preview + download queue → resumable high-res `/v2` downloads. fps **and byte size** come from the
-DUML manifest (no HTTP `HEAD`); resolution from the MP4 `moov`. Also shipped (v0.5): **delete a file off
-the camera** (long-press → confirm, DUML `0x00/0x28` — #4) and **R-SDK GPS sync** (🛰️ toggle, streams the
-phone's GPS into the camera over BLE — #9, hardware-verified on an Action 5 Pro).
+**Working today — tester-confirmed on real hardware:** Osmo **Nano**, **Action 5 Pro**, **Action 6**
+and **Pocket 3** (all datalink UDP 9004 + poke), plus the **Xtra Edge Pro** rebrand (UDP 10004, no poke).
+Full pipeline: BLE pair → wake AP → media list → thumbnail grid → LRF preview + download queue →
+resumable high-res `/v2` downloads, across **internal *and* SD** (both stores listed and labelled).
+fps, **byte size**, **resolution** and **⭐ starred** all come from the DUML manifest (no HTTP `HEAD`);
+only clip **duration** still needs the MP4 `moov`. Also shipped (v0.5): **delete a file off the camera**
+(long-press → confirm, DUML `0x00/0x28` — #4) and **R-SDK GPS sync** (🛰️ toggle, streams the phone's
+GPS into the camera over BLE — #9, hardware-verified on an Action 5 Pro).
+
+**Still open:** the **Action 4** (pairs and hands out BLE creds, but its AP never comes up — an OA4-only
+`0x07/0x39` probe is on the `osmo-action-4-debugging` branch awaiting a test) and the **Osmo 360**
+(parked — never reaches the datalink, and its files are 360-format that needs Mimo to view anyway).
 
 ---
 
@@ -31,7 +37,7 @@ re-encoding, deliberately out of scope). Code:
 [MediaDownloader.downloadTrimmed](app/src/main/java/dev/konraditurbe/osmosis/net/MediaDownloader.kt),
 [MediaPreviewActivity](app/src/main/java/dev/konraditurbe/osmosis/ui/MediaPreviewActivity.kt).
 
-## 2. Support the rest of the Osmo line — ⚙️ framework done, verification hardware-gated (2026-07-10)
+## 2. Support the rest of the Osmo line — ✅ Nano / OA5 / OA6 / Pocket 3 + Xtra confirmed; OA4 + 360 open
 
 Built a per-model capability table
 ([CameraModel](app/src/main/java/dev/konraditurbe/osmosis/ble/CameraModel.kt)) keyed on the BLE model
@@ -43,23 +49,27 @@ Unrecognized models fall back to the common config (9004 + poke + WPA2) so **any
 attempted, not refused**; the selector tags unverified models `~experimental`.
 
 Status per model:
-- **Verified on hardware:** Osmo Nano (`0x19`, 9004 + poke, WPA2) and **Xtra Edge Pro** (`0x15`,
-  **10004, no poke**, WPA2).
-- **⚠️ Correction (2026-07-23):** we previously listed "Osmo Action 5 Pro" as verified on 10004, but
-  that was **only ever confirmed on the Xtra Edge Pro** — a covert DJI rebrand which advertises the
-  *same* model id `0x15` yet has its **own OUI `EC:9E:EA`**. The port change looks like a rebrand
-  firmware change, not a DJI one, so a **genuine DJI Osmo Action 5 Pro is now treated as unverified**
-  and gets the DJI-standard 9004 + poke. Resolution is brand-aware
+- **Verified on hardware:** Osmo **Nano** (`0x19`, 9004+poke), **Action 5 Pro** (`0x15`, 9004+poke),
+  **Action 6** (`0x18`, 9004+poke), **Pocket 3** (`0x20`, 9004+poke), all WPA2 — plus the **Xtra Edge
+  Pro** rebrand (`0x15` by model but **10004, no poke** by its own OUI `EC:9E:EA`).
+- **The Xtra-vs-OA5 port split (settled 2026-07-24):** we once listed "Action 5 Pro" as 10004, but that
+  was **only ever the Xtra Edge Pro** — a covert DJI rebrand sharing model id `0x15` yet with its own OUI.
+  A genuine OA5 Pro is now **tester-confirmed on the DJI-standard 9004 + poke**, so `10004` is
+  Xtra-exclusive and the brand-aware guess was right. Resolution is brand-aware
   ([CameraModel.resolve](app/src/main/java/dev/konraditurbe/osmosis/ble/CameraModel.kt) takes
   [Brand](app/src/main/java/dev/konraditurbe/osmosis/ble/Brand.kt)), pinned by
   [CameraModelBrandTest](app/src/test/java/dev/konraditurbe/osmosis/ble/CameraModelBrandTest.kt).
   Since either guess can be wrong on an untested unit, the datalink now **retries the alternate
   config** (9004+poke ⇄ 10004/no-poke) when the handshake doesn't land, and logs which port answered
   — so any test on a real Action 5 Pro / Action 4 / Action 6 self-corrects *and* reports the truth.
-- **✅ Port confirmed (2026-07-24):** a **genuine DJI Action 5 Pro, Action 6, and Pocket 3 all
-  handshake on `udp/9004 + poke`** (tester log, real hardware). That settles the OA5 question — the
-  brand-aware guess was right, and **`10004` is Xtra-exclusive**. The OA6 model byte `0x18` is also
-  confirmed on hardware (mfr `1800…`).
+- **✅ Confirmed end-to-end (2026-07-24):** a **genuine DJI Action 5 Pro, Action 6, and Pocket 3** all
+  handshake on `udp/9004 + poke` **and complete the full pipeline** — grid, preview, download — on real
+  hardware across multiple testers. Their `verified` flags are now flipped on
+  ([CameraModel](app/src/main/java/dev/konraditurbe/osmosis/ble/CameraModel.kt)), so they drop the
+  `~experimental` tag. That settles the OA5 question (the brand-aware guess was right, **`10004` is
+  Xtra-exclusive**), and the OA6 byte `0x18` is confirmed on hardware (mfr `1800…`). Quirk noted: the
+  **Pocket 3 answers `e0` (reject) to `0x53/0x10`** yet its AP still comes up via the `0x00/0x2b`
+  session — the wake is belt-and-suspenders there.
 - **✅ Media list cracked line-wide (2026-07-24):** the `0x00/0x27` payload is DJI's **CompositePack**
   TLV (not protobuf, and no reference repo decodes it — they all regex the paths). Rewrote the decoder
   to read each record's fields by **tag → length → value**
@@ -69,29 +79,50 @@ Status per model:
   all, so the camera's **Naming Management** custom Folder/File prefixes (`_A01`, `_DOA5`, `_OP3`) and
   stock names decode identically — that was the whole blocker: OA5/OA6 scraped to zero on the
   `DJI_001_OA5` folder suffix, the Pocket 3 lost its extension to the `_OP3` name suffix. Decodes
-  **all 45 Nano / 13 Xtra / 2 OA5 / 2 OA6 / 15 Pocket 3** files on real bytes (CompositeManifestTest);
-  Nano + Xtra also confirmed live, the other three await the tester's live `/v2` run.
+  **all 45 Nano / 13 Xtra / 2 OA5 / 2 OA6 / 15 Pocket 3** files on real bytes (CompositeManifestTest),
+  and **all five are now confirmed live** (grid + download) on real hardware.
 - **✅ Real media byte size, all cameras (2026-07-24):** it's the `u32-LE` at **`marker − 12`** — pinned
   by correlating a Mimo capture's records against the **camera's SD card mounted over USB** (85/85 Nano
   files byte-exact, varying-per-file on the Action family), so the HTTP `HEAD` is gone. The old `head+38`
   we misread as size is actually the **`.LRF` proxy** size (right-looking on the Nano, a constant on the
   Action family). RE of the DJI app dex named the fields (`xtra.sdk.keyvalue.value.media.MediaFile`:
-  `fileSize`/`duration`/`frameRate`/`resolution`/…, see [MEDIA_PROTOCOL.md](MEDIA_PROTOCOL.md)); resolution
-  and duration are in the record too (enum/int in still-unmapped tagged attributes) — mapping them would
-  drop the MP4 `moov` parse next.
+  `fileSize`/`duration`/`frameRate`/`resolution`/…, see [MEDIA_PROTOCOL.md](MEDIA_PROTOCOL.md)).
+- **✅ frameRate, resolution, ⭐ starred — all off the manifest now (2026-07-24):** `frameRate` at
+  `marker−2`, `resolution` at `marker−1` (a **DJI-wide** video-format index — Nano and Xtra emit the
+  same codes; ground-truthed by ffprobe: `95`=2.7K 4:3, `103`=4K 4:3, `10`=1080p, `16`=4K 16:9,
+  `45`=2.7K 16:9), and the `MediaFileStarTag` at `[ff|fe] 19 06 + 9` (Nano videos + photos; **the Action
+  family carries no star flag**, so it degrades to "none"). The star renders in the grid. **Only
+  `duration` is still unmapped** — the one field keeping the MP4 `moov` parse alive.
+- **✅ Internal + SD, both stores (2026-07-24):** the manifest is **two concatenated per-storage lists**
+  (SD first, then internal), each with its own `[u32 count][u32 size][u32 ts]` header — proven because a
+  no-card manifest is byte-identical to the mixed manifest's *second* list. Storage is now resolved
+  **per list** (was: one probe stamped on all files → half the grid blanked on a camera with a card, hit
+  on an OA6 and an Xtra). The status pill shows **both** capacities from `0x02/0xDC` (card @6/@10,
+  built-in @24/@28), verified against a camera's own on-screen figures. (Byte 0 of that frame is *not* an
+  SD-inserted flag — it reads backwards; presence = capacity > 0.)
 - **⏸️ Osmo 360 (`0x17`) — parked.** BLE pairs and hands out creds, but the phone **never finds the
   `Osmo360` Wi-Fi SSID** ("searching for device…" → timeout), so it never reaches the datalink; both
   WPA3 and the new WPA2-fallback fail because there's no AP to attach to — the 360's AP bring-up
   differs (it's the only model advertising an extra `fff7` GATT characteristic, and may want a
   360-specific Wi-Fi-enable command or a 5 GHz band). Deprioritized: its footage is 360-format that
   needs Mimo to view anyway. Cracking it needs a **PCAPdroid capture of Mimo connecting the 360**.
-- **Best-effort default (no data source):** Osmo Action 2 / 3 / 4 — Mimo cameras that get the
-  9004/poke/WPA2 default and the `~experimental` tag. Confirming each needs a PCAPdroid capture of
-  Mimo or the unit itself.
+- **⚠️ Osmo Action 4 (`0x14`) — pairs, but no AP (open).** First OA4 contact (2026-07-24, tester):
+  BLE connect, pairing (`0x07/46`), and WiFi creds over BLE all succeed — but the AP **never comes up**
+  (Android sees no SSID; `ConnectToWiFi` twice drew a `status=19` link-termination), while the OA6 on the
+  same phone/build worked. It's an older BLE generation (MTU 510, no `fff7`). The v0.4 build it was tested
+  on used `ConnectToWiFi(0x07/47)`; it has **never** been sent `0x07/0x39` (dropped for the Nano, but that
+  was Nano-only) — so an OA4-gated `0x07/0x39` wake probe now lives on the **`osmo-action-4-debugging`**
+  branch, awaiting a test. Cheapest first experiment: turn WiFi on from the OA4's own menu, then tap it.
+- **Best-effort default (no data source):** Osmo Action 2 / 3 — Mimo cameras that get the 9004/poke/WPA2
+  default and the `~experimental` tag. Confirming each needs a PCAPdroid capture of Mimo or the unit.
+- **Also seen in the wild (out of scope):** a **DJI Neo 2** drone (`0x007e`) pairs over the same BLE, but
+  returns **no WiFi password** to `0x07/0x0e` — the app correctly falls back to a manual prompt. It's a
+  drone, not an Osmo camera, so it's noted, not supported.
 
-Shared, already model-agnostic: pairing (`osmo` token), `/v2` HTTP, `DJI_`/`CAM_` naming, storage
-auto-detect, and the preview/trim/stream flow. **Remaining:** the per-model **media-list layouts**
-above (OA5/OA6 empty-decode, Pocket 3 missing extension), and the 360's datalink once it joins.
+Shared, already model-agnostic: pairing (`osmo` token), `/v2` HTTP, `DJI_`/`CAM_` naming, per-list
+storage detect, and the preview/trim/stream flow. **Remaining:** the **Action 4** AP bring-up and the
+**360**'s datalink once it joins — the per-model media-list layouts that used to block OA5/OA6/Pocket 3
+are all solved.
 
 **Onboarding UI (2026-07-10):** the app now launches into a **camera selector**
 ([SavedCameras](app/src/main/java/dev/konraditurbe/osmosis/core/SavedCameras.kt),

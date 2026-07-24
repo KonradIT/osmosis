@@ -5,10 +5,11 @@ package dev.konraditurbe.osmosis.ble
  *
  * Only the datalink UDP port and WiFi security actually vary across the Osmo line — pairing (the
  * "osmo" PIN), the `/v2` HTTP media API, and DJI_/CAM_ file naming are shared. Cells marked
- * [verified] were confirmed on real hardware (our own pcap + device tests for the Nano and Action 5
- * Pro; the osmo-download project for the 360). Everything else falls back to the most common config
- * (9004 + TCP-7001 poke + WPA2) so an unrecognized DJI Osmo is still *attempted* rather than refused
- * — there's simply no reference data for the Mimo-only Action 3/4/6 (we'd need a pcap of each).
+ * [verified] were confirmed on real hardware: **Nano, Action 5 Pro, Action 6 and Pocket 3** all
+ * browse + download on 9004 (tester-confirmed). Everything else falls back to the most common config
+ * (9004 + TCP-7001 poke + WPA2) so an unrecognized DJI Osmo is still *attempted* rather than refused.
+ * Still open: the Action 4 (pairs, but its AP never comes up) and the 360 (parked — 360-format files
+ * need Mimo anyway).
  */
 data class CameraModel(
     val name: String,
@@ -32,18 +33,19 @@ data class CameraModel(
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0010 to CameraModel("Osmo Action 2"),
             0x0012 to CameraModel("Osmo Action 3"),
-            0x0014 to CameraModel("Osmo Action 4"),
-            // NOT verified on a genuine DJI unit — see the Xtra note below. DJI-standard config.
-            0x0015 to CameraModel("Osmo Action 5 Pro"),
-            // 360 datalink port unconfirmed: on 2026-07-24 the WPA3 join failed on the test phone, so
-            // it never reached the datalink. The Pocket 3 handshakes on 9004, and the "no filename
-            // token" problem that used to 404 its downloads is fixed — the structural decoder reads
-            // its `_OP3`-suffixed naming in full (path + extension + delete handle are test-covered).
-            // Both stay `verified = false` only because neither has been exercised on real hardware.
+            0x0014 to CameraModel("Osmo Action 4"), // pairs + BLE creds, but its AP never comes up (open)
+            // Genuine Action 5 Pro on 9004 — tester-confirmed (grid + download). The Xtra rebrand
+            // gets flipped to 10004 by resolve(); see the Xtra note below.
+            0x0015 to CameraModel("Osmo Action 5 Pro", verified = true),
+            // 360 stays unverified: only ever scanned, never a successful offload — and its files are
+            // 360-format (need Mimo to view), so it's parked regardless of transport.
             0x0017 to CameraModel("Osmo 360", wpa3 = true),
-            0x0018 to CameraModel("Osmo Action 6"),
+            0x0018 to CameraModel("Osmo Action 6", verified = true),
             ID_OSMO_NANO to CameraModel("Osmo Nano", verified = true),
-            0x0020 to CameraModel("Osmo Pocket 3"), // broadcasts no BLE mfr data — name fallback
+            // Broadcasts no BLE mfr data — name fallback. Tester-confirmed on 9004; its _OP3-suffixed
+            // naming decodes in full (path + ext + delete handle). Note: rejects 0x53/0x10 (e0) but its
+            // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
+            0x0020 to CameraModel("Osmo Pocket 3", verified = true),
             0x0021 to CameraModel("Osmo Pocket 4"),
         )
 
@@ -53,7 +55,7 @@ data class CameraModel(
          * **Why brand matters:** the Xtra Edge Pro is a rebadged Osmo Action 5 Pro and advertises the
          * *same* model id `0x0015`, but 10004/no-poke was only ever confirmed on the **Xtra** — that
          * looks like a rebrand firmware change, not a DJI one. So the genuine DJI unit keeps the
-         * DJI-standard 9004 + poke (unverified until a real Action 5 Pro is tested), and the Xtra —
+         * DJI-standard 9004 + poke (now tester-confirmed on a real Action 5 Pro), and the Xtra —
          * identified hardware-side by its own OUI `EC:9E:EA` — gets the 10004 quirk. If either guess
          * is wrong the datalink retries [alternate] and logs which port actually answered.
          */

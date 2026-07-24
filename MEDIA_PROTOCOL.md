@@ -50,6 +50,7 @@ Handle + size hang off a **record marker `03 ff 19 06` at `head+8`**, present on
 | resolution | `u8 @ marker − 1` | video-format index → pixel size (table below) |
 | ⭐ starTag | `u8 @ [ff\|fe] 19 06 + 9` | favourite flag; the one field also present on photo records |
 
+- **Two stores = two lists.** With a card in, the reassembled manifest is **two per-storage lists back to back** — **SD first, then internal** — each opening with its own `[u32-LE count][u32-LE size][u32-LE ts]…` header. The leading count covers only the *first* list; the rest belong to the second. Proven by dumping the same camera with and without a card: the no-card manifest is **byte-identical to the mixed manifest's second list**. (Record handles corroborate it — SD `0x0004xxxx` vs internal `0x4004xxxx` on the Action family — but the split is taken from the count, which every model writes. The camera's `storage=` HTTP index is *not* a fixed SD/internal mapping: an Xtra served its SD at `0` and internal at `1`, so resolve it by probing.)
 - **Naming is irrelevant to the parse.** Because the path/name are read by length, the camera's *Naming Management* custom **Folder** and **File** prefixes decode exactly like stock — `DCIM/DJI_001/DJI_…_D.MP4` (stock), `DCIM/DJI_001/DJI_…_D_OP3.MP4` (Pocket 3), `DCIM/DJI_001_OA5/DJI_…_D_DOA5.MP4` (Action 5, custom folder + file suffix), `…_D_A01.MP4` (a user-typed `A01`) — all the same.
 - **Size (solved 2026-07-24).** The media byte size is the `u32-LE` at **`marker − 12`** — confirmed exact for 85/85 Nano files against the camera's own SD card, and varying-per-file on the Action family. The nearby `marker + 30` (our old "`head+38`") is the *proxy* `.LRF` size, which is why it looked plausible on the Nano and read as a constant elsewhere. **Resolution** is in the record too, and now mapped (`u8 @ marker − 1`, table below). **`duration` is the only field still unmapped**, so the MP4 `moov` is read for that alone.
 
@@ -303,8 +304,23 @@ per-model adjustment; not yet verified on our Nano/Xtra.**
 - Fields we read: **storage total** = `u32-LE MiB @ byte 5`, **free** = `@ byte 9`. `recording` = `byte1 & 0x01` (per Pocket 3 repo).
 - Quirks: reports the **active store only** (internal vs SD). Nano + Xtra.
 
-### 17. SD / storage
-- Cmd Set / ID: `0x02` / `0xDC`  (22 B)  ·  `byte0 & 0x01` = SD present
+### 17. SD / storage  *(both stores in one frame)*
+- Cmd Set / ID: `0x02` / `0xDC`  ·  App ← Camera, datalink
+- Carries **both** stores as two `[total][free]` `u32-LE` MiB blocks — **card @6/@10**, **built-in
+  @24/@28**:
+
+| offset | type | field |
+|--------|------|-------|
+| `@6`  | `u32-LE` | SD **total** MiB (`0` = no card) |
+| `@10` | `u32-LE` | SD **free** MiB |
+| `@24` | `u32-LE` | internal **total** MiB |
+| `@28` | `u32-LE` | internal **free** MiB |
+
+- **Card present = SD total > 0**, not a flag byte. Byte 0 is *not* an "SD inserted" bit — it reads
+  `0x11` on a camera with **no** card and `0x00` on two cameras **with** one (i.e. backwards).
+- Ground-truthed three ways: an Action 6's `@6/@10` (121785/109748 MiB) matched its own on-screen
+  118.9/107.2 GB exactly; an Action 5 Pro and its Xtra rebadge report an identical 48980 MiB built-in;
+  a card-less Xtra reports `@6 = 0`.
 
 ### 18. Battery / power *(also the only place the dock reports in)*
 - Cmd Set / ID: `0x0D` / `0x02`  (34 B, ~1 Hz push)  ·  sender Battery(`0x05`), id `0`

@@ -35,11 +35,11 @@ class CameraModelBrandTest {
         assertFalse(xtra.tcpPoke)
         assertTrue(xtra.verified)
 
-        // Genuine DJI: DJI-standard config, and explicitly NOT claimed as verified.
+        // Genuine DJI: DJI-standard config, now tester-confirmed on real hardware.
         assertEquals("Osmo Action 5 Pro", dji.name)
         assertEquals(9004, dji.datalinkPort)
         assertTrue(dji.tcpPoke)
-        assertFalse("a real Action 5 Pro has not been tested — must not claim verified", dji.verified)
+        assertTrue("a real Action 5 Pro browses + downloads on 9004 (tester-confirmed)", dji.verified)
     }
 
     @Test
