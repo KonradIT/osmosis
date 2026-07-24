@@ -19,8 +19,8 @@ android {
         applicationId "dev.konraditurbe.osmosis"
         minSdk 29
         targetSdk 34
-        versionCode 9
-        versionName "0.5-osmo-line"
+        versionCode 10
+        versionName "0.5-pocket3"
     }
 
     signingConfigs {

@@ -35,9 +35,10 @@ data class CameraModel(
             // NOT verified on a genuine DJI unit — see the Xtra note below. DJI-standard config.
             0x0015 to CameraModel("Osmo Action 5 Pro"),
             // 360 datalink port unconfirmed: on 2026-07-24 the WPA3 join failed on the test phone, so
-            // it never reached the datalink. Pocket 3 handshakes on 9004 but its manifest lists paths
-            // with no filename/extension token, so the grid has no thumbnails/size and downloads 404 —
-            // both stay unverified until fixed. (Neither `verified=true` was ever hardware-backed.)
+            // it never reached the datalink. The Pocket 3 handshakes on 9004, and the "no filename
+            // token" problem that used to 404 its downloads is fixed — the structural decoder reads
+            // its `_OP3`-suffixed naming in full (path + extension + delete handle are test-covered).
+            // Both stay `verified = false` only because neither has been exercised on real hardware.
             0x0017 to CameraModel("Osmo 360", wpa3 = true),
             0x0018 to CameraModel("Osmo Action 6"),
             0x0019 to CameraModel("Osmo Nano", verified = true),
