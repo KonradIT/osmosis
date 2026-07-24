@@ -29,11 +29,12 @@ data class CameraModel(
     companion object {
         val DEFAULT = CameraModel("DJI Osmo camera")
         const val ID_OSMO_NANO = 0x0019
+        const val ID_OSMO_ACTION_4 = 0x0014
 
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0010 to CameraModel("Osmo Action 2"),
             0x0012 to CameraModel("Osmo Action 3"),
-            0x0014 to CameraModel("Osmo Action 4"), // pairs + BLE creds, but its AP never comes up (open)
+            ID_OSMO_ACTION_4 to CameraModel("Osmo Action 4"), // pairs + BLE creds, but its AP never comes up (open)
             // Genuine Action 5 Pro on 9004 — tester-confirmed (grid + download). The Xtra rebrand
             // gets flipped to 10004 by resolve(); see the Xtra note below.
             0x0015 to CameraModel("Osmo Action 5 Pro", verified = true),
