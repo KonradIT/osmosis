@@ -549,11 +549,43 @@ class DatalinkClient(
         // head+38 read was the *proxy* (`.LRF`) size — right-looking on the Nano, a constant elsewhere.
         val size = if (isVideo && hasMarker && head >= 4) u32le(bytes, head - 4) else 0L
         val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, hi) else null
+        // ⭐ starTag and the resolution index, both u8, ground-truth-verified against the SD card.
+        // The star byte sits 9 bytes past the record's `[ff|fe] 19 06` marker (videos use `03 ff 19 06`,
+        // photos a `fe 19 06` variant); the resolution index is at marker-1 (video header only).
+        val starred = starFlag(bytes, lo, hi)
+        val resolution = if (isVideo && hasMarker && head + 7 < bytes.size)
+            resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else null
         return CameraFile(
             path = path, thumbPath = thumbPath, storage = 0,
             resLabel = fps?.let { "${it}fps" }, proxyPath = proxyExt?.let { "$mediaDir.$it" },
-            handle = handle, sizeBytes = size,
+            handle = handle, sizeBytes = size, starred = starred, resolution = resolution,
         )
+    }
+
+    /**
+     * The manifest resolution byte (`marker-1`) is a **camera-specific index**, not the SDK's
+     * `VideoResolution` enum (whose codes don't match), so the map is built empirically from clips
+     * cross-referenced against the SD card. Unknown → null → the app falls back to the MP4 `moov`.
+     */
+    /** ⭐ favourite flag: the byte 9 past the record's `[ff|fe] 19 06` marker is 1 when starred, 0
+     *  otherwise. Unified across videos (`03 ff 19 06`) and photos (`fe 19 06`). */
+    private fun starFlag(bytes: ByteArray, lo: Int, hi: Int): Boolean {
+        var q = lo
+        while (q < hi - 9) {
+            if ((bytes[q] == 0xFF.toByte() || bytes[q] == 0xFE.toByte()) &&
+                bytes[q + 1] == 0x19.toByte() && bytes[q + 2] == 0x06.toByte()
+            ) return (bytes[q + 9].toInt() and 0xFF) == 1
+            q++
+        }
+        return false
+    }
+
+    private fun resolutionForIndex(code: Int): String? = when (code) {
+        16 -> "3840x2160"  // 4K 16:9
+        45 -> "2688x1512"  // 2.7K 16:9
+        95 -> "2688x2016"  // 2.7K 4:3
+        103 -> "3840x2880" // 4K 4:3
+        else -> null
     }
 
     /**

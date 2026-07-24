@@ -8,7 +8,9 @@ data class CameraFile(
     val resLabel: String? = null, // e.g. "25fps" — fps from the DUML manifest record
     val proxyPath: String? = null, // low-res proxy clip (.LRF/.LRV) if the camera lists one
     val handle: Long = 0L,   // camera-assigned delete handle (DUML 0x00/0x28); 0 = unknown → not deletable
-    val sizeBytes: Long = 0L, // full media byte size from the DUML manifest (record +38); 0 = unknown (probe HTTP)
+    val sizeBytes: Long = 0L, // full media byte size from the DUML manifest (record marker-12); 0 = unknown (probe HTTP)
+    val starred: Boolean = false, // ⭐ favourite flag from the manifest (marker+10, video records)
+    val resolution: String? = null, // "3840x2160" from the manifest resolution index (marker-1); null = unknown → moov
 ) {
     /** True once the manifest yielded a delete handle for this file (see DatalinkClient.deleteFiles). */
     val deletable: Boolean get() = handle != 0L
