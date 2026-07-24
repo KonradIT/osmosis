@@ -461,59 +461,62 @@ class DatalinkClient(
         return out
     }
 
-    // Filename token. The trailing `(?:_[A-Z0-9]+)*` is an optional per-camera suffix — absent on
-    // stock media (`…_0022_D.MP4`), present when the user sets a **custom file prefix** (a firmware
-    // feature): `_OP3` on the Pocket 3, `_DOA5`/`_DOA6` on the Action 5 Pro / 6 (`…_0002_D_DOA5.MP4`).
-    // The optional group matches both, so custom-prefixed and stock lists decode the same.
-    private val compNameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_[A-Z](?:_[A-Z0-9]+)*(?:\.[A-Za-z0-9]{2,4})?""")
+    /** A length-delimited CompositePack field: its ASCII value and the offset just past it. */
+    private class TlvField(val value: String, val end: Int)
 
     /**
-     * Structural decoder for DJI's **CompositePack** media manifest — the record format the delete
-     * path (`0x00/0x28`) already trusts, here read forward into a full file list. Unlike the regex
-     * scrape it treats each record's fields as self-describing rather than as ASCII to grep, which is
-     * what makes it portable across the line and what makes a missing extension *visible*.
+     * Read a **path** field at [i] if one starts there: `1a [total:u8] 00 00 00 [sub:u8] <ascii>`,
+     * where the ASCII value is `total-6` bytes (total counts the 6-byte header). Returns the value +
+     * end offset only when the sub-type matches and the value is printable and carries [prefix]
+     * (`DCIM/` for media, `MISC/` for the thumb). Pure tag→length→value; no content pattern.
+     */
+    private fun readPathField(bytes: ByteArray, i: Int, sub: Int, prefix: String): TlvField? {
+        if (i + 6 > bytes.size || bytes[i] != 0x1A.toByte()) return null
+        if (bytes[i + 2] != 0.toByte() || bytes[i + 3] != 0.toByte() || bytes[i + 4] != 0.toByte()) return null
+        if ((bytes[i + 5].toInt() and 0xFF) != sub) return null
+        val slen = (bytes[i + 1].toInt() and 0xFF) - 6
+        if (slen < prefix.length || i + 6 + slen > bytes.size) return null
+        val s = String(bytes, i + 6, slen, Charsets.ISO_8859_1)
+        return if (s.startsWith(prefix) && s.all { it.code in 0x20..0x7E }) TlvField(s, i + 6 + slen) else null
+    }
+
+    /**
+     * Structural decoder for DJI's **CompositePack** media manifest (the record format the delete path
+     * `0x00/0x28` already trusts). Every field is length-delimited, so it's read tag → length → value
+     * — never grepped, and never validated against a filename pattern. That's the whole point: the
+     * decoder doesn't know or care what a DJI filename looks like, so custom Folder/File name prefixes
+     * (the camera's *Naming Management* feature — `_A01`, `_DOA5`, `_OP3`) and any future convention
+     * decode identically to stock, because the path and name arrive as raw length-delimited strings.
      *
-     * The anchor is the **filename field**, which is universal across photos and videos:
+     * Anchor: the **media-path field** — the most self-identifying thing in a record:
      * ```
-     *   tag 0x0d [len:u8][ascii]                        filename (extension inline on Nano/Xtra)
-     *   tag 0x1a [len:u8] 00 00 00 [sub:u8][ascii]      path; ascii is (len-6) bytes,
-     *                                                   sub 1 = DCIM media, sub 2 = MISC/THM thumb
+     *   1a [total:u8] 00 00 00 01  <ascii "DCIM/…", total-6 bytes>     media path (this record)
+     *   1a [total:u8] 00 00 00 02  <ascii "MISC/…">                    thumbnail path
+     *   0d [len:u8]                <ascii "<name>.<ext>">              filename — read only for its ext
      * ```
      * The delete **handle** (`u32-LE @ head`) and video **byte size** (`u32-LE @ head+38`) hang off a
-     * separate marker `03 ff 19 06` at `head+8` that is present on **video records only** — so it's
-     * read opportunistically (photos get handle 0 / size 0, matching the old decoder) rather than used
-     * to delimit records, which would drop every photo.
-     *
-     * Reverse-engineered from real Osmo Nano and Xtra captures (reproduces all 45 Nano and 13 Xtra
-     * files, photos included). Reading the filename as its own length-delimited field — not a token
-     * that must carry `.EXT` — is the point: a camera that stores the extension in a separate
-     * attribute (the Pocket 3) arrives here with no extension, *detectable* instead of silently
-     * downloaded to a 404. Returns empty when there are no filename fields, so [decodeManifest] falls
-     * through to the scrape.
+     * marker `03 ff 19 06` at `head+8` present on **video records only**; it's read opportunistically
+     * (photos → handle 0 / size 0). Reproduces all 45 Nano and 13 Xtra files, photos included, and the
+     * Pocket 3 / OA5 / OA6 lists. Empty when no media-path field is present → [decodeManifest] scrapes.
      */
     private fun decodeComposite(bytes: ByteArray): List<CameraFile> {
-        // Anchor on every 0x0d-tagged filename field across the whole manifest.
-        data class Anchor(val pos: Int, val name: String)
-        val anchors = ArrayList<Anchor>()
-        var j = 0
-        while (j < bytes.size - 2) {
-            if (bytes[j] == 0x0D.toByte()) {
-                val len = bytes[j + 1].toInt() and 0xFF
-                if (len in 10..64 && j + 2 + len <= bytes.size) {
-                    val s = String(bytes, j + 2, len, Charsets.ISO_8859_1)
-                    if (compNameRe.matches(s)) { anchors.add(Anchor(j + 2, s)); j += 2 + len; continue }
-                }
-            }
-            j++
+        // Locate every media-path field (one per record). Read by length; the 6-byte `1a … 00 00 00 01`
+        // signature plus the `DCIM/` prefix makes a false hit in binary essentially impossible.
+        data class Media(val pos: Int, val end: Int, val path: String)
+        val medias = ArrayList<Media>()
+        var i = 0
+        while (i < bytes.size) {
+            val f = readPathField(bytes, i, sub = 1, prefix = "DCIM/")
+            if (f != null) { medias.add(Media(i, f.end, f.value)); i = f.end } else i++
         }
-        if (anchors.isEmpty()) return emptyList()
+        if (medias.isEmpty()) return emptyList()
 
         val byPath = LinkedHashMap<String, CameraFile>() // dedup by media path (the list can page-repeat)
-        for (k in anchors.indices) {
-            val a = anchors[k]
-            val lo = if (k > 0) anchors[k - 1].pos + anchors[k - 1].name.length else 0
-            val hi = if (k + 1 < anchors.size) anchors[k + 1].pos else bytes.size
-            parseCompositeRecord(bytes, a.pos, a.name, lo, hi)?.let { byPath.putIfAbsent(it.path, it) }
+        for (k in medias.indices) {
+            val m = medias[k]
+            val lo = if (k > 0) medias[k - 1].end else 0
+            val hi = if (k + 1 < medias.size) medias[k + 1].pos else bytes.size
+            byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi))
         }
         val files = byPath.values.toList()
         // Vet the head+38 size: on the Nano/Xtra it's the real per-file size (all different); on the
@@ -525,63 +528,65 @@ class DatalinkClient(
         return if (sizeIsConstant) files.map { it.copy(sizeBytes = 0L) } else files
     }
 
-    /** Resolve one record from its filename anchor. Paths and handle are searched across the whole
-     *  record window `[lo,hi)` — the Nano lists the path *after* the name, the Xtra *before* it — and
-     *  associated to this record by matching the path's trailing base to the filename base, so the
-     *  field order doesn't matter. Null if no DCIM media path for this name is in the window. */
-    private fun parseCompositeRecord(bytes: ByteArray, namePos: Int, name: String, lo: Int, hi: Int): CameraFile? {
-        val base = name.substringBeforeLast('.', name)
-        // path/thumb: 0x1a [len] 00 00 00 [sub]; sub 1 = DCIM media, 2 = MISC/THM thumb. ascii = len-6.
-        var media: String? = null; var thumb: String? = null
-        var p = lo
-        while (p < hi - 6) {
-            if (bytes[p] == 0x1A.toByte() && bytes[p + 2] == 0.toByte() &&
-                bytes[p + 3] == 0.toByte() && bytes[p + 4] == 0.toByte()
-            ) {
-                val slen = (bytes[p + 1].toInt() and 0xFF) - 6
-                val sub = bytes[p + 5].toInt() and 0xFF
-                if (slen in 8..96 && p + 6 + slen <= hi) {
-                    val s = String(bytes, p + 6, slen, Charsets.ISO_8859_1)
-                    if (s.endsWith(base)) {
-                        if (sub == 1 && media == null && s.startsWith("DCIM/")) media = s
-                        if (sub == 2 && thumb == null && s.startsWith("MISC/")) thumb = s
+    /**
+     * Build one [CameraFile] from its media-path field. The base name is the last path component; the
+     * thumbnail (`1a…02`) and the extension (`0d`) are found by walking the record window `[lo,hi)`
+     * and matching *this* base — field order varies across the line (name before path on the Nano,
+     * after it on the Xtra), so association is by trailing base, not position.
+     */
+    private fun resolveRecord(bytes: ByteArray, mediaDir: String, lo: Int, hi: Int): CameraFile {
+        val base = mediaDir.substringAfterLast('/')      // e.g. DJI_20260721121344_0015_D_OP3
+
+        // Thumbnail path: the 1a…02 field whose value ends with this base.
+        var thumb: String? = null
+        var t = lo
+        while (t < hi) {
+            val f = readPathField(bytes, t, sub = 2, prefix = "MISC/")
+            if (f != null && f.value.endsWith(base)) { thumb = f.value; break }
+            t++
+        }
+
+        // Extension: the 0d filename field `<base>.<ext>` — read by its length, matched by base (no
+        // pattern). A camera that omits the extension here simply yields "" (a visible gap, not a 404).
+        var ext = ""; var proxyExt: String? = null
+        var n = lo
+        while (n < hi - 2) {
+            if (bytes[n] == 0x0D.toByte()) {
+                val len = bytes[n + 1].toInt() and 0xFF
+                if (len > base.length && n + 2 + len <= bytes.size) {
+                    val v = String(bytes, n + 2, len, Charsets.ISO_8859_1)
+                    if (v.length > base.length + 1 && v.startsWith(base) && v[base.length] == '.') {
+                        val e = v.substring(base.length + 1).uppercase()
+                        if (e in VIDEO_EXTS || e in setOf("JPG", "JPEG", "DNG", "HEIC")) ext = e
+                        else if (e in setOf("LRF", "LRV", "XRF")) proxyExt = e
                     }
                 }
             }
-            p++
+            n++
         }
-        val mediaDir = media ?: return null
 
-        // Video handle/size hang off the marker `03 ff 19 06` (head+8) preceding the name; photos have
-        // no marker, so they resolve to handle 0 / size 0 — exactly as the legacy decoder left them.
+        // Video handle/size hang off the marker `03 ff 19 06` (head+8) within the record; photos have
+        // none → handle 0 / size 0, matching the legacy decoder.
         var head = -1
-        var m = namePos - 4
-        while (m >= lo) {
+        var m = lo
+        while (m < hi - 4) {
             if (bytes[m] == 0x03.toByte() && bytes[m + 1] == 0xFF.toByte() &&
                 bytes[m + 2] == 0x19.toByte() && bytes[m + 3] == 0x06.toByte()
             ) { head = m - 8; break }
-            m--
+            m++
         }
         val hasMarker = head >= 0
+        val isVideo = ext in VIDEO_EXTS
 
-        val ext = if ('.' in name) name.substringAfterLast('.').uppercase() else ""
-        // Extension-less name (Pocket 3): leave the media path bare — better a visible gap than a
-        // wrong extension. The real extension will come from a FILE_TYPE attribute once mapped.
         val path = if (ext.isNotEmpty()) "$mediaDir.$ext" else mediaDir
         val thumbPath = (thumb ?: mediaDir.replaceFirst("DCIM/", "MISC/THM/")) + ".scr"
-        val isVideo = ext in VIDEO_EXTS
         val handle = if (hasMarker) u32le(bytes, head) else 0L
-        // head+38 is the real byte size on the Nano/Xtra, but a per-camera *constant* on the Pocket 3
-        // / OA5 / OA6 (their true size offset is unmapped). The candidate is read here and vetted
-        // across the whole manifest in [decodeComposite] — an all-identical set is the constant.
         val size = if (isVideo && hasMarker && head + 42 <= bytes.size) u32le(bytes, head + 38) else 0L
-        val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, namePos) else null
-        val proxy = Regex(Regex.escape(base) + """\.(?:LRF|LRV|XRF)""")
-            .find(String(bytes, lo, hi - lo, Charsets.ISO_8859_1))
-            ?.let { "$mediaDir.${it.value.substringAfterLast('.')}" }
+        val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, hi) else null
         return CameraFile(
             path = path, thumbPath = thumbPath, storage = 0,
-            resLabel = fps?.let { "${it}fps" }, proxyPath = proxy, handle = handle, sizeBytes = size,
+            resLabel = fps?.let { "${it}fps" }, proxyPath = proxyExt?.let { "$mediaDir.$it" },
+            handle = handle, sizeBytes = size,
         )
     }
 
