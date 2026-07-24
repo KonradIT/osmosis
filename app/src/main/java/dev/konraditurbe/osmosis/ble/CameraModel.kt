@@ -28,12 +28,11 @@ data class CameraModel(
     companion object {
         val DEFAULT = CameraModel("DJI Osmo camera")
         const val ID_OSMO_NANO = 0x0019
-        const val ID_OSMO_ACTION_4 = 0x0014
 
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0010 to CameraModel("Osmo Action 2"),
             0x0012 to CameraModel("Osmo Action 3"),
-            ID_OSMO_ACTION_4 to CameraModel("Osmo Action 4"),
+            0x0014 to CameraModel("Osmo Action 4"),
             // NOT verified on a genuine DJI unit — see the Xtra note below. DJI-standard config.
             0x0015 to CameraModel("Osmo Action 5 Pro"),
             // 360 datalink port unconfirmed: on 2026-07-24 the WPA3 join failed on the test phone, so

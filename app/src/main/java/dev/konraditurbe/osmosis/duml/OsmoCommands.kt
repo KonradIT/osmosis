@@ -37,15 +37,6 @@ object OsmoCommands {
         return DjiMessage(TARGET_APP_TO_WIFI, id, type, payload).encode()
     }
 
-    /**
-     * `0x07/0x39` WiFi-enable, payload `7a` — Mimo sends it in its wake sequence. We dropped it from
-     * the general flow because the Nano rejects it (`e0`) for Mimo too, so it's dead weight there. But
-     * that verdict was Nano-only, and the older Osmo Action 4 (which never brought its AP up via any
-     * path we've tried) predates the era when WiFi was an implicit mode — so it's re-added as an
-     * OA4-only probe (see MainActivity.onPaired). Remove again if the OA4 rejects it as well.
-     */
-    fun wifiEnable39(id: Int = 0x8039): ByteArray = wifiQuery(0x39, byteArrayOf(0x7A), id = id)
-
     // ---- Mimo's BLE session sequence (from an HCI snoop of Mimo waking a sleeping Nano) -------
     //
     // Captured order, once notifications are armed on fff4:
