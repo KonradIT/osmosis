@@ -344,12 +344,21 @@ class DatalinkClient(
         runCatching { sock.close() }
     }
 
-    // Counts distinct media during collection so paging can stop once the list stops growing. The
-    // `_\d{3}(?:_[A-Z0-9]+)?` folder allows the OA5/OA6 `DJI_001_OA5` form, and the trailing
-    // `(?:_[A-Z0-9]+)*` the `_OP3`/`_DOA5` name suffix — else these lists never register and every
-    // batch runs to the fixed cap.
-    private val pathCountRe =
-        Regex("""DCIM/(?:DJI|CAM)_\d{3}(?:_[A-Z0-9]+)?/(?:DJI|CAM)_\d{14}_\d{4}_[A-Z](?:_[A-Z0-9]+)*""")
+    /**
+     * Count distinct media-path fields in a byte range by structure — the same `1a … 00 00 00 01`
+     * "DCIM/" TLV [decodeComposite] anchors on, read by length. Used to gauge list growth while paging
+     * and to vet reassembly, so it must not depend on any naming pattern: a custom Folder/File prefix
+     * still counts because the whole path string is read, not matched.
+     */
+    private fun countMediaPaths(bytes: ByteArray): Int {
+        val seen = HashSet<String>()
+        var i = 0
+        while (i < bytes.size) {
+            val f = readPathField(bytes, i, sub = 1, prefix = "DCIM/")
+            if (f != null) { seen.add(f.value); i = f.end } else i++
+        }
+        return seen.size
+    }
 
     /**
      * The file list streams back as many DUML frames (cmdset 0x00 / cmd 0x26). Concatenating the raw
@@ -357,7 +366,7 @@ class DatalinkClient(
      * DCIM path that straddles a frame boundary gets those bytes injected mid-string and the file
      * silently drops out of the grid — non-deterministically, depending on which record lands on a
      * boundary. Re-stitch just the 0x00/0x26 payloads, in order, so the manifest is contiguous before
-     * we regex it. Walks the whole blob (not per-datagram) so a frame split across two UDP packets is
+     * we decode it. Walks the whole blob (not per-datagram) so a frame split across two UDP packets is
      * still reassembled.
      */
     private fun manifestBytes(raw: ByteArray): ByteArray {
@@ -381,16 +390,16 @@ class DatalinkClient(
             i += len
         }
         val bytes = out.toByteArray()
-        // Guard: only use the reassembled stream if it carries at least as many paths as the raw blob,
-        // so a model that streams the list some other way falls back to the old whole-blob parse.
-        fun paths(b: ByteArray) = pathCountRe.findAll(String(b, Charsets.ISO_8859_1)).map { it.value }.toHashSet().size
-        return if (paths(bytes) >= paths(raw) && bytes.isNotEmpty()) bytes else raw
+        // Guard: only use the reassembled stream if it carries at least as many intact media-path
+        // fields as the raw blob, so a model that streams the list some other way falls back to the
+        // old whole-blob parse. (A path split across a frame boundary won't parse as a field, which is
+        // exactly the straddling case reassembly fixes.)
+        return if (countMediaPaths(bytes) >= countMediaPaths(raw) && bytes.isNotEmpty()) bytes else raw
     }
 
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
     private fun distinctPaths(blob: java.io.ByteArrayOutputStream): Int =
-        pathCountRe.findAll(String(manifestBytes(blob.toByteArray()), Charsets.ISO_8859_1))
-            .map { it.value }.toHashSet().size
+        countMediaPaths(manifestBytes(blob.toByteArray()))
 
     private val primaryExts = setOf("MP4", "MOV", "JPG", "JPEG", "DNG", "OSV", "INSV", "HEIC")
     private val proxyExts = setOf("LRF", "LRV")
