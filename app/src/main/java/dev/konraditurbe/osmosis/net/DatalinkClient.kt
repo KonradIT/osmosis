@@ -344,7 +344,12 @@ class DatalinkClient(
         runCatching { sock.close() }
     }
 
-    private val pathCountRe = Regex("""DCIM/(?:DJI|CAM)_\d{3}/(?:DJI|CAM)_\d{14}_\d{4}_D""")
+    // Counts distinct media during collection so paging can stop once the list stops growing. The
+    // `_\d{3}(?:_[A-Z0-9]+)?` folder allows the OA5/OA6 `DJI_001_OA5` form, and the trailing
+    // `(?:_[A-Z0-9]+)*` the `_OP3`/`_DOA5` name suffix — else these lists never register and every
+    // batch runs to the fixed cap.
+    private val pathCountRe =
+        Regex("""DCIM/(?:DJI|CAM)_\d{3}(?:_[A-Z0-9]+)?/(?:DJI|CAM)_\d{14}_\d{4}_[A-Z](?:_[A-Z0-9]+)*""")
 
     /**
      * The file list streams back as many DUML frames (cmdset 0x00 / cmd 0x26). Concatenating the raw
@@ -456,7 +461,13 @@ class DatalinkClient(
         return out
     }
 
-    private val compNameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_[A-Z](?:\.[A-Za-z0-9]{2,4})?""")
+    // Filename token. The trailing `(?:_[A-Z0-9]+)*` is the per-model suffix DJI appends after the
+    // frame-type letter: none on the Nano/Xtra (`…_0022_D.MP4`), `_OP3` on the Pocket 3
+    // (`…_0015_D_OP3.MP4`), `_DOA5`/`_DOA6` on the Action 5 Pro / Action 6 (`…_0002_D_DOA5.MP4`).
+    private val compNameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_[A-Z](?:_[A-Z0-9]+)*(?:\.[A-Za-z0-9]{2,4})?""")
+
+    // Classic naming (no model suffix) — the only layout whose byte size is verified at head+38.
+    private val classicNameRe = Regex(""".*_\d{4}_[A-Z]""")
 
     /**
      * Structural decoder for DJI's **CompositePack** media manifest — the record format the delete
@@ -490,7 +501,7 @@ class DatalinkClient(
         while (j < bytes.size - 2) {
             if (bytes[j] == 0x0D.toByte()) {
                 val len = bytes[j + 1].toInt() and 0xFF
-                if (len in 10..48 && j + 2 + len <= bytes.size) {
+                if (len in 10..64 && j + 2 + len <= bytes.size) {
                     val s = String(bytes, j + 2, len, Charsets.ISO_8859_1)
                     if (compNameRe.matches(s)) { anchors.add(Anchor(j + 2, s)); j += 2 + len; continue }
                 }
@@ -555,7 +566,11 @@ class DatalinkClient(
         val thumbPath = (thumb ?: mediaDir.replaceFirst("DCIM/", "MISC/THM/")) + ".scr"
         val isVideo = ext in VIDEO_EXTS
         val handle = if (hasMarker) u32le(bytes, head) else 0L
-        val size = if (isVideo && hasMarker && head + 42 <= bytes.size) u32le(bytes, head + 38) else 0L
+        // Byte size sits at head+38 only on the classic (suffix-less) layout; on the Pocket 3 / OA5 /
+        // OA6 that offset is a per-camera constant, so leave size 0 (the app HTTP-HEADs it) rather
+        // than show a bogus figure. Their real size offset is unmapped — a later refinement.
+        val size = if (isVideo && hasMarker && head + 42 <= bytes.size &&
+            classicNameRe.matches(base)) u32le(bytes, head + 38) else 0L
         val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, namePos) else null
         val proxy = Regex(Regex.escape(base) + """\.(?:LRF|LRV|XRF)""")
             .find(String(bytes, lo, hi - lo, Charsets.ISO_8859_1))
