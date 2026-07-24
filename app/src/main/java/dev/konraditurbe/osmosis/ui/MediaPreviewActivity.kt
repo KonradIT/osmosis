@@ -21,7 +21,6 @@ import android.widget.VideoView
 import androidx.appcompat.app.AppCompatActivity
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.core.CameraFile
-import dev.konraditurbe.osmosis.core.FileLog
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.net.VideoMeta
@@ -37,11 +36,7 @@ import dev.konraditurbe.osmosis.net.VideoMeta
 class MediaPreviewActivity : AppCompatActivity() {
 
     private val main = Handler(Looper.getMainLooper())
-    private val http by lazy { HttpClient(ip) { plog(it) } }
-
-    /** Preview events go to logcat AND the saved log file — otherwise a failed LRV/proxy load is
-     *  invisible in a tester's dumped logs (the file dump only ever captured MainActivity's lines). */
-    private fun plog(s: String) { Log.i("Osmosis", s); FileLog.write(s) }
+    private val http by lazy { HttpClient(ip) { Log.i("Osmosis", it) } }
 
     private lateinit var videoView: VideoView
     private lateinit var photoView: ImageView
@@ -231,7 +226,6 @@ class MediaPreviewActivity : AppCompatActivity() {
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
         streamCandidates = file.previewCandidates()
         streamIdx = 0
-        plog("preview ${file.name}: ${streamCandidates.size} candidate(s) ${streamCandidates.joinToString(" | ")}")
         startStream(streamCandidates[streamIdx])
     }
 
@@ -242,11 +236,11 @@ class MediaPreviewActivity : AppCompatActivity() {
      */
     private fun startStream(path: String) {
         val uri = Uri.parse("http://$ip$path")
-        plog("preview stream (${streamIdx + 1}/${streamCandidates.size}) $uri")
+        Log.i("Osmosis", "preview stream $uri")
         videoView.visibility = VideoView.VISIBLE
         videoView.setVideoURI(uri)
         videoView.setOnPreparedListener { mp ->
-            plog("preview PREPARED ${mp.videoWidth}x${mp.videoHeight} dur=${videoView.duration}ms")
+            Log.i("Osmosis", "preview PREPARED ${mp.videoWidth}x${mp.videoHeight}")
             mp.isLooping = true
             spinner.visibility = ProgressBar.GONE
             videoView.start()
@@ -257,14 +251,13 @@ class MediaPreviewActivity : AppCompatActivity() {
             main.post(tick)
         }
         videoView.setOnErrorListener { _, what, extra ->
-            plog("preview ERROR what=$what extra=$extra (candidate ${streamIdx + 1}/${streamCandidates.size}: $path)")
+            Log.i("Osmosis", "preview ERROR what=$what extra=$extra (candidate ${streamIdx + 1}/${streamCandidates.size}: $path)")
             if (streamIdx < streamCandidates.size - 1) {
                 streamIdx++
-                plog("preview falling back to ${streamCandidates[streamIdx]}")
+                Log.i("Osmosis", "preview falling back to ${streamCandidates[streamIdx]}")
                 startStream(streamCandidates[streamIdx])
                 return@setOnErrorListener true
             }
-            plog("preview GAVE UP after ${streamCandidates.size} candidate(s) for ${file.name}")
             showStatus("Can't play this clip ($what/$extra)")
             true
         }
