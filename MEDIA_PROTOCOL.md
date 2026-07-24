@@ -128,22 +128,73 @@ So **size, duration, resolution and fps are all present in every record**. `file
 
 The record's int fields are small enum codes; these are the code→meaning tables (RE'd from the app's SDK enum classes), so a pinned field reads straight through. The ones **confirmed** by the mapping above are marked ✅.
 
-- ✅ **star** — the byte at `[ff|fe] 19 06` + 9 is DJI's `MediaFileStarTag`: `0 = NONE`, `1 = TAGGED` (starred). **Nano only:** verified on the Nano (videos + photos); the Xtra/Action-5 manifest carries **no** star flag at this (or any findable) offset — its firmware keeps favourites elsewhere — so the reader returns `false` for it (no false stars, just none shown).
-- ✅ **frameRate** (`marker−2`) — DJI's `VideoFrameRate`: `1 24 · 2 25 · 3 30 · 4 48 · 5 50 · 6 60 · 7 120 · 8 240 · 10 100 · 11 96 · 29 15 …` (25/30/50 verified on hardware).
-- **`MediaFileType`**: `0 JPEG · 1 DNG · 2 MOV · 3 MP4 · 4 PANORAMA · 5 TIFF · 10 AUDIO · 19 LRF · 20 THM · 21 SCR · 44 OSV · 65535 UNKNOWN`.
-- **`MediaVideoType`**: `0 NORMAL · 1 SLOW_MOTION · 2 HYPER_LAPSE · 3 TIME_LAPSE · 4 HDR · 5 LOOP · 101-104 MASTERSHOT …`. **`MediaPhotoType`**: `0 NORMAL · 1 HDR · 2 AEB · 3 INTERVAL · 4 BURST · 16 HIGH_RESOLUTION …`.
+✅ **star** — the byte at `[ff|fe] 19 06` + 9 is DJI's `MediaFileStarTag`: `0 = NONE`, `1 = TAGGED` (starred). **Nano only:** verified on the Nano (videos + photos); the Xtra/Action-5 manifest carries **no** star flag at this (or any findable) offset — its firmware keeps favourites elsewhere — so the reader returns `false` for it (no false stars, just none shown).
 
-**Resolution (`marker−1`) is a *DJI-wide* video-format index, not one SDK enum.** The index is shared across cameras — the Nano and the Xtra/Action-5 emit the **same code for the same size** (both use `95`=2.7K 4:3, `103`=4K 4:3) — so it's a single firmware-side table, and the app's `VideoResolution`/`CameraVideoSize`/`PlaybackFileResolution` enums are inconsistent downstream copies that only partially overlap it. We build the table empirically from clips cross-referenced against the SD card. Verified so far:
+✅ **frameRate** (`marker−2`) — `VideoFrameRate`. ✅ = verified on hardware.
 
-| `marker−1` | resolution | seen on | matches app enum |
-|-----------|-----------|---------|------------------|
-| `10` | 1920×1080 (1080p 16:9) | Xtra | `CameraVideoSize.SIZE_1920X1080P` |
-| `16` | 3840×2160 (4K 16:9) | Nano | `CameraVideoSize.SIZE_3840X2160P` |
-| `45` | 2688×1512 (2.7K 16:9) | Nano | `PlaybackFileResolution.R_2688_1512P` |
-| `95` | 2688×2016 (2.7K 4:3) | Nano, Xtra | `PlaybackFileResolution.SIZE_2688_2016I` |
-| `103` | 3840×2880 (4K 4:3) | Nano, Xtra | *(firmware code; no exact app-enum name)* |
+| code | fps |
+|------|-----|
+| `1` | 24 |
+| `2` | 25 ✅ |
+| `3` | 30 ✅ |
+| `4` | 48 |
+| `5` | 50 ✅ |
+| `6` | 60 |
+| `7` | 120 |
+| `8` | 240 |
+| `10` | 100 |
+| `11` | 96 |
+| `29` | 15 |
 
-(Aside: the SDK's own `VideoResolution`/`CameraVideoSize`/`PlaybackFileResolution` enums *do* contain these pixel sizes, but at their own codes — e.g. `VideoResolution` puts 2688×2016 at `97`, the Nano wire uses `95`. The native `native_file_transfer_list` parser translates wire→enum; that translation is in the arm split, not this base APK.)
+**`MediaFileType`**
+
+| code | type |
+|------|------|
+| `0` | JPEG |
+| `1` | DNG |
+| `2` | MOV |
+| `3` | MP4 |
+| `4` | PANORAMA |
+| `5` | TIFF |
+| `10` | AUDIO |
+| `19` | LRF |
+| `20` | THM |
+| `21` | SCR |
+| `44` | OSV |
+| `65535` | UNKNOWN |
+
+**`MediaVideoType`**
+
+| code | mode |
+|------|------|
+| `0` | NORMAL |
+| `1` | SLOW_MOTION |
+| `2` | HYPER_LAPSE |
+| `3` | TIME_LAPSE |
+| `4` | HDR |
+| `5` | LOOP |
+| `101`–`104` | MASTERSHOT |
+
+**`MediaPhotoType`**
+
+| code | mode |
+|------|------|
+| `0` | NORMAL |
+| `1` | HDR |
+| `2` | AEB |
+| `3` | INTERVAL |
+| `4` | BURST |
+| `16` | HIGH_RESOLUTION |
+
+**Resolution** (`marker−1`) — verified codes:
+
+| code | resolution |
+|------|-----------|
+| `10` | 1920×1080 (1080p 16:9) |
+| `16` | 3840×2160 (4K 16:9) |
+| `45` | 2688×1512 (2.7K 16:9) |
+| `95` | 2688×2016 (2.7K 4:3) |
+| `103` | 3840×2880 (4K 4:3) |
 
 > **Aside — DJI's `ByteStream` (a *different*, sibling encoding).** The same SDK also serializes `MediaFile` flat via a `ByteStream` codec (`toBytes`/`fromBytes`): **positional, no tags, little-endian** — `bool`=1 B, `int`/enum=4 B, `long`=8 B, `string`=`[u32-LE len][utf8]`, nested = recursive, list = `[count][items]`. This is *not* the camera wire (our records are tagged with 1-byte string lengths); it's the SDK's internal/IPC form. Noted because a capture that ever carries it would decode trivially with this spec.
 
