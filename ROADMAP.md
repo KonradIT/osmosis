@@ -60,18 +60,25 @@ Status per model:
   handshake on `udp/9004 + poke`** (tester log, real hardware). That settles the OA5 question — the
   brand-aware guess was right, and **`10004` is Xtra-exclusive**. The OA6 model byte `0x18` is also
   confirmed on hardware (mfr `1800…`).
-- **⚙️ Media list, unsolved per model (2026-07-24):** handshake ≠ working grid.
-  - **Action 5 Pro / Action 6:** list request answered but decoded **0 files** (`declared=0`, no
-    paths in a 375–445 B manifest) — a list layout our `0x00/0x27` parser doesn't read.
-  - **Pocket 3:** lists **15 paths** but with **no filename/extension token** (`media exts=[]`), so
-    the grid has no thumbnails, size shows "—", preview says "No preview for ." and download 404s on
-    the extension-less path. `/v2` itself works (it 404s, not refuses).
-  - Both are blocked on the raw manifest bytes; the datalink now **hex-dumps an undecodable manifest**
-    to the log ([dumpManifest](app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt)) so a
-    single test run captures the format. Paths/filenames only — safe for the shared log.
-- **Osmo 360 (`0x17`):** the **WPA3-SAE join failed** on the test phone (Android 10 tablet) so it
-  never reached the datalink; port/format still unknown. The join now **retries once as WPA2** on that
-  failure, which also self-corrects the table if the 360 is actually WPA2.
+- **✅ Media list cracked line-wide (2026-07-24):** the `0x00/0x27` payload is DJI's **CompositePack**
+  TLV (not protobuf, and no reference repo decodes it — they all regex the paths). Rewrote the decoder
+  to read each record's fields by **tag → length → value**
+  ([decodeComposite](app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt), reverse-engineered
+  from real Nano/Xtra/OA5/OA6/Pocket 3 manifests): media path `1a [len] 00 00 00 01`, thumb `…02`,
+  filename `0d [len]`, delete handle + video size off the `03 ff 19 06` marker. No filename regex at
+  all, so the camera's **Naming Management** custom Folder/File prefixes (`_A01`, `_DOA5`, `_OP3`) and
+  stock names decode identically — that was the whole blocker: OA5/OA6 scraped to zero on the
+  `DJI_001_OA5` folder suffix, the Pocket 3 lost its extension to the `_OP3` name suffix. Byte size is
+  read at `head+38` but trusted only when the videos' sizes actually vary (the Nano); the Action family
+  parks a per-camera constant there, so otherwise the app HTTP-HEADs it. Decodes **all 45 Nano / 13 Xtra
+  / 2 OA5 / 2 OA6 / 15 Pocket 3** files on real bytes (CompositeManifestTest); Nano + Xtra also confirmed
+  live, the other three await the tester's live `/v2` run.
+- **⏸️ Osmo 360 (`0x17`) — parked.** BLE pairs and hands out creds, but the phone **never finds the
+  `Osmo360` Wi-Fi SSID** ("searching for device…" → timeout), so it never reaches the datalink; both
+  WPA3 and the new WPA2-fallback fail because there's no AP to attach to — the 360's AP bring-up
+  differs (it's the only model advertising an extra `fff7` GATT characteristic, and may want a
+  360-specific Wi-Fi-enable command or a 5 GHz band). Deprioritized: its footage is 360-format that
+  needs Mimo to view anyway. Cracking it needs a **PCAPdroid capture of Mimo connecting the 360**.
 - **Best-effort default (no data source):** Osmo Action 2 / 3 / 4 — Mimo cameras that get the
   9004/poke/WPA2 default and the `~experimental` tag. Confirming each needs a PCAPdroid capture of
   Mimo or the unit itself.
