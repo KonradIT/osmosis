@@ -43,6 +43,7 @@ import dev.konraditurbe.osmosis.net.MetaLoader
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.materialswitch.MaterialSwitch
 import dev.konraditurbe.osmosis.rsdk.GpsService
+import dev.konraditurbe.osmosis.rsdk.GpsSyncState
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -69,7 +70,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private lateinit var savedCameras: SavedCameras
     private lateinit var statusPill: StatusPillView
     private lateinit var btnGps: MaterialButton
+    private lateinit var gpsBanner: TextView
     private var pendingGpsTarget: Pair<String, String>? = null // (mac, name) awaiting location perms
+
+    // GPS-sync lockout: while the R-SDK link owns the camera's BLE, media browsing must be blocked
+    // (both flows fight over one GATT). The service publishes its state on GpsSyncState; we mirror it
+    // into a banner + a disabled selector, and turn the satellite button into the stop control.
+    private val gpsStateListener = dev.konraditurbe.osmosis.rsdk.GpsSyncState.Listener { phase, name ->
+        main.post { renderGpsLock(phase, name) }
+    }
     private var camRows: List<CamRow> = emptyList()
     private var currentStatus = CameraStatus()
     private val main = Handler(Looper.getMainLooper())
@@ -198,8 +207,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // 🛰️ GPS-sync mode (R-SDK): when on, picking a camera starts the GPS foreground service
         // instead of the usual WiFi offload. Default off.
         btnGps = findViewById(R.id.btnGps)
+        gpsBanner = findViewById(R.id.gpsBanner)
         btnGps.isChecked = prefs.getBoolean("gps_mode", false)
-        btnGps.addOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("gps_mode", checked).apply() }
+        btnGps.addOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("gps_mode", checked).apply()
+            // While a GPS link is bound, the satellite button is the STOP control: unchecking it ends
+            // the service (the only action allowed during the lockout).
+            if (!checked && dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
+                logLine("GPS sync: stop requested (satellite tapped).")
+                GpsService.stop(this)
+            }
+        }
 
         btAdapter = (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
@@ -246,6 +264,47 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         apJoiner?.release()
         imageLoader?.shutdown()
         metaLoader?.shutdown()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Registering re-delivers the current phase immediately, so returning to the app restores the
+        // lockout if a GPS link is still bound.
+        dev.konraditurbe.osmosis.rsdk.GpsSyncState.addListener(gpsStateListener)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        dev.konraditurbe.osmosis.rsdk.GpsSyncState.removeListener(gpsStateListener)
+    }
+
+    /**
+     * Mirror the GPS-sync service's state into the UI: a coloured banner and a disabled selector while
+     * a link is bound (STARTING/ACTIVE), cleared when it stops. The satellite button stays live — it's
+     * the only way out of the lockout.
+     */
+    private fun renderGpsLock(phase: GpsSyncState.Phase, name: String?) {
+        val locked = phase != GpsSyncState.Phase.STOPPED
+        val who = name ?: "the camera"
+        when (phase) {
+            GpsSyncState.Phase.ACTIVE -> {
+                gpsBanner.setBackgroundColor(ContextCompat.getColor(this, R.color.osmo_danger))
+                gpsBanner.text = "🛰️ GPS sync active with $who\nMedia browsing is disabled while GPS is streaming. Tap 🛰️ to stop."
+                gpsBanner.visibility = View.VISIBLE
+            }
+            GpsSyncState.Phase.STARTING -> {
+                gpsBanner.setBackgroundColor(ContextCompat.getColor(this, R.color.osmo_amber))
+                gpsBanner.text = "🛰️ GPS sync connecting to $who… approve on the camera if it prompts. Tap 🛰️ to cancel."
+                gpsBanner.visibility = View.VISIBLE
+            }
+            GpsSyncState.Phase.STOPPED -> gpsBanner.visibility = View.GONE
+        }
+        // Lock camera selection + rescan while the link owns the BLE; keep btnGps checked so its tap
+        // reads as "stop". (onCamRowClick / onCameraChosen also hard-guard, in case a tap slips through.)
+        cameraList.isEnabled = !locked
+        cameraList.alpha = if (locked) 0.4f else 1f
+        findViewById<View>(R.id.btnRescan).apply { isEnabled = !locked; alpha = if (locked) 0.4f else 1f }
+        if (locked && !btnGps.isChecked) btnGps.isChecked = true
     }
 
     private fun selfTestDuml() {
@@ -320,6 +379,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     private fun onCamRowClick(pos: Int) {
+        // Locked out while a GPS link is bound — the satellite button is the only way forward.
+        if (dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
+            toast("GPS sync is active — tap 🛰️ to stop before selecting a camera.")
+            return
+        }
         val r = camRows.getOrNull(pos) ?: return
         // 🛰️ GPS-sync mode: connect over R-SDK (BLE only, no WiFi) via the foreground service.
         if (btnGps.isChecked) {
@@ -343,8 +407,22 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             return
         }
         logLine("GPS sync: connecting R-SDK to $name ($mac)")
+        // Cross-flow interlock: free the BLE GATT from any offload session first, so the R-SDK link
+        // owns it exclusively. Running both at once is what caused the field disconnections.
+        teardownOffload()
         GpsService.start(this, mac, name)
         Toast.makeText(this, "GPS sync starting for $name — approve on the camera if it prompts", Toast.LENGTH_LONG).show()
+    }
+
+    /** Drop any live WiFi-offload session (BLE GATT + datalink + WiFi request) so the R-SDK GPS flow
+     *  can take the camera's single BLE link without contention. Safe to call when nothing is active. */
+    private fun teardownOffload() {
+        stopKeepalive()
+        datalink?.close(); datalink = null
+        apJoiner?.release(); apJoiner = null
+        gattClient?.disconnect(); gattClient?.close(); gattClient = null
+        offloadMode = false; offloadTriggered = false; connecting = false
+        setConnectProgress(0)
     }
 
     private fun onCamRowLongClick(pos: Int): Boolean {
@@ -381,6 +459,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun safeName(d: BluetoothDevice): String? = try { d.name } catch (_: SecurityException) { null }
 
     private fun onCameraChosen(device: BluetoothDevice) {
+        if (dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
+            toast("Stop GPS sync (tap 🛰️) before browsing media.")
+            return
+        }
         val cam = discovered[device.address]
         currentBrand = Brand.of(device.address, cam?.name ?: safeName(device))
         currentModel = cam?.model ?: CameraModel.resolve(null, safeName(device), currentBrand)

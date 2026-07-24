@@ -146,6 +146,7 @@ class GpsService : Service(), RsdkController.Listener {
             rsdk.disconnect(); main.removeCallbacks(pushTick)
         }
         started = true; currentMac = mac
+        GpsSyncState.set(GpsSyncState.Phase.STARTING, cameraName)
 
         // Start location + satellite feed (permission checked by the caller before starting us).
         // Subscribe to EVERY provider we can, not just GPS: on many devices GPS_PROVIDER delivers
@@ -177,7 +178,11 @@ class GpsService : Service(), RsdkController.Listener {
 
     // ---- RsdkController.Listener ---------------------------------------------
     override fun onLog(s: String) = log(s) // R-SDK handshake / GATT lines -> logcat + file
-    override fun onConnected() { connected = true; updateNotification() }
+    override fun onConnected() {
+        connected = true
+        GpsSyncState.set(GpsSyncState.Phase.ACTIVE, cameraName) // bound to the camera → UI locks media
+        updateNotification()
+    }
     override fun onStatus(s: RsdkProtocol.CameraStatus) { status = s; updateNotification() }
     override fun onDisconnected() { if (connected) { connected = false; stop() } }
     override fun onFailed(reason: String) { log("GPS: $reason"); stop() }
@@ -256,6 +261,7 @@ class GpsService : Service(), RsdkController.Listener {
 
     private fun stop() {
         started = false; currentMac = null
+        GpsSyncState.set(GpsSyncState.Phase.STOPPED) // service ending → UI unlocks
         main.removeCallbacks(pushTick)
         runCatching { locationManager?.removeUpdates(locListener) }
         runCatching { locationManager?.unregisterGnssStatusCallback(gnssCallback) }
@@ -280,6 +286,11 @@ class GpsService : Service(), RsdkController.Listener {
 
         fun start(ctx: Context, mac: String, name: String) {
             ctx.startForegroundService(Intent(ctx, GpsService::class.java).putExtra(EXTRA_MAC, mac).putExtra(EXTRA_NAME, name))
+        }
+
+        /** Stop the running GPS-sync service (the satellite button's job when a link is bound). */
+        fun stop(ctx: Context) {
+            ctx.startService(Intent(ctx, GpsService::class.java).setAction(ACTION_STOP))
         }
     }
 }
