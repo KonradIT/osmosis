@@ -46,7 +46,7 @@ Handle + size hang off a **record marker `03 ff 19 06` at `head+8`**, present on
 | fps | rational `<u32 num><u32 den>` near the record | `a861 0000 e803 0000` = 25000/1000 = **25 fps** |
 
 - **Naming is irrelevant to the parse.** Because the path/name are read by length, the camera's *Naming Management* custom **Folder** and **File** prefixes decode exactly like stock — `DCIM/DJI_001/DJI_…_D.MP4` (stock), `DCIM/DJI_001/DJI_…_D_OP3.MP4` (Pocket 3), `DCIM/DJI_001_OA5/DJI_…_D_DOA5.MP4` (Action 5, custom folder + file suffix), `…_D_A01.MP4` (a user-typed `A01`) — all the same.
-- **Size caveat:** `head+38` is a real per-file size only where it *varies* across the list (the Nano). The whole Action family (Xtra / OA5 / OA6 / Pocket 3) parks a per-camera **constant** there, so trust it only when video sizes differ — otherwise fall back to an HTTP `HEAD`. **Resolution / duration** aren't in the manifest at all → read those from the MP4 `moov`.
+- **Size caveat:** `head+38` is a real per-file size only where it *varies* across the list (the Nano). The whole Action family (Xtra / OA5 / OA6 / Pocket 3) parks a per-camera **constant** there, so trust it only when video sizes differ — otherwise fall back to an HTTP `HEAD`. (The real size, plus resolution/duration, *are* in the record — see the schema below — but in tagged attributes whose exact key→field map we haven't pinned; for now read resolution/duration from the MP4 `moov`.)
 
 **Read it in Python** (`struct` for the little-endian ints; the buffer is the reassembled `0x00/0x27` payload):
 
@@ -101,6 +101,29 @@ print(f"File count: {count or len(media_files)}")   # header count, or record co
 for f in media_files:
     print(f"Folder {f['folder']} - Name {f['name']} - Size {f['size']}")
 ```
+
+#### What a record *means* — DJI's `MediaFile` schema (from RE of the DJI app)
+
+The `0x00/0x27` tagged record above is the **only** media-list wire format — a Mimo↔Nano WiFi capture shows Mimo using this same DUML on `udp/9004` (plus `tcp/80` for the HTTP media/thumb transfer), no second channel. DJI's app parses each tagged record into a `MediaFile` object (native `native_file_transfer_list`), so `MediaFile`'s fields are the authoritative dictionary of *what each record carries*. Reversed from the DJI camera SDK classes in the app dex (`xtra.sdk.keyvalue.value.media.MediaFile`):
+
+| field | type | notes |
+|-------|------|-------|
+| `fileName` | String | e.g. `DJI_…_D.MP4` — our `0d` field |
+| `fileType` | enum `MediaFileType` | photo/video/… → the extension category |
+| `fileSize` | **Long** | the real byte size (our `head+38` u32 guess is right only on the Nano) |
+| `duration` | **Long** | video length (ms) |
+| `frameRate` | enum `VideoFrameRate` | our fps rational is the same value |
+| `resolution` | enum `VideoResolution` | **in the record** — today we still read it from the MP4 `moov` |
+| `date` | `DateTime` | capture time |
+| `starTag` | enum | favourite / marked flag |
+| `orientation`, `cameraOrientation` | enum | rotation |
+| `photoType`/`videoType`/`panoType`, `videoEncodeType`, `videoSpeedRatio`, `timeLapseInterval` | enum/int | mode metadata |
+| `dirIndex`, `fileIndex`, `subIndex`, `segSubIndex`, `fileGroupIndex` | int | DCF indices |
+| `proxyInfo`, `hasProxy`, `EXIFInfo` (`physicalPathInfo`), `dcfInfo` | nested | proxy/exif/DCF; the `DCIM/…`,`MISC/…` strings live in these nested `physicalPath`s |
+
+So **size, duration, resolution and fps are all present in every record** — they're the tagged `[key][05][u32]` attributes we currently skip (`0x1c`, `0x20`–`0x22`, `0x26`, `0x28`, `0x2b`, `0x2c`, `0x31`, `0x36`, `0x37`). Mapping key→field would drop both the HTTP `HEAD` (size) and MP4 `moov` parse (resolution/duration). The map isn't recovered yet: the parser is **native**, and this app APK is a base split with **no `.so`** (the arm64 code-split isn't in hand), and the capture we have only fetched *thumbnails* — so there's no ground-truth media size to pin the key by correlation. Unlocking it needs the arm64 split APK, or a capture in which Mimo downloads/`HEAD`s full files.
+
+> **Aside — DJI's `ByteStream` (a *different*, sibling encoding).** The same SDK also serializes `MediaFile` flat via a `ByteStream` codec (`toBytes`/`fromBytes`): **positional, no tags, little-endian** — `bool`=1 B, `int`/enum=4 B, `long`=8 B, `string`=`[u32-LE len][utf8]`, nested = recursive, list = `[count][items]`. This is *not* the camera wire (our records are tagged with 1-byte string lengths); it's the SDK's internal/IPC form. Noted because a capture that ever carries it would decode trivially with this spec.
 
 **Parsed — index-based** (older Osmo Action 1/2/3): header `[u32-LE count][u32-LE total_size]`, then fixed **65 B** records, **no path strings** (files keyed by numeric `FileIndex`):
 
