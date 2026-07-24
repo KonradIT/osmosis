@@ -20,6 +20,21 @@
         android:orientation="vertical"
         android:padding="14dp">
 
+        <!-- GPS-sync lockout banner (must exist in every layout variant — MainActivity.onCreate
+             findViewById's it unconditionally). Shown while the R-SDK link owns the camera's BLE. -->
+        <TextView
+            android:id="@+id/gpsBanner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="10dp"
+            android:background="@color/osmo_danger"
+            android:padding="12dp"
+            android:textColor="@color/white"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:lineSpacingExtra="2dp"
+            android:visibility="gone" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
