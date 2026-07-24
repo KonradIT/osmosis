@@ -50,6 +50,14 @@ class GpsService : Service(), RsdkController.Listener {
     private var pushes = 0
     private var lastWriteOk = true
 
+    // Re-entry guard: startForegroundService re-delivers to onStartCommand on every GpsService.start(),
+    // and a user can tap a camera (or a rescan can re-select it) several times in a few seconds. Without
+    // this, each delivery fired another rsdk.connect() (a second GATT to the same camera — the duplicate
+    // service-discovery seen in the field) and another self-reposting pushTick, stacking parallel 1 Hz
+    // writers that collide on the one BLE link so every writeCharacteristic returns BUSY (write=FAILED).
+    private var started = false
+    private var currentMac: String? = null
+
     /**
      * The newest fix, but only if it's actually recent. `getLastKnownLocation` can hand back a fix
      * that's hours old, and if provider updates never arrive we'd otherwise stream that one stale
@@ -129,7 +137,15 @@ class GpsService : Service(), RsdkController.Listener {
         val mac = intent?.getStringExtra(EXTRA_MAC) ?: run { stopSelf(); return START_NOT_STICKY }
         cameraName = intent.getStringExtra(EXTRA_NAME) ?: mac
 
+        // Must call startForeground on every delivery to honour the startForegroundService contract,
+        // even the ones we're about to short-circuit as duplicates.
         startForegroundCompat(buildNotification())
+        if (started) {
+            if (mac == currentMac) { log("GPS: already syncing $cameraName — ignoring duplicate start"); return START_NOT_STICKY }
+            // A different camera: tear the current session down before bringing up the new one.
+            rsdk.disconnect(); main.removeCallbacks(pushTick)
+        }
+        started = true; currentMac = mac
 
         // Start location + satellite feed (permission checked by the caller before starting us).
         // Subscribe to EVERY provider we can, not just GPS: on many devices GPS_PROVIDER delivers
@@ -154,6 +170,7 @@ class GpsService : Service(), RsdkController.Listener {
         val device = (getSystemService(BluetoothManager::class.java))?.adapter?.getRemoteDevice(mac)
         if (device == null) { stop(); return START_NOT_STICKY }
         rsdk.connect(device)
+        main.removeCallbacks(pushTick) // exactly one push loop, always
         main.postDelayed(pushTick, 1000)
         return START_NOT_STICKY
     }
@@ -238,6 +255,7 @@ class GpsService : Service(), RsdkController.Listener {
     }
 
     private fun stop() {
+        started = false; currentMac = null
         main.removeCallbacks(pushTick)
         runCatching { locationManager?.removeUpdates(locListener) }
         runCatching { locationManager?.unregisterGnssStatusCallback(gnssCallback) }
