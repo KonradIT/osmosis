@@ -7,7 +7,8 @@ Every DUML command we use / know for browsing, fetching, and controlling media o
 frame (correct CRC8+CRC16) — paste it into <https://b3yond.d3vl.com/duml/> and it decodes.
 
 Transports: **BLE** = write GATT `fff5`, notify `fff4` (frame `[6:8]` msg-id is **big-endian**).
-**Datalink** = UDP (Nano `9004` + TCP-7001 poke first; Action 5 Pro / Xtra `10004`, no poke), DUML wrapped
+**Datalink** = UDP (DJI-standard `9004` + TCP-7001 poke first — Nano, Action 5/6, Pocket 3; the **Xtra Edge Pro**
+rebrand alone speaks `10004` with no poke), DUML wrapped
 in `[8B udp hdr][12B routing hdr][frame]`. Addressing byte `(id<<5)|type`: App `0x02`, Camera `0x01`,
 Gimbal `0x03`, Battery `0x05`, WiFi `0x07`, DM368 `0x08`, plus two session endpoints that are **not** the
 camera — `0xF0` (type `0x10`, id 7) and `0x1C` (type `0x1C`, id 0). Address the wake commands below to the
@@ -44,10 +45,13 @@ Handle + size hang off a **record marker `03 ff 19 06` at `head+8`**, present on
 | delete handle | `u32-LE @ head` (`head = marker − 8`) | feeds `0x00/0x28` (§2); `0` = photo, not deletable |
 | **media byte size** | **`u32-LE @ marker − 12`** | the real file size, **all cameras** — ground-truth-verified byte-exact against the SD card |
 | proxy (`.LRF`) size | `u32-LE @ marker + 30` | the low-res sidecar's size; a per-camera *constant* on the Action family, so don't mistake it for the media size (we did, once) |
-| fps | rational `<u32 num><u32 den>` near the record | `a861 0000 e803 0000` = 25000/1000 = **25 fps** |
+| fps | rational `<u32 num><u32 den>` near the record | `a861 0000 e803 0000` = 25000/1000 = **25 fps** — what the parser reads |
+| frameRate | `u8 @ marker − 2` | the `VideoFrameRate` enum for the same value (table below) |
+| resolution | `u8 @ marker − 1` | video-format index → pixel size (table below) |
+| ⭐ starTag | `u8 @ [ff\|fe] 19 06 + 9` | favourite flag; the one field also present on photo records |
 
 - **Naming is irrelevant to the parse.** Because the path/name are read by length, the camera's *Naming Management* custom **Folder** and **File** prefixes decode exactly like stock — `DCIM/DJI_001/DJI_…_D.MP4` (stock), `DCIM/DJI_001/DJI_…_D_OP3.MP4` (Pocket 3), `DCIM/DJI_001_OA5/DJI_…_D_DOA5.MP4` (Action 5, custom folder + file suffix), `…_D_A01.MP4` (a user-typed `A01`) — all the same.
-- **Size (solved 2026-07-24).** The media byte size is the `u32-LE` at **`marker − 12`** — confirmed exact for 85/85 Nano files against the camera's own SD card, and varying-per-file on the Action family. The nearby `marker + 30` (our old "`head+38`") is the *proxy* `.LRF` size, which is why it looked plausible on the Nano and read as a constant elsewhere. **Resolution / duration** are also in the record (the schema below names them) but stored as enum/int in the still-unmapped tagged attributes, so keep reading those from the MP4 `moov` for now.
+- **Size (solved 2026-07-24).** The media byte size is the `u32-LE` at **`marker − 12`** — confirmed exact for 85/85 Nano files against the camera's own SD card, and varying-per-file on the Action family. The nearby `marker + 30` (our old "`head+38`") is the *proxy* `.LRF` size, which is why it looked plausible on the Nano and read as a constant elsewhere. **Resolution** is in the record too, and now mapped (`u8 @ marker − 1`, table below). **`duration` is the only field still unmapped**, so the MP4 `moov` is read for that alone.
 
 **Read it in Python** (`struct` for the little-endian ints; the buffer is the reassembled `0x00/0x27` payload):
 
@@ -113,16 +117,18 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format — a
 | `fileType` | enum `MediaFileType` | photo/video/… → the extension category |
 | `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE @ marker − 12`, verified against the SD card |
 | `duration` | **Long** | video length (ms) |
-| `frameRate` | enum `VideoFrameRate` | our fps rational is the same value |
-| `resolution` | enum `VideoResolution` | **in the record** — today we still read it from the MP4 `moov` |
+| `frameRate` | enum `VideoFrameRate` | **mapped**: `u8 @ marker − 2`; our fps rational is the same value |
+| `resolution` | enum `VideoResolution` | **mapped**: `u8 @ marker − 1` (table below) |
 | `date` | `DateTime` | capture time |
-| `starTag` | enum | favourite / marked flag |
+| `starTag` | enum | favourite / marked flag — **mapped**: `u8 @ [ff\|fe] 19 06 + 9` |
 | `orientation`, `cameraOrientation` | enum | rotation |
 | `photoType`/`videoType`/`panoType`, `videoEncodeType`, `videoSpeedRatio`, `timeLapseInterval` | enum/int | mode metadata |
 | `dirIndex`, `fileIndex`, `subIndex`, `segSubIndex`, `fileGroupIndex` | int | DCF indices |
 | `proxyInfo`, `hasProxy`, `EXIFInfo` (`physicalPathInfo`), `dcfInfo` | nested | proxy/exif/DCF; the `DCIM/…`,`MISC/…` strings live in these nested `physicalPath`s |
 
-So **size, duration, resolution and fps are all present in every record**. `fileSize` is now pinned (`marker − 12`, above) by correlating a Mimo capture's tagged records against the **camera's own SD card** mounted over USB — 85/85 files byte-exact. fps we already read (the rational). `frameRate` (enum), `resolution` (enum) and `duration` live in the tagged `[key][type][big-endian value]` attributes we still skip (`0x1c`, `0x20`–`0x22`, `0x26`, `0x28`, `0x2b`, `0x2c`, `0x31`, `0x36`, `0x37`) — they read as small enum codes, not literal pixels/ms, so pinning each needs media with *varied* resolution/duration cross-referenced to those keys (the native parser that would name them directly is in an arm64 code-split not in this base-APK). Doing so would also drop the MP4 `moov` parse.
+So **size, duration, resolution and fps are all present in every record**. `fileSize` is pinned (`marker − 12`, above) by correlating tagged records against the **camera's own SD card** mounted over USB — 85/85 files byte-exact. fps we read from the rational, and `frameRate` (`marker − 2`), `resolution` (`marker − 1`) and `starTag` are pinned too — each mapped by shooting clips with *varied* settings and diffing the manifest against the card.
+
+**`duration` is the last field still unmapped.** It lives in the tagged `[key][type][big-endian value]` attributes we skip (`0x1c`, `0x20`–`0x22`, `0x26`, `0x28`, `0x2b`, `0x2c`, `0x31`, `0x36`, `0x37`) as an int, not literal ms, so pinning it needs clips of varied *length* cross-referenced to those keys. That is the only thing keeping the MP4 `moov` parse alive.
 
 ##### Enum value tables (mined from the DJI app dex — for decoding the record's int fields)
 
@@ -213,7 +219,7 @@ The record's int fields are small enum codes; these are the code→meaning table
 - Payload: `[count:u8][handle:u32-LE × count][count:u32-LE] 00 [count:u32-LE] 01 01 00 00`  — delete 1 file `h`: `01 <h> 01000000 00 01000000 01010000`
 - `handle` = per-file object id from the manifest record head (below); the trailing `00 … 01 01 00 00` is a storage selector, verbatim from the capture.
 - Response: `0x00/0x28` → `0000` = OK  ·  `00d6` = no such handle
-- **Handle** — u32-LE at the record head, located by anchoring on the constant record marker `03 ff 19 06` (at head + 8, so `handle = u32 @ marker − 8`). Nano (`DJI_`, 361 B records) handles start `0x40104000` step `0x40`; Xtra / Action (`CAM_`, 272 B records) start `0x40040000` step `0x10`. Photo records lack the marker → non-deletable (fail-safe).
+- **Handle** — u32-LE at the record head, located by anchoring on the constant record marker `03 ff 19 06` (at head + 8, so `handle = u32 @ marker − 8`). Nano (361 B records) handles start `0x40104000` step `0x40`; the Action family — Xtra Edge Pro, Action 5/6, Pocket 3 (272 B records) — starts `0x40040000` step `0x10`. (Naming doesn't track the family: only the Xtra rebrand writes `CAM_…`, while genuine Action/Pocket units use `DJI_…`.) Photo records lack the marker → non-deletable (fail-safe).
 - **Session** — accepted only on a **freshly-registered** datalink: the browse keep-alive advances our UDP seq past the camera's write window (reads still answer, writes are silently dropped), so tear keep-alive down and re-run the datalink-session open (handshake → register → subscribe) before sending. ~9 s. Verified on Nano + Xtra (`status 0000`, file removed).
 - DUML example (delete handle `0x40104480`): <https://b3yond.d3vl.com/duml/#551f044e020100a0400028018044104001000000000100000001010000a0d1>
 
