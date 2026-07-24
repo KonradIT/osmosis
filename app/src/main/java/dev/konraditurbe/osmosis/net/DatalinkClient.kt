@@ -413,6 +413,10 @@ class DatalinkClient(
         val names = nameRe.findAll(text).filter { it.groupValues[1].uppercase() in primaryExts }.toList()
         if (names.isEmpty() || names.size != declared) {
             log("datalink: manifest struct-decode skipped (declared=$declared, records=${names.size}) — flat scrape")
+            // On an unrecognized layout (OA5/OA6 came back with 0 paths; the Pocket 3 lists paths but
+            // no filename+extension token), dump the reassembled manifest so a test run captures the
+            // actual bytes to crack the format. Paths/filenames only — no credentials or coordinates.
+            dumpManifest(bytes)
             return parseFlat(bytes)
         }
         val out = ArrayList<CameraFile>(names.size)
@@ -437,6 +441,31 @@ class DatalinkClient(
         }
         log("datalink: decoded $declared records (${out.count { it.resLabel != null }} with fps, ${out.count { it.proxyPath != null }} proxies, ${out.count { it.deletable }} deletable, ${out.count { it.sizeBytes > 0 }} sized)")
         return out
+    }
+
+    /**
+     * Dump the reassembled manifest as hex when a model's layout doesn't decode, so a single test run
+     * gives us the actual bytes to reverse. Emitted in fixed-width rows with the byte offset, the way
+     * we hand-decoded the Nano/Xtra records — enough to see the count header and where the filename /
+     * extension / handle fields sit. Contents are paths and filenames only; the passphrase and GPS
+     * never travel on this datalink, so this is safe for the shared "Save logs" file.
+     */
+    private fun dumpManifest(bytes: ByteArray) {
+        log("datalink: --- manifest hex (${bytes.size}B), report this to crack the layout ---")
+        var off = 0
+        while (off < bytes.size) {
+            val end = minOf(off + 32, bytes.size)
+            val hex = StringBuilder(); val asc = StringBuilder()
+            for (i in off until end) {
+                val b = bytes[i].toInt() and 0xFF
+                hex.append("%02x".format(b))
+                if (i - off == 15) hex.append(' ')
+                asc.append(if (b in 0x20..0x7E) b.toChar() else '.')
+            }
+            log("  %04x  %-65s %s".format(off, hex.toString(), asc.toString()))
+            off = end
+        }
+        log("datalink: --- end manifest hex ---")
     }
 
     /** Fallback scrape: whole-blob regex, joining fields by filename base. No per-record structure or

@@ -56,16 +56,29 @@ Status per model:
   Since either guess can be wrong on an untested unit, the datalink now **retries the alternate
   config** (9004+poke ⇄ 10004/no-poke) when the handshake doesn't land, and logs which port answered
   — so any test on a real Action 5 Pro / Action 4 / Action 6 self-corrects *and* reports the truth.
-- **Coded, unverified (no unit):** Osmo 360 (`0x17`, 9004, **WPA3** via `setWpa3Passphrase`) and
-  Osmo Pocket 3 (`0x20`, 9004) — the Pocket 3 broadcasts **no** BLE manufacturer data, so detection
-  falls back to the BLE local name. Pocket 4 (`0x21`) added to the map.
-- **Best-effort default (no data source):** Osmo Action 2 / 3 / 4 / 6 — these are Mimo cameras, so they get the
+- **✅ Port confirmed (2026-07-24):** a **genuine DJI Action 5 Pro, Action 6, and Pocket 3 all
+  handshake on `udp/9004 + poke`** (tester log, real hardware). That settles the OA5 question — the
+  brand-aware guess was right, and **`10004` is Xtra-exclusive**. The OA6 model byte `0x18` is also
+  confirmed on hardware (mfr `1800…`).
+- **⚙️ Media list, unsolved per model (2026-07-24):** handshake ≠ working grid.
+  - **Action 5 Pro / Action 6:** list request answered but decoded **0 files** (`declared=0`, no
+    paths in a 375–445 B manifest) — a list layout our `0x00/0x27` parser doesn't read.
+  - **Pocket 3:** lists **15 paths** but with **no filename/extension token** (`media exts=[]`), so
+    the grid has no thumbnails, size shows "—", preview says "No preview for ." and download 404s on
+    the extension-less path. `/v2` itself works (it 404s, not refuses).
+  - Both are blocked on the raw manifest bytes; the datalink now **hex-dumps an undecodable manifest**
+    to the log ([dumpManifest](app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt)) so a
+    single test run captures the format. Paths/filenames only — safe for the shared log.
+- **Osmo 360 (`0x17`):** the **WPA3-SAE join failed** on the test phone (Android 10 tablet) so it
+  never reached the datalink; port/format still unknown. The join now **retries once as WPA2** on that
+  failure, which also self-corrects the table if the 360 is actually WPA2.
+- **Best-effort default (no data source):** Osmo Action 2 / 3 / 4 — Mimo cameras that get the
   9004/poke/WPA2 default and the `~experimental` tag. Confirming each needs a PCAPdroid capture of
   Mimo or the unit itself.
 
 Shared, already model-agnostic: pairing (`osmo` token), `/v2` HTTP, `DJI_`/`CAM_` naming, storage
-auto-detect, and the preview/trim/stream flow. **Remaining:** hardware/pcap verification of the 360,
-Pocket 3, and the Action 3/4/6 ports.
+auto-detect, and the preview/trim/stream flow. **Remaining:** the per-model **media-list layouts**
+above (OA5/OA6 empty-decode, Pocket 3 missing extension), and the 360's datalink once it joins.
 
 **Onboarding UI (2026-07-10):** the app now launches into a **camera selector**
 ([SavedCameras](app/src/main/java/dev/konraditurbe/osmosis/core/SavedCameras.kt),

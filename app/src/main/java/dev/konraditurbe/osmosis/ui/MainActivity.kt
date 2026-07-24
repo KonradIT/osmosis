@@ -123,6 +123,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // is the fallback for models that don't answer.
     private var credsRequested = false
 
+    // The Osmo 360 AP is marked WPA3-SAE, but some phones (e.g. Android 10 tablets) fail to SAE-join
+    // it; on that failure we retry the same AP as WPA2 once before giving up. One-shot per offload.
+    private var wpa3FallbackDone = false
+
     // Telemetry flood control: log each distinct DUML (flags/set/cmd) once, then every 25th.
     private val typeCounts = HashMap<Int, Int>()
     private val reqSeen = HashSet<Int>() // inbound request types already logged
@@ -395,6 +399,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         offloadMode = true
         offloadTriggered = false
         credsRequested = false
+        wpa3FallbackDone = false
         connecting = true
         setConnectProgress(3) // tap → connecting
         logLine("OFFLOAD [$currentBrand] $offloadSsid (${device.address})")
@@ -588,7 +593,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             }
         })
         apJoiner = joiner
-        joiner.join(ssid, pass, currentModel.wpa3)
+        val useWpa3 = currentModel.wpa3 && !wpa3FallbackDone
+        joiner.join(ssid, pass, useWpa3)
     }
 
     /**
@@ -602,6 +608,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      */
     private fun onWifiJoinFailed() {
         if (isFinishing || isDestroyed) return
+        // A WPA3 AP (the 360) that won't SAE-join on this phone: retry the same join as WPA2 once,
+        // silently, before falling through to the password dialog. If the 360 is actually WPA2 this
+        // also self-corrects the model table's guess.
+        if (currentModel.wpa3 && !wpa3FallbackDone) {
+            wpa3FallbackDone = true
+            logLine("WiFi: WPA3 join failed — retrying \"$offloadSsid\" as WPA2")
+            startWifiFlow(offloadSsid, offloadPass)
+            return
+        }
         setConnectProgress(0)
         val addr = currentAddress ?: return
         if (savedPassFor(addr).isEmpty()) return
