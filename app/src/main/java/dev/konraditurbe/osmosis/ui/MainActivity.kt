@@ -665,11 +665,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     }
                     datalink = dl
                     if (files.isNotEmpty()) dl.startKeepAlive() // hold the AP up while browsing
-                    // Files live on internal or SD; detect from the first and apply to all.
-                    val storage = if (files.isNotEmpty()) detectStorage(files.first()) else 0
-                    val fixed = files.map { it.copy(storage = storage) }
+                    // Storage is per manifest *list*, not per manifest: a camera with a card returns an
+                    // SD list and an internal list back to back, and probing only the first file stamped
+                    // that one store on every file — so whichever half didn't match 404'd (blank
+                    // thumbnails, failed downloads). Probe once per list instead: 1-2 HEADs per group.
+                    val storageFor = files.groupBy { it.group }
+                        .mapValues { (_, group) -> detectStorage(group.first()) }
+                    val fixed = files.map { it.copy(storage = storageFor[it.group] ?: 0) }
                         .sortedWith(compareByDescending<CameraFile> { it.timestamp }.thenByDescending { it.seq })
-                    logLine("MANIFEST: ${fixed.size} files on storage=$storage")
+                    logLine("MANIFEST: ${fixed.size} files — " +
+                        storageFor.entries.joinToString(", ") { (g, s) ->
+                            "list $g on storage=$s (${files.count { it.group == g }} files)"
+                        })
                     main.post { showGrid(fixed) }
                 }.start()
             }
@@ -735,7 +742,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         setConnectProgress(100) // first media in — connection complete
         currentAddress?.let { savedCameras.save(it, offloadSsid, currentModelId) }
         switchToGrid()
-        statusPill.render(pillName(), "Connected · WiFi", currentStatus)
+        statusPill.render(pillName(), "Connected · WiFi", currentStatus, showPower = isNano())
         if (files.isEmpty()) {
             logLine("No media found on camera.")
             return
@@ -757,8 +764,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** Live camera status → refresh the pill (only while the gallery is showing). */
     private fun onCameraStatus(s: CameraStatus) {
         currentStatus = s
-        if (gridGroup.visibility == View.VISIBLE) statusPill.render(pillName(), "Connected · WiFi", s)
+        if (gridGroup.visibility == View.VISIBLE)
+            statusPill.render(pillName(), "Connected · WiFi", s, showPower = isNano())
     }
+
+    /** The `0x0d/0x02` power/dock frame was only mapped on the Nano, so its pill line is Nano-only. */
+    private fun isNano() = currentModelId == CameraModel.ID_OSMO_NANO
 
     /**
      * Connection progress shown in the selector (between the hint and the camera list), from tapping
@@ -842,7 +853,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun toast(s: String) =
         main.post { android.widget.Toast.makeText(this, s, android.widget.Toast.LENGTH_SHORT).show() }
 
-    /** Returns the storage id (1=SD, 0=internal) that actually serves this file's path. */
+    /** Returns the camera mount index (0 or 1) that serves this file's path — by asking, since the
+     *  index is not a fixed SD/internal mapping (an Xtra served SD at 0, internal at 1). */
     private fun detectStorage(f: CameraFile): Int {
         for (s in intArrayOf(1, 0)) {
             if (http.headCode("/v2?storage=$s&path=${f.path}") == 200) return s

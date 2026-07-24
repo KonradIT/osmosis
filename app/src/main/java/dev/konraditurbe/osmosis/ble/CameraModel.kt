@@ -27,6 +27,7 @@ data class CameraModel(
 
     companion object {
         val DEFAULT = CameraModel("DJI Osmo camera")
+        const val ID_OSMO_NANO = 0x0019
 
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0010 to CameraModel("Osmo Action 2"),
@@ -41,7 +42,7 @@ data class CameraModel(
             // Both stay `verified = false` only because neither has been exercised on real hardware.
             0x0017 to CameraModel("Osmo 360", wpa3 = true),
             0x0018 to CameraModel("Osmo Action 6"),
-            0x0019 to CameraModel("Osmo Nano", verified = true),
+            ID_OSMO_NANO to CameraModel("Osmo Nano", verified = true),
             0x0020 to CameraModel("Osmo Pocket 3"), // broadcasts no BLE mfr data — name fallback
             0x0021 to CameraModel("Osmo Pocket 4"),
         )

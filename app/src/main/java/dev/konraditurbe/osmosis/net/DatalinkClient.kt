@@ -214,7 +214,8 @@ class DatalinkClient(
     // Includes the power state so docking/undocking refreshes the pill even when the percentage
     // hasn't moved; mV is bucketed to 0.05 V so normal ripple doesn't spam the UI.
     private fun displaySig(s: CameraStatus) =
-        "${s.batteryPercent}|${s.sdInserted}|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}" +
+        "${s.batteryPercent}|${s.sdTotalMb / 1024}|${s.sdFreeMb / 1024}|${s.internalFreeMb / 1024}" +
+            "|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}" +
             "|${s.docked}|${s.charging}|${s.batteryMilliVolts / 50}"
 
     private fun applyStatusFrame(set: Int, id: Int, p: ByteArray): Boolean {
@@ -228,8 +229,22 @@ class DatalinkClient(
                     storageFreeMb = if (free in 0..50_000_000) free else status.storageFreeMb,
                 ); return true
             }
-            set == 0x02 && id == 0xDC && p.isNotEmpty() -> {
-                status = status.copy(sdInserted = (p[0].toInt() and 0x01) != 0); return true
+            set == 0x02 && id == 0xDC && p.size >= 32 -> {
+                // Both stores in one frame, as two [total][free] u32-LE MiB blocks: the CARD at
+                // @6/@10 and BUILT-IN at @24/@28. Ground-truthed three ways: an Action 6's @6/@10
+                // (121785/109748 MiB) matched its on-screen 118.9/107.2 GB exactly; the same camera
+                // family (Action 5 Pro and its Xtra rebadge) reports an identical 48980 MiB built-in;
+                // and a card-less Xtra reports @6 = 0. Byte 0 is *not* an inserted flag — it read
+                // 0x11 with no card and 0x00 with one, i.e. backwards — so presence is capacity > 0.
+                val sdTotal = u32le(p, 6).toInt(); val sdFree = u32le(p, 10).toInt()
+                val inTotal = u32le(p, 24).toInt(); val inFree = u32le(p, 28).toInt()
+                fun sane(v: Int) = v in 0..50_000_000
+                status = status.copy(
+                    sdTotalMb = if (sane(sdTotal)) sdTotal else status.sdTotalMb,
+                    sdFreeMb = if (sane(sdFree)) sdFree else status.sdFreeMb,
+                    internalTotalMb = if (sane(inTotal)) inTotal else status.internalTotalMb,
+                    internalFreeMb = if (sane(inFree)) inFree else status.internalFreeMb,
+                ); return true
             }
             set == 0x00 && id == 0x00 && p.size >= 6 -> {
                 // GetVersion reply: NUL-separated ASCII (sdk\0name\0firmware); grab the version string.
@@ -411,6 +426,12 @@ class DatalinkClient(
     /** Test seam: decode an already-reassembled CompositePack manifest (post frame-reassembly). */
     internal fun decodeCompositeForTest(manifest: ByteArray): List<CameraFile> = decodeComposite(manifest)
 
+    /** Test seam: feed one status push and read back the decoded [CameraStatus]. */
+    internal fun applyStatusFrameForTest(set: Int, id: Int, payload: ByteArray): CameraStatus {
+        applyStatusFrame(set, id, payload)
+        return status
+    }
+
     /**
      * Decode the reassembled manifest. [decodeComposite] structurally handles every CompositePack
      * layout on the Osmo line (Nano, Xtra, Action 5/6, Pocket 3 — photos and videos, stock or
@@ -481,14 +502,36 @@ class DatalinkClient(
         }
         if (medias.isEmpty()) return emptyList()
 
+        val boundary = listBoundary(bytes, medias.size)
+        if (boundary > 0) log("datalink: 2 manifest lists ($boundary + ${medias.size - boundary} records)")
+
         val byPath = LinkedHashMap<String, CameraFile>() // dedup by media path (the list can page-repeat)
         for (k in medias.indices) {
             val m = medias[k]
             val lo = if (k > 0) medias[k - 1].end else 0
             val hi = if (k + 1 < medias.size) medias[k + 1].pos else bytes.size
-            byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi))
+            val group = if (boundary > 0 && k >= boundary) 1 else 0
+            byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi).copy(group = group))
         }
         return byPath.values.toList()
+    }
+
+    /**
+     * Index of the first record of the *second* per-storage list, or -1 if the manifest holds one list.
+     *
+     * With a card in, the camera concatenates two lists — **SD first, then internal** — each opening
+     * with its own `[u32-LE count][u32-LE size][u32-LE ts]…` header. Proven by dumping the same camera
+     * with and without a card: the no-card manifest is byte-identical to the mixed manifest's *second*
+     * list. So the leading count covers only the first list, and the rest belong to the second.
+     *
+     * The record handles corroborate it (SD `0x0004xxxx` vs internal `0x4004xxxx`), but the handle
+     * namespace isn't confirmed across models — and photos carry no handle at all — so the split comes
+     * from the count, which every model writes.
+     */
+    private fun listBoundary(bytes: ByteArray, records: Int): Int {
+        if (bytes.size < 4) return -1
+        val declared = u32le(bytes, 0).toInt()
+        return if (declared in 1 until records) declared else -1
     }
 
     /**

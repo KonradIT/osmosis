@@ -247,4 +247,45 @@ class CompositeManifestTest {
         assertEquals(true,  files.single { it.name.contains("_0282_") }.starred)
     }
 
+    // Two per-storage lists back to back, taken from a live Xtra with a card in: the SD list (its own
+    // `[count][size][ts]` header) followed by the internal list's header + first record. Counts are
+    // rewritten to 1 apiece so the fixture stays small; the boundary logic only reads the leading count.
+    private val mixedStorage = hex(
+        "01000000260a0000d19df85c00802800500004000000000000fe1906000000fe001a2c000000014443494d2f43414d5f3030" +
+        "312f43414d5f32303236303732343139343633345f303030355f44001b08000000010100001a30000000024d4953432f5448" +
+        "4d2f43414d5f3030312f43414d5f32303236303732343139343633345f303030355f44001b0a000000020201140215030002" +
+        "01000008ff010000003200000018010000640000000200a20c000000000a000000020001000c001f1000000001000000801c" +
+        "000060150000160000000025070000000101010b43414d000000000000000000008a01050000000540000012010013000d1d" +
+        "43414d5f32303236303732343139343633345f303030355f442e4a504700c99df85cb4619003400004003500030a03ff1906" +
+        "0000002001010000009e3200009152f85c00902f00c00104400000000000ff190600000016011a30000000014443494d2f43" +
+        "414d5f3030312f43414d5f32303236303732343130323033355f303032385f445f303031001b08000000010100001a340000" +
+        "00024d4953432f54484d2f43414d5f3030312f43414d5f32303236303732343130323033355f303032385f445f303031001b" +
+        "0a0000000202011402150300020422d205000600270700000001010008ff010000003200000018010000640000000200800c" +
+        "000000000a000000020001000c001f1000000001000000801c0000601500001622d21cb625070000000101010b43414d0000" +
+        "00000000000000008a011c0000001c40000012010013000d2143414d5f32303236303732343130323033355f303032385f44" +
+        "5f3030312e4a50470097b4f75ce85a8809b00104401e00036703ff19060000003401"
+    )
+
+    /**
+     * A manifest holding both stores must tag its records with which list they came from. Before this,
+     * one HTTP probe of the first file stamped that store onto every file, so whichever half lived on
+     * the other store 404'd — blank thumbnails and failed downloads, seen on an Xtra and an Action 6.
+     */
+    @Test
+    fun `records are grouped by their per-storage manifest list`() {
+        val files = DatalinkClient({}, 10004, false).decodeCompositeForTest(mixedStorage)
+        assertEquals(2, files.size)
+        assertEquals("SD list record is group 0",
+            0, files.single { it.name.contains("_0005_") }.group)
+        assertEquals("internal list record is group 1",
+            1, files.single { it.name.contains("_0028_") }.group)
+    }
+
+    /** One list (no card in) must stay a single group, so storage is resolved exactly once. */
+    @Test
+    fun `a single-list manifest leaves every record in group 0`() {
+        val files = DatalinkClient({}, 10004, false).decodeCompositeForTest(xtraTwoRecords)
+        assertTrue("no card in -> one list -> one group", files.all { it.group == 0 })
+    }
+
 }
