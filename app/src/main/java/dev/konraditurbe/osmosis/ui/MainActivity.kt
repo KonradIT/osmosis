@@ -43,6 +43,7 @@ import dev.konraditurbe.osmosis.net.MetaLoader
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.materialswitch.MaterialSwitch
 import dev.konraditurbe.osmosis.rsdk.GpsService
+import dev.konraditurbe.osmosis.rsdk.GpsSyncState
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -69,7 +70,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private lateinit var savedCameras: SavedCameras
     private lateinit var statusPill: StatusPillView
     private lateinit var btnGps: MaterialButton
+    private lateinit var gpsBanner: TextView
     private var pendingGpsTarget: Pair<String, String>? = null // (mac, name) awaiting location perms
+
+    // GPS-sync lockout: while the R-SDK link owns the camera's BLE, media browsing must be blocked
+    // (both flows fight over one GATT). The service publishes its state on GpsSyncState; we mirror it
+    // into a banner + a disabled selector, and turn the satellite button into the stop control.
+    private val gpsStateListener = dev.konraditurbe.osmosis.rsdk.GpsSyncState.Listener { phase, name ->
+        main.post { renderGpsLock(phase, name) }
+    }
     private var camRows: List<CamRow> = emptyList()
     private var currentStatus = CameraStatus()
     private val main = Handler(Looper.getMainLooper())
@@ -122,6 +131,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // them right after pairing so no manual password entry is needed; a saved-password / prompt path
     // is the fallback for models that don't answer.
     private var credsRequested = false
+
+    // The Osmo 360 AP is marked WPA3-SAE, but some phones (e.g. Android 10 tablets) fail to SAE-join
+    // it; on that failure we retry the same AP as WPA2 once before giving up. One-shot per offload.
+    private var wpa3FallbackDone = false
 
     // Telemetry flood control: log each distinct DUML (flags/set/cmd) once, then every 25th.
     private val typeCounts = HashMap<Int, Int>()
@@ -194,8 +207,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // 🛰️ GPS-sync mode (R-SDK): when on, picking a camera starts the GPS foreground service
         // instead of the usual WiFi offload. Default off.
         btnGps = findViewById(R.id.btnGps)
+        gpsBanner = findViewById(R.id.gpsBanner)
         btnGps.isChecked = prefs.getBoolean("gps_mode", false)
-        btnGps.addOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("gps_mode", checked).apply() }
+        btnGps.addOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("gps_mode", checked).apply()
+            // While a GPS link is bound, the satellite button is the STOP control: unchecking it ends
+            // the service (the only action allowed during the lockout).
+            if (!checked && dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
+                logLine("GPS sync: stop requested (satellite tapped).")
+                GpsService.stop(this)
+            }
+        }
 
         btAdapter = (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
@@ -242,6 +264,47 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         apJoiner?.release()
         imageLoader?.shutdown()
         metaLoader?.shutdown()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Registering re-delivers the current phase immediately, so returning to the app restores the
+        // lockout if a GPS link is still bound.
+        dev.konraditurbe.osmosis.rsdk.GpsSyncState.addListener(gpsStateListener)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        dev.konraditurbe.osmosis.rsdk.GpsSyncState.removeListener(gpsStateListener)
+    }
+
+    /**
+     * Mirror the GPS-sync service's state into the UI: a coloured banner and a disabled selector while
+     * a link is bound (STARTING/ACTIVE), cleared when it stops. The satellite button stays live — it's
+     * the only way out of the lockout.
+     */
+    private fun renderGpsLock(phase: GpsSyncState.Phase, name: String?) {
+        val locked = phase != GpsSyncState.Phase.STOPPED
+        val who = name ?: "the camera"
+        when (phase) {
+            GpsSyncState.Phase.ACTIVE -> {
+                gpsBanner.setBackgroundColor(ContextCompat.getColor(this, R.color.osmo_danger))
+                gpsBanner.text = "🛰️ GPS sync active with $who\nMedia browsing is disabled while GPS is streaming. Tap 🛰️ to stop."
+                gpsBanner.visibility = View.VISIBLE
+            }
+            GpsSyncState.Phase.STARTING -> {
+                gpsBanner.setBackgroundColor(ContextCompat.getColor(this, R.color.osmo_amber))
+                gpsBanner.text = "🛰️ GPS sync connecting to $who… approve on the camera if it prompts. Tap 🛰️ to cancel."
+                gpsBanner.visibility = View.VISIBLE
+            }
+            GpsSyncState.Phase.STOPPED -> gpsBanner.visibility = View.GONE
+        }
+        // Lock camera selection + rescan while the link owns the BLE; keep btnGps checked so its tap
+        // reads as "stop". (onCamRowClick / onCameraChosen also hard-guard, in case a tap slips through.)
+        cameraList.isEnabled = !locked
+        cameraList.alpha = if (locked) 0.4f else 1f
+        findViewById<View>(R.id.btnRescan).apply { isEnabled = !locked; alpha = if (locked) 0.4f else 1f }
+        if (locked && !btnGps.isChecked) btnGps.isChecked = true
     }
 
     private fun selfTestDuml() {
@@ -301,7 +364,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val savedRows = saved.map { e ->
             val c = byMac[e.mac]
             CamRow(e.mac, c?.name ?: e.name,
-                c?.model ?: CameraModel.resolve(e.modelId.takeIf { it >= 0 }, e.name),
+                c?.model ?: CameraModel.resolve(e.modelId.takeIf { it >= 0 }, e.name, Brand.of(e.mac, e.name)),
                 inRange = c != null, saved = true, device = c?.device)
         }
         val newRows = scanned.filter { it.device.address !in savedMacs }.map { c ->
@@ -316,6 +379,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     private fun onCamRowClick(pos: Int) {
+        // Locked out while a GPS link is bound — the satellite button is the only way forward.
+        if (dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
+            toast("GPS sync is active — tap 🛰️ to stop before selecting a camera.")
+            return
+        }
         val r = camRows.getOrNull(pos) ?: return
         // 🛰️ GPS-sync mode: connect over R-SDK (BLE only, no WiFi) via the foreground service.
         if (btnGps.isChecked) {
@@ -339,8 +407,22 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             return
         }
         logLine("GPS sync: connecting R-SDK to $name ($mac)")
+        // Cross-flow interlock: free the BLE GATT from any offload session first, so the R-SDK link
+        // owns it exclusively. Running both at once is what caused the field disconnections.
+        teardownOffload()
         GpsService.start(this, mac, name)
         Toast.makeText(this, "GPS sync starting for $name — approve on the camera if it prompts", Toast.LENGTH_LONG).show()
+    }
+
+    /** Drop any live WiFi-offload session (BLE GATT + datalink + WiFi request) so the R-SDK GPS flow
+     *  can take the camera's single BLE link without contention. Safe to call when nothing is active. */
+    private fun teardownOffload() {
+        stopKeepalive()
+        datalink?.close(); datalink = null
+        apJoiner?.release(); apJoiner = null
+        gattClient?.disconnect(); gattClient?.close(); gattClient = null
+        offloadMode = false; offloadTriggered = false; connecting = false
+        setConnectProgress(0)
     }
 
     private fun onCamRowLongClick(pos: Int): Boolean {
@@ -377,9 +459,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun safeName(d: BluetoothDevice): String? = try { d.name } catch (_: SecurityException) { null }
 
     private fun onCameraChosen(device: BluetoothDevice) {
+        if (dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
+            toast("Stop GPS sync (tap 🛰️) before browsing media.")
+            return
+        }
         val cam = discovered[device.address]
         currentBrand = Brand.of(device.address, cam?.name ?: safeName(device))
-        currentModel = cam?.model ?: CameraModel.resolve(null, safeName(device))
+        currentModel = cam?.model ?: CameraModel.resolve(null, safeName(device), currentBrand)
         currentModelId = cam?.modelId
         currentAddress = device.address
         offloadSsid = cam?.name ?: safeName(device) ?: "camera"
@@ -395,6 +481,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         offloadMode = true
         offloadTriggered = false
         credsRequested = false
+        wpa3FallbackDone = false
         connecting = true
         setConnectProgress(3) // tap → connecting
         logLine("OFFLOAD [$currentBrand] $offloadSsid (${device.address})")
@@ -549,30 +636,54 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 setConnectProgress(58) // WiFi joined + bound
                 logLine("WiFi link: ip=${ip4?.hostAddress}")
                 Thread {
-                    // Datalink port + poke come from the model (e.g. Action 5 Pro = 10004/no-poke,
-                    // the rest = 9004/poke); the Xtra resolves to Action 5 Pro by its model byte.
-                    val dlPort = currentModel.datalinkPort
-                    val dlPoke = currentModel.tcpPoke
-                    logLine("=== media list [${currentModel.name}] via udp/$dlPort ===")
+                    // Datalink port + poke come from the model AND brand: 10004/no-poke was only ever
+                    // confirmed on the Xtra rebrand (own OUI EC:9E:EA), so a genuine DJI unit gets the
+                    // DJI-standard 9004+poke. Either guess can be wrong on an untested model, so if the
+                    // handshake never lands we retry the alternate config and log which port answered.
+                    fun open(m: CameraModel): Pair<DatalinkClient, List<CameraFile>> {
+                        logLine("=== media list [${m.name}] via udp/${m.datalinkPort} (poke=${m.tcpPoke}) ===")
+                        val c = DatalinkClient(::logLine, m.datalinkPort, m.tcpPoke)
+                        c.onStatus = { s -> main.post { onCameraStatus(s) } }
+                        c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
+                        val f = runCatching { c.fetchFileList("192.168.2.1") }
+                            .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
+                        return c to f
+                    }
+
                     datalink?.close()
-                    val dl = DatalinkClient(::logLine, dlPort, dlPoke)
+                    var (dl, files) = open(currentModel)
+                    if (!dl.handshakeOk) {
+                        val alt = currentModel.alternate()
+                        logLine("datalink: nothing answered on udp/${currentModel.datalinkPort} — trying udp/${alt.datalinkPort}")
+                        runCatching { dl.close() }
+                        val retry = open(alt)
+                        dl = retry.first; files = retry.second
+                        if (dl.handshakeOk) logLine(
+                            "datalink: *** ${currentModel.name} actually speaks udp/${alt.datalinkPort} " +
+                                "(poke=${alt.tcpPoke}) — please report so the model table can be fixed ***"
+                        )
+                    }
                     datalink = dl
-                    dl.onStatus = { s -> main.post { onCameraStatus(s) } }
-                    dl.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98 during the manifest
-                    val files = runCatching { dl.fetchFileList("192.168.2.1") }
-                        .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
                     if (files.isNotEmpty()) dl.startKeepAlive() // hold the AP up while browsing
-                    // Files live on internal or SD; detect from the first and apply to all.
-                    val storage = if (files.isNotEmpty()) detectStorage(files.first()) else 0
-                    val fixed = files.map { it.copy(storage = storage) }
+                    // Storage is per manifest *list*, not per manifest: a camera with a card returns an
+                    // SD list and an internal list back to back, and probing only the first file stamped
+                    // that one store on every file — so whichever half didn't match 404'd (blank
+                    // thumbnails, failed downloads). Probe once per list instead: 1-2 HEADs per group.
+                    val storageFor = files.groupBy { it.group }
+                        .mapValues { (_, group) -> detectStorage(group.first()) }
+                    val fixed = files.map { it.copy(storage = storageFor[it.group] ?: 0) }
                         .sortedWith(compareByDescending<CameraFile> { it.timestamp }.thenByDescending { it.seq })
-                    logLine("MANIFEST: ${fixed.size} files on storage=$storage")
+                    logLine("MANIFEST: ${fixed.size} files — " +
+                        storageFor.entries.joinToString(", ") { (g, s) ->
+                            "list $g on storage=$s (${files.count { it.group == g }} files)"
+                        })
                     main.post { showGrid(fixed) }
                 }.start()
             }
         })
         apJoiner = joiner
-        joiner.join(ssid, pass, currentModel.wpa3)
+        val useWpa3 = currentModel.wpa3 && !wpa3FallbackDone
+        joiner.join(ssid, pass, useWpa3)
     }
 
     /**
@@ -586,15 +697,32 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      */
     private fun onWifiJoinFailed() {
         if (isFinishing || isDestroyed) return
+        // A WPA3 AP (the 360) that won't SAE-join on this phone: retry the same join as WPA2 once,
+        // silently, before falling through to the password dialog. If the 360 is actually WPA2 this
+        // also self-corrects the model table's guess.
+        if (currentModel.wpa3 && !wpa3FallbackDone) {
+            wpa3FallbackDone = true
+            logLine("WiFi: WPA3 join failed — retrying \"$offloadSsid\" as WPA2")
+            startWifiFlow(offloadSsid, offloadPass)
+            return
+        }
         setConnectProgress(0)
         val addr = currentAddress ?: return
         if (savedPassFor(addr).isEmpty()) return
+        // If we already tried BOTH securities (WPA3 then the WPA2 fallback) and still failed, the
+        // password is almost certainly fine — it's the phone not joining this AP's Wi-Fi security.
+        // Don't send the user chasing a password that isn't the problem (as the 360 did before).
+        val bothSecuritiesTried = currentModel.wpa3 && wpa3FallbackDone
+        val message = if (bothSecuritiesTried)
+            "This phone couldn't join $offloadSsid over either WPA3 or WPA2 — likely a Wi-Fi " +
+                "compatibility limit on the phone, not the password. You can still re-enter the " +
+                "password to rule it out."
+        else
+            "The camera Wi-Fi join failed. This usually means the saved password is out of date " +
+                "— e.g. after a camera factory reset. Re-enter it and try again?"
         AlertDialog.Builder(this)
             .setTitle("Couldn't join $offloadSsid")
-            .setMessage(
-                "The camera Wi-Fi join failed. This usually means the saved password is out of date " +
-                    "— e.g. after a camera factory reset. Re-enter it and try again?"
-            )
+            .setMessage(message)
             .setPositiveButton("Re-enter password") { _, _ ->
                 promptPasswordFor(addr) {
                     offloadPass = savedPassFor(addr)
@@ -614,7 +742,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         setConnectProgress(100) // first media in — connection complete
         currentAddress?.let { savedCameras.save(it, offloadSsid, currentModelId) }
         switchToGrid()
-        statusPill.render(pillName(), "Connected · WiFi", currentStatus)
+        statusPill.render(pillName(), "Connected · WiFi", currentStatus, showPower = isNano())
         if (files.isEmpty()) {
             logLine("No media found on camera.")
             return
@@ -636,8 +764,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** Live camera status → refresh the pill (only while the gallery is showing). */
     private fun onCameraStatus(s: CameraStatus) {
         currentStatus = s
-        if (gridGroup.visibility == View.VISIBLE) statusPill.render(pillName(), "Connected · WiFi", s)
+        if (gridGroup.visibility == View.VISIBLE)
+            statusPill.render(pillName(), "Connected · WiFi", s, showPower = isNano())
     }
+
+    /** The `0x0d/0x02` power/dock frame was only mapped on the Nano, so its pill line is Nano-only. */
+    private fun isNano() = currentModelId == CameraModel.ID_OSMO_NANO
 
     /**
      * Connection progress shown in the selector (between the hint and the camera list), from tapping
@@ -721,7 +853,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun toast(s: String) =
         main.post { android.widget.Toast.makeText(this, s, android.widget.Toast.LENGTH_SHORT).show() }
 
-    /** Returns the storage id (1=SD, 0=internal) that actually serves this file's path. */
+    /** Returns the camera mount index (0 or 1) that serves this file's path — by asking, since the
+     *  index is not a fixed SD/internal mapping (an Xtra served SD at 0, internal at 1). */
     private fun detectStorage(f: CameraFile): Int {
         for (s in intArrayOf(1, 0)) {
             if (http.headCode("/v2?storage=$s&path=${f.path}") == 200) return s
@@ -798,7 +931,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     override fun onHit(device: BluetoothDevice, rssi: Int, name: String?, modelGuess: String?, modelId: Int?) {
         val addr = device.address
-        val model = CameraModel.resolve(modelId, name)
+        // Brand matters, not just the model id: the Xtra rebrand shares model 0x0015 with the DJI
+        // Osmo Action 5 Pro but uses a different datalink port. Its OUI gives it away.
+        val model = CameraModel.resolve(modelId, name, Brand.of(addr, name))
         if (discovered.put(addr, Cam(device, name, Brand.of(addr, name), rssi, modelId, model)) == null) {
             logLine("found ${model.name} [${Brand.of(addr, name)}] (${name ?: addr}) rssi=$rssi" +
                 if (!model.verified) "  ~experimental" else "")

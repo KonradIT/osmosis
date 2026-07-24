@@ -4,11 +4,19 @@ package dev.konraditurbe.osmosis.core
 data class CameraFile(
     val path: String,        // e.g. DCIM/DJI_001/DJI_20260329115359_0211_D.MP4
     val thumbPath: String,   // e.g. MISC/THM/DJI_001/DJI_20260329115359_0211_D.scr
-    val storage: Int = 0,    // 0 = internal, 1 = SD
+    val storage: Int = 0,    // the camera mount index that serves this path (resolved by probing —
+                             // NOT a fixed SD/internal mapping: an Xtra served its SD at 0, internal at 1)
     val resLabel: String? = null, // e.g. "25fps" — fps from the DUML manifest record
     val proxyPath: String? = null, // low-res proxy clip (.LRF/.LRV) if the camera lists one
     val handle: Long = 0L,   // camera-assigned delete handle (DUML 0x00/0x28); 0 = unknown → not deletable
-    val sizeBytes: Long = 0L, // full media byte size from the DUML manifest (record +38); 0 = unknown (probe HTTP)
+    val sizeBytes: Long = 0L, // full media byte size from the DUML manifest (record marker-12); 0 = unknown (probe HTTP)
+    val starred: Boolean = false, // ⭐ favourite flag from the manifest (marker+10, video records)
+    val resolution: String? = null, // "3840x2160" from the manifest resolution index (marker-1); null = unknown → moov
+    // Which per-storage list of the manifest this record came from (0 = first, 1 = second). A camera
+    // with a card returns TWO lists back to back — SD first, then internal — and every file in a list
+    // lives on the same store, so the caller resolves [storage] once per group instead of once per
+    // manifest (which used to stamp one store on everything and 404 the other half).
+    val group: Int = 0,
 ) {
     /** True once the manifest yielded a delete handle for this file (see DatalinkClient.deleteFiles). */
     val deletable: Boolean get() = handle != 0L

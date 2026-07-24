@@ -208,14 +208,20 @@ class MediaPreviewActivity : AppCompatActivity() {
     }
 
     private fun loadVideo() {
-        // Resolution isn't in the manifest — read it from the MP4 moov, independent of playback.
-        Thread {
-            val wh = runCatching { VideoMeta.resolution(http, file) }.getOrNull()
-            if (wh != null) {
-                resTag = coarseRes(wh.first, wh.second)
-                main.post { if (!isFinishing) renderTop() }
-            }
-        }.start()
+        // Prefer the resolution decoded straight from the manifest (marker-1 index); only fall back to
+        // the MP4 moov when the camera used a resolution code we haven't mapped yet.
+        val manifestRes = file.resolution?.split('x')?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 2 }
+        if (manifestRes != null) {
+            resTag = coarseRes(manifestRes[0], manifestRes[1])
+        } else {
+            Thread {
+                val wh = runCatching { VideoMeta.resolution(http, file) }.getOrNull()
+                if (wh != null) {
+                    resTag = coarseRes(wh.first, wh.second)
+                    main.post { if (!isFinishing) renderTop() }
+                }
+            }.start()
+        }
         // Try the low-res proxy first (listed .LRF/.LRV, or a derived .XRF sidecar the Xtra/Action 5
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
         streamCandidates = file.previewCandidates()

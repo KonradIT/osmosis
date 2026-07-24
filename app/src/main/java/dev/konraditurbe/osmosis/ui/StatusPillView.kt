@@ -53,7 +53,12 @@ class StatusPillView @JvmOverloads constructor(
         addView(rows, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
     }
 
-    fun render(name: String, connection: String, s: CameraStatus) {
+    /**
+     * [showPower] gates the voltage / current / dock line: the `0x0d/0x02` byte layout was only ever
+     * mapped on the Nano (by docking/undocking one and diffing the frame), so other models could show
+     * garbage. The caller passes `true` only for the Nano.
+     */
+    fun render(name: String, connection: String, s: CameraStatus, showPower: Boolean) {
         nameView.text = name
         val pct = s.batteryPercent
         // A charging bolt next to the percentage — the camera reports this while docked.
@@ -69,8 +74,10 @@ class StatusPillView @JvmOverloads constructor(
 
         rows.removeAllViews()
         row(GREEN, connection)
-        row(storageDot(s), storageLabel(s))
-        if (s.hasPowerInfo) row(if (s.charging) GREEN else GRAY, powerLabel(s))
+        // One line per store the camera actually has, so a card is never mislabelled as built-in
+        // (which is what happened while we showed only the active store under a fixed "Internal").
+        for ((label, free, total) in storeLines(s)) row(storageDot(free, total), storeLabel(label, free, total))
+        if (showPower && s.hasPowerInfo) row(if (s.charging) GREEN else GRAY, powerLabel(s))
     }
 
     /**
@@ -91,17 +98,29 @@ class StatusPillView @JvmOverloads constructor(
         return "$volts · $flow$dock"
     }
 
-    private fun storageDot(s: CameraStatus): Int {
-        if (s.storageFreeMb < 0 || s.storageTotalMb <= 0) return GRAY
-        val ratio = s.storageFreeMb.toFloat() / s.storageTotalMb
+    /**
+     * The store lines to render: `SD card` first (only when one is actually in) then `Internal`.
+     * Falls back to the single active-store figure from `0x02/0x80` for cameras that haven't sent a
+     * per-store `0x02/0xDC` frame yet — labelled neutrally, since which store it refers to is unknown.
+     */
+    private fun storeLines(s: CameraStatus): List<Triple<String, Int, Int>> {
+        val lines = ArrayList<Triple<String, Int, Int>>()
+        if (s.sdInserted) lines.add(Triple("SD card", s.sdFreeMb, s.sdTotalMb))
+        if (s.internalTotalMb > 0) lines.add(Triple("Internal", s.internalFreeMb, s.internalTotalMb))
+        if (lines.isEmpty()) lines.add(Triple("Storage", s.storageFreeMb, s.storageTotalMb))
+        return lines
+    }
+
+    private fun storageDot(freeMb: Int, totalMb: Int): Int {
+        if (freeMb < 0 || totalMb <= 0) return GRAY
+        val ratio = freeMb.toFloat() / totalMb
         return when { ratio < 0.08f -> RED; ratio < 0.2f -> ORANGE; else -> GREEN }
     }
 
-    private fun storageLabel(s: CameraStatus): String {
-        val store = if (s.sdInserted) "SD" else "Internal"
-        if (s.storageFreeMb < 0) return "$store · —"
-        val freeGb = s.storageFreeMb / 1024f
-        return if (s.storageTotalMb > 0) "$store · %.1f / %.1f GB".format(freeGb, s.storageTotalMb / 1024f)
+    private fun storeLabel(store: String, freeMb: Int, totalMb: Int): String {
+        if (freeMb < 0) return "$store · —"
+        val freeGb = freeMb / 1024f
+        return if (totalMb > 0) "$store · %.1f / %.1f GB".format(freeGb, totalMb / 1024f)
         else "$store · %.1f GB free".format(freeGb)
     }
 

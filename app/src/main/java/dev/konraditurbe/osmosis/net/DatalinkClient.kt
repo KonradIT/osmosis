@@ -60,6 +60,11 @@ class DatalinkClient(
     private var lastSig = ""        // last display signature fired to onStatus (throttles UI updates)
     private var lastBattSig = ""    // dock-relevant bytes of 0x0d/02; log only on change (#5)
 
+    /** False when the datalink handshake never landed — i.e. wrong UDP port for this camera. Lets
+     *  the caller distinguish "no media" from "nothing answered" and retry the alternate port. */
+    @Volatile var handshakeOk = false
+        private set
+
     /**
      * Open the udp/[port] datalink and bring the session up to the point commands are accepted: TCP
      * poke, handshake (retry until the camera answers), drain heartbeats to learn its channel + start
@@ -68,6 +73,7 @@ class DatalinkClient(
      * flow — the delete re-runs this so it rides the same fresh, in-window session the list does.
      */
     private fun openAndRegister(ip: String, subscribe: Boolean = true): Boolean {
+        handshakeOk = false
         cam = InetAddress.getByName(ip)
         sock = DatagramSocket().apply { soTimeout = 200 }
         sessionId = Random.nextInt(0x1000, 0xFFFE)
@@ -90,6 +96,7 @@ class DatalinkClient(
             if (ok) break
         }
         if (!ok) { log("datalink: handshake FAILED on udp/$port"); runCatching { sock.close() }; return false }
+        handshakeOk = true
         log("datalink: handshake OK on udp/$port")
         onFetchProgress?.invoke(8)
 
@@ -207,7 +214,8 @@ class DatalinkClient(
     // Includes the power state so docking/undocking refreshes the pill even when the percentage
     // hasn't moved; mV is bucketed to 0.05 V so normal ripple doesn't spam the UI.
     private fun displaySig(s: CameraStatus) =
-        "${s.batteryPercent}|${s.sdInserted}|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}" +
+        "${s.batteryPercent}|${s.sdTotalMb / 1024}|${s.sdFreeMb / 1024}|${s.internalFreeMb / 1024}" +
+            "|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}" +
             "|${s.docked}|${s.charging}|${s.batteryMilliVolts / 50}"
 
     private fun applyStatusFrame(set: Int, id: Int, p: ByteArray): Boolean {
@@ -221,14 +229,28 @@ class DatalinkClient(
                     storageFreeMb = if (free in 0..50_000_000) free else status.storageFreeMb,
                 ); return true
             }
-            set == 0x02 && id == 0xDC && p.isNotEmpty() -> {
-                status = status.copy(sdInserted = (p[0].toInt() and 0x01) != 0); return true
+            set == 0x02 && id == 0xDC && p.size >= 32 -> {
+                // Both stores in one frame, as two [total][free] u32-LE MiB blocks: the CARD at
+                // @6/@10 and BUILT-IN at @24/@28. Ground-truthed three ways: an Action 6's @6/@10
+                // (121785/109748 MiB) matched its on-screen 118.9/107.2 GB exactly; the same camera
+                // family (Action 5 Pro and its Xtra rebadge) reports an identical 48980 MiB built-in;
+                // and a card-less Xtra reports @6 = 0. Byte 0 is *not* an inserted flag — it read
+                // 0x11 with no card and 0x00 with one, i.e. backwards — so presence is capacity > 0.
+                val sdTotal = u32le(p, 6).toInt(); val sdFree = u32le(p, 10).toInt()
+                val inTotal = u32le(p, 24).toInt(); val inFree = u32le(p, 28).toInt()
+                fun sane(v: Int) = v in 0..50_000_000
+                status = status.copy(
+                    sdTotalMb = if (sane(sdTotal)) sdTotal else status.sdTotalMb,
+                    sdFreeMb = if (sane(sdFree)) sdFree else status.sdFreeMb,
+                    internalTotalMb = if (sane(inTotal)) inTotal else status.internalTotalMb,
+                    internalFreeMb = if (sane(inFree)) inFree else status.internalFreeMb,
+                ); return true
             }
             set == 0x00 && id == 0x00 && p.size >= 6 -> {
                 // GetVersion reply: NUL-separated ASCII (sdk\0name\0firmware); grab the version string.
                 val text = String(p, Charsets.US_ASCII)
                 val fw = Regex("""\d{2}\.\d{2}\.\d{2}\.\d{2}""").find(text)?.value
-                    ?: text.split(' ').map { it.trim() }.lastOrNull { it.length in 4..24 && it.any(Char::isDigit) }
+                    ?: text.split('\u0000').map { it.trim() }.lastOrNull { it.length in 4..24 && it.any(Char::isDigit) }
                 if (!fw.isNullOrBlank()) { status = status.copy(firmware = fw); return true }
             }
             set == 0x0D && id == 0x02 && p.size >= 21 -> {
@@ -337,7 +359,21 @@ class DatalinkClient(
         runCatching { sock.close() }
     }
 
-    private val pathCountRe = Regex("""DCIM/(?:DJI|CAM)_\d{3}/(?:DJI|CAM)_\d{14}_\d{4}_D""")
+    /**
+     * Count distinct media-path fields in a byte range by structure — the same `1a … 00 00 00 01`
+     * "DCIM/" TLV [decodeComposite] anchors on, read by length. Used to gauge list growth while paging
+     * and to vet reassembly, so it must not depend on any naming pattern: a custom Folder/File prefix
+     * still counts because the whole path string is read, not matched.
+     */
+    private fun countMediaPaths(bytes: ByteArray): Int {
+        val seen = HashSet<String>()
+        var i = 0
+        while (i < bytes.size) {
+            val f = readPathField(bytes, i, sub = 1, prefix = "DCIM/")
+            if (f != null) { seen.add(f.value); i = f.end } else i++
+        }
+        return seen.size
+    }
 
     /**
      * The file list streams back as many DUML frames (cmdset 0x00 / cmd 0x26). Concatenating the raw
@@ -345,7 +381,7 @@ class DatalinkClient(
      * DCIM path that straddles a frame boundary gets those bytes injected mid-string and the file
      * silently drops out of the grid — non-deterministically, depending on which record lands on a
      * boundary. Re-stitch just the 0x00/0x26 payloads, in order, so the manifest is contiguous before
-     * we regex it. Walks the whole blob (not per-datagram) so a frame split across two UDP packets is
+     * we decode it. Walks the whole blob (not per-datagram) so a frame split across two UDP packets is
      * still reassembled.
      */
     private fun manifestBytes(raw: ByteArray): ByteArray {
@@ -369,16 +405,16 @@ class DatalinkClient(
             i += len
         }
         val bytes = out.toByteArray()
-        // Guard: only use the reassembled stream if it carries at least as many paths as the raw blob,
-        // so a model that streams the list some other way falls back to the old whole-blob parse.
-        fun paths(b: ByteArray) = pathCountRe.findAll(String(b, Charsets.ISO_8859_1)).map { it.value }.toHashSet().size
-        return if (paths(bytes) >= paths(raw) && bytes.isNotEmpty()) bytes else raw
+        // Guard: only use the reassembled stream if it carries at least as many intact media-path
+        // fields as the raw blob, so a model that streams the list some other way falls back to the
+        // old whole-blob parse. (A path split across a frame boundary won't parse as a field, which is
+        // exactly the straddling case reassembly fixes.)
+        return if (countMediaPaths(bytes) >= countMediaPaths(raw) && bytes.isNotEmpty()) bytes else raw
     }
 
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
     private fun distinctPaths(blob: java.io.ByteArrayOutputStream): Int =
-        pathCountRe.findAll(String(manifestBytes(blob.toByteArray()), Charsets.ISO_8859_1))
-            .map { it.value }.toHashSet().size
+        countMediaPaths(manifestBytes(blob.toByteArray()))
 
     private val primaryExts = setOf("MP4", "MOV", "JPG", "JPEG", "DNG", "OSV", "INSV", "HEIC")
     private val proxyExts = setOf("LRF", "LRV")
@@ -387,49 +423,240 @@ class DatalinkClient(
     internal fun decodeManifestBlobForTest(rawBlob: ByteArray): List<CameraFile> =
         decodeManifest(manifestBytes(rawBlob))
 
+    /** Test seam: decode an already-reassembled CompositePack manifest (post frame-reassembly). */
+    internal fun decodeCompositeForTest(manifest: ByteArray): List<CameraFile> = decodeComposite(manifest)
+
+    /** Test seam: feed one status push and read back the decoded [CameraStatus]. */
+    internal fun applyStatusFrameForTest(set: Int, id: Int, payload: ByteArray): CameraStatus {
+        applyStatusFrame(set, id, payload)
+        return status
+    }
+
     /**
-     * Decode the reassembled manifest into one [CameraFile] per record. The manifest is a DJI TLV:
-     * a `u32-LE` file count, then fixed-stride records, each an enum block (carries the fps rational
-     * num/den) followed by length-prefixed strings — filename, `DCIM/…` media path, `MISC/THM/…`
-     * thumb path, and an optional `LRF/LRV` proxy. Only the filename field carries an extension (the
-     * path fields don't), so a primary-extension name token appears exactly once per record; we anchor
-     * on those, scope every other field to that record's byte window, and assert the record count
-     * matches the header. That assertion is the safety net: a dropped/duplicated record (the kind the
-     * 0x00/0x27 sub-header bug caused) fails the count check here instead of silently shipping a short
-     * grid. Falls back to the looser whole-blob scrape ([parseFlat]) when the structure doesn't
-     * validate — an unknown model layout, or a manifest whose count includes proxy entries.
+     * Decode the reassembled manifest. [decodeComposite] structurally handles every CompositePack
+     * layout on the Osmo line (Nano, Xtra, Action 5/6, Pocket 3 — photos and videos, stock or
+     * custom-prefixed). Only a blob with *no* CompositePack media-path field at all — a genuinely
+     * different list format — reaches [parseFlat]'s loose scrape, and we dump the bytes so that
+     * unknown layout can be cracked (paths/filenames only — no credentials or coordinates).
      */
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
-        val text = String(bytes, Charsets.ISO_8859_1)
-        val declared = if (bytes.size >= 4) u32le(bytes, 0).toInt() else -1
-        val nameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_[A-Z]\.([A-Za-z0-9]{2,4})""")
-        val names = nameRe.findAll(text).filter { it.groupValues[1].uppercase() in primaryExts }.toList()
-        if (names.isEmpty() || names.size != declared) {
-            log("datalink: manifest struct-decode skipped (declared=$declared, records=${names.size}) — flat scrape")
-            return parseFlat(bytes)
+        val comp = decodeComposite(bytes)
+        if (comp.isNotEmpty()) {
+            log("datalink: decoded ${comp.size} CompositePack records " +
+                "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
+                "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
+            return comp
         }
-        val out = ArrayList<CameraFile>(names.size)
-        for (k in names.indices) {
-            val name = names[k].value
-            val base = name.substringBeforeLast('.'); val ext = name.substringAfterLast('.').uppercase()
-            val qbase = Regex.escape(base)
-            val winStart = if (k == 0) 0 else names[k - 1].range.last + 1
-            val winEnd = if (k + 1 < names.size) names[k + 1].range.first else text.length
-            val win = text.substring(winStart, winEnd)
-            // Media/thumb paths carry no extension in the manifest; append the real one (.scr for thumbs).
-            val mediaDir = Regex("""DCIM/(?:DJI|CAM)_\d{3}/$qbase""").find(win)?.value ?: return parseFlat(bytes)
-            val thumb = Regex("""MISC/THM/(?:DJI|CAM)_\d{3}/$qbase""").find(win)?.value?.plus(".scr")
-                ?: (mediaDir.replaceFirst("DCIM/", "MISC/THM/") + ".scr")
-            val proxy = Regex("""$qbase\.(?:LRF|LRV)""").find(win)?.let { "$mediaDir.${it.value.substringAfterLast('.')}" }
-            val namePos = names[k].range.first
-            val fps = if (ext in VIDEO_EXTS) fpsInRange(bytes, winStart, namePos) else null
-            val handle = handleForName(bytes, namePos)
-            val sizeBytes = sizeForName(bytes, namePos, ext in VIDEO_EXTS)
-            out.add(CameraFile(path = "$mediaDir.$ext", thumbPath = thumb, storage = 0,
-                resLabel = fps?.let { "${it}fps" }, proxyPath = proxy, handle = handle, sizeBytes = sizeBytes))
+        log("datalink: no CompositePack records — dumping manifest, falling back to flat scrape")
+        dumpManifest(bytes)
+        return parseFlat(bytes)
+    }
+
+    /** A length-delimited CompositePack field: its ASCII value and the offset just past it. */
+    private class TlvField(val value: String, val end: Int)
+
+    /**
+     * Read a **path** field at [i] if one starts there: `1a [total:u8] 00 00 00 [sub:u8] <ascii>`,
+     * where the ASCII value is `total-6` bytes (total counts the 6-byte header). Returns the value +
+     * end offset only when the sub-type matches and the value is printable and carries [prefix]
+     * (`DCIM/` for media, `MISC/` for the thumb). Pure tag→length→value; no content pattern.
+     */
+    private fun readPathField(bytes: ByteArray, i: Int, sub: Int, prefix: String): TlvField? {
+        if (i + 6 > bytes.size || bytes[i] != 0x1A.toByte()) return null
+        if (bytes[i + 2] != 0.toByte() || bytes[i + 3] != 0.toByte() || bytes[i + 4] != 0.toByte()) return null
+        if ((bytes[i + 5].toInt() and 0xFF) != sub) return null
+        val slen = (bytes[i + 1].toInt() and 0xFF) - 6
+        if (slen < prefix.length || i + 6 + slen > bytes.size) return null
+        val s = String(bytes, i + 6, slen, Charsets.ISO_8859_1)
+        return if (s.startsWith(prefix) && s.all { it.code in 0x20..0x7E }) TlvField(s, i + 6 + slen) else null
+    }
+
+    /**
+     * Structural decoder for DJI's **CompositePack** media manifest (the record format the delete path
+     * `0x00/0x28` already trusts). Every field is length-delimited, so it's read tag → length → value
+     * — never grepped, and never validated against a filename pattern. That's the whole point: the
+     * decoder doesn't know or care what a DJI filename looks like, so custom Folder/File name prefixes
+     * (the camera's *Naming Management* feature — `_A01`, `_DOA5`, `_OP3`) and any future convention
+     * decode identically to stock, because the path and name arrive as raw length-delimited strings.
+     *
+     * Anchor: the **media-path field** — the most self-identifying thing in a record:
+     * ```
+     *   1a [total:u8] 00 00 00 01  <ascii "DCIM/…", total-6 bytes>     media path (this record)
+     *   1a [total:u8] 00 00 00 02  <ascii "MISC/…">                    thumbnail path
+     *   0d [len:u8]                <ascii "<name>.<ext>">              filename — read only for its ext
+     * ```
+     * The delete **handle** (`u32-LE @ head`) and video **byte size** (`u32-LE @ head+38`) hang off a
+     * marker `03 ff 19 06` at `head+8` present on **video records only**; it's read opportunistically
+     * (photos → handle 0 / size 0). Reproduces all 45 Nano and 13 Xtra files, photos included, and the
+     * Pocket 3 / OA5 / OA6 lists. Empty when no media-path field is present → [decodeManifest] scrapes.
+     */
+    private fun decodeComposite(bytes: ByteArray): List<CameraFile> {
+        // Locate every media-path field (one per record). Read by length; the 6-byte `1a … 00 00 00 01`
+        // signature plus the `DCIM/` prefix makes a false hit in binary essentially impossible.
+        data class Media(val pos: Int, val end: Int, val path: String)
+        val medias = ArrayList<Media>()
+        var i = 0
+        while (i < bytes.size) {
+            val f = readPathField(bytes, i, sub = 1, prefix = "DCIM/")
+            if (f != null) { medias.add(Media(i, f.end, f.value)); i = f.end } else i++
         }
-        log("datalink: decoded $declared records (${out.count { it.resLabel != null }} with fps, ${out.count { it.proxyPath != null }} proxies, ${out.count { it.deletable }} deletable, ${out.count { it.sizeBytes > 0 }} sized)")
-        return out
+        if (medias.isEmpty()) return emptyList()
+
+        val boundary = listBoundary(bytes, medias.size)
+        if (boundary > 0) log("datalink: 2 manifest lists ($boundary + ${medias.size - boundary} records)")
+
+        val byPath = LinkedHashMap<String, CameraFile>() // dedup by media path (the list can page-repeat)
+        for (k in medias.indices) {
+            val m = medias[k]
+            val lo = if (k > 0) medias[k - 1].end else 0
+            val hi = if (k + 1 < medias.size) medias[k + 1].pos else bytes.size
+            val group = if (boundary > 0 && k >= boundary) 1 else 0
+            byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi).copy(group = group))
+        }
+        return byPath.values.toList()
+    }
+
+    /**
+     * Index of the first record of the *second* per-storage list, or -1 if the manifest holds one list.
+     *
+     * With a card in, the camera concatenates two lists — **SD first, then internal** — each opening
+     * with its own `[u32-LE count][u32-LE size][u32-LE ts]…` header. Proven by dumping the same camera
+     * with and without a card: the no-card manifest is byte-identical to the mixed manifest's *second*
+     * list. So the leading count covers only the first list, and the rest belong to the second.
+     *
+     * The record handles corroborate it (SD `0x0004xxxx` vs internal `0x4004xxxx`), but the handle
+     * namespace isn't confirmed across models — and photos carry no handle at all — so the split comes
+     * from the count, which every model writes.
+     */
+    private fun listBoundary(bytes: ByteArray, records: Int): Int {
+        if (bytes.size < 4) return -1
+        val declared = u32le(bytes, 0).toInt()
+        return if (declared in 1 until records) declared else -1
+    }
+
+    /**
+     * Build one [CameraFile] from its media-path field. The base name is the last path component; the
+     * thumbnail (`1a…02`) and the extension (`0d`) are found by walking the record window `[lo,hi)`
+     * and matching *this* base — field order varies across the line (name before path on the Nano,
+     * after it on the Xtra), so association is by trailing base, not position.
+     */
+    private fun resolveRecord(bytes: ByteArray, mediaDir: String, lo: Int, hi: Int): CameraFile {
+        val base = mediaDir.substringAfterLast('/')      // e.g. DJI_20260721121344_0015_D_OP3
+
+        // Thumbnail path: the 1a…02 field whose value ends with this base.
+        var thumb: String? = null
+        var t = lo
+        while (t < hi) {
+            val f = readPathField(bytes, t, sub = 2, prefix = "MISC/")
+            if (f != null && f.value.endsWith(base)) { thumb = f.value; break }
+            t++
+        }
+
+        // Extension: the 0d filename field `<base>.<ext>` — read by its length, matched by base (no
+        // pattern). A camera that omits the extension here simply yields "" (a visible gap, not a 404).
+        var ext = ""; var proxyExt: String? = null
+        var n = lo
+        while (n < hi - 2) {
+            if (bytes[n] == 0x0D.toByte()) {
+                val len = bytes[n + 1].toInt() and 0xFF
+                if (len > base.length && n + 2 + len <= bytes.size) {
+                    val v = String(bytes, n + 2, len, Charsets.ISO_8859_1)
+                    if (v.length > base.length + 1 && v.startsWith(base) && v[base.length] == '.') {
+                        val e = v.substring(base.length + 1).uppercase()
+                        if (e in VIDEO_EXTS || e in setOf("JPG", "JPEG", "DNG", "HEIC")) ext = e
+                        else if (e in setOf("LRF", "LRV", "XRF")) proxyExt = e
+                    }
+                }
+            }
+            n++
+        }
+
+        // Video handle/size hang off the marker `03 ff 19 06` (at head+8) within the record; photos
+        // have none → handle 0 / size 0, matching the legacy decoder.
+        var head = -1
+        var m = lo
+        while (m < hi - 4) {
+            if (bytes[m] == 0x03.toByte() && bytes[m + 1] == 0xFF.toByte() &&
+                bytes[m + 2] == 0x19.toByte() && bytes[m + 3] == 0x06.toByte()
+            ) { head = m - 8; break }
+            m++
+        }
+        val hasMarker = head >= 0
+        val isVideo = ext in VIDEO_EXTS
+
+        val path = if (ext.isNotEmpty()) "$mediaDir.$ext" else mediaDir
+        val thumbPath = (thumb ?: mediaDir.replaceFirst("DCIM/", "MISC/THM/")) + ".scr"
+        val handle = if (hasMarker) u32le(bytes, head) else 0L
+        // Media byte size = u32-LE at head-4 (marker-12). Ground-truth-verified against the camera's
+        // own SD card (85/85 Nano files, exact) and confirmed varying on the Action family. NB: the old
+        // head+38 read was the *proxy* (`.LRF`) size — right-looking on the Nano, a constant elsewhere.
+        val size = if (isVideo && hasMarker && head >= 4) u32le(bytes, head - 4) else 0L
+        val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, hi) else null
+        // ⭐ starTag and the resolution index, both u8, ground-truth-verified against the SD card.
+        // The star byte sits 9 bytes past the record's `[ff|fe] 19 06` marker (videos use `03 ff 19 06`,
+        // photos a `fe 19 06` variant); the resolution index is at marker-1 (video header only).
+        val starred = starFlag(bytes, lo, hi)
+        val resolution = if (isVideo && hasMarker && head + 7 < bytes.size)
+            resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else null
+        return CameraFile(
+            path = path, thumbPath = thumbPath, storage = 0,
+            resLabel = fps?.let { "${it}fps" }, proxyPath = proxyExt?.let { "$mediaDir.$it" },
+            handle = handle, sizeBytes = size, starred = starred, resolution = resolution,
+        )
+    }
+
+    /**
+     * The manifest resolution byte (`marker-1`) is a **DJI-wide video-format index** (the Nano and
+     * the Xtra/Action-5 emit the same codes for the same sizes — 95=2.7K 4:3, 103=4K 4:3), *not* the
+     * SDK's `VideoResolution` enum (whose codes only partially/coincidentally overlap). The app enums
+     * are inconsistent downstream copies; this map is built empirically from clips cross-referenced
+     * against the SD card. Unknown → null → the app falls back to the MP4 `moov`.
+     */
+    /** ⭐ favourite flag: the byte 9 past the record's `[ff|fe] 19 06` marker is 1 when starred, 0
+     *  otherwise. Unified across videos (`03 ff 19 06`) and photos (`fe 19 06`). */
+    private fun starFlag(bytes: ByteArray, lo: Int, hi: Int): Boolean {
+        var q = lo
+        while (q < hi - 9) {
+            if ((bytes[q] == 0xFF.toByte() || bytes[q] == 0xFE.toByte()) &&
+                bytes[q + 1] == 0x19.toByte() && bytes[q + 2] == 0x06.toByte()
+            ) return (bytes[q + 9].toInt() and 0xFF) == 1
+            q++
+        }
+        return false
+    }
+
+    private fun resolutionForIndex(code: Int): String? = when (code) {
+        10 -> "1920x1080"  // 1080p 16:9  (Xtra-verified)
+        16 -> "3840x2160"  // 4K 16:9
+        45 -> "2688x1512"  // 2.7K 16:9
+        95 -> "2688x2016"  // 2.7K 4:3
+        103 -> "3840x2880" // 4K 4:3
+        else -> null
+    }
+
+    /**
+     * Dump the reassembled manifest as hex when a model's layout doesn't decode, so a single test run
+     * gives us the actual bytes to reverse. Emitted in fixed-width rows with the byte offset, the way
+     * we hand-decoded the Nano/Xtra records — enough to see the count header and where the filename /
+     * extension / handle fields sit. Contents are paths and filenames only; the passphrase and GPS
+     * never travel on this datalink, so this is safe for the shared "Save logs" file.
+     */
+    private fun dumpManifest(bytes: ByteArray) {
+        log("datalink: --- manifest hex (${bytes.size}B), report this to crack the layout ---")
+        var off = 0
+        while (off < bytes.size) {
+            val end = minOf(off + 32, bytes.size)
+            val hex = StringBuilder(); val asc = StringBuilder()
+            for (i in off until end) {
+                val b = bytes[i].toInt() and 0xFF
+                hex.append("%02x".format(b))
+                if (i - off == 15) hex.append(' ')
+                asc.append(if (b in 0x20..0x7E) b.toChar() else '.')
+            }
+            log("  %04x  %-65s %s".format(off, hex.toString(), asc.toString()))
+            off = end
+        }
+        log("datalink: --- end manifest hex ---")
     }
 
     /** Fallback scrape: whole-blob regex, joining fields by filename base. No per-record structure or

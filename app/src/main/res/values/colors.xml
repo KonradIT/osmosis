@@ -10,5 +10,7 @@
     <color name="osmo_on_accent">#FFFFFF</color>
     <color name="osmo_green">#52B788</color>
     <color name="osmo_track">#E2DCD2</color>
+    <color name="osmo_danger">#C62828</color>
+    <color name="osmo_amber">#B26A00</color>
     <color name="white">#FFFFFF</color>
 </resources>

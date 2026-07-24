@@ -39,9 +39,11 @@ class MediaGridAdapter(
         val thumb = v.findViewById<ImageView>(R.id.thumb)
         val check = v.findViewById<CheckBox>(R.id.check)
         val name = v.findViewById<TextView>(R.id.name)
+        val star = v.findViewById<TextView>(R.id.star)
 
         val f = files[position]
         check.isChecked = selected.containsKey(position)
+        star.visibility = if (f.starred) View.VISIBLE else View.GONE
         loader.load(f.thumbUrlPath(), thumb)
         val prefix = "%04d·%s".format(f.seq, f.ext) + if (selected[position] != null) " ✂" else ""
         meta.load(f, name, prefix)

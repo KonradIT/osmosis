@@ -24,6 +24,17 @@
         android:textColor="#FFFFFF"
         android:textSize="10sp" />
 
+    <TextView
+        android:id="@+id/star"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:paddingHorizontal="3dp"
+        android:paddingVertical="1dp"
+        android:text="⭐"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
     <CheckBox
         android:id="@+id/check"
         android:layout_width="wrap_content"
