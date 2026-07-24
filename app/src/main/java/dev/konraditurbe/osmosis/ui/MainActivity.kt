@@ -620,12 +620,20 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         setConnectProgress(0)
         val addr = currentAddress ?: return
         if (savedPassFor(addr).isEmpty()) return
+        // If we already tried BOTH securities (WPA3 then the WPA2 fallback) and still failed, the
+        // password is almost certainly fine — it's the phone not joining this AP's Wi-Fi security.
+        // Don't send the user chasing a password that isn't the problem (as the 360 did before).
+        val bothSecuritiesTried = currentModel.wpa3 && wpa3FallbackDone
+        val message = if (bothSecuritiesTried)
+            "This phone couldn't join $offloadSsid over either WPA3 or WPA2 — likely a Wi-Fi " +
+                "compatibility limit on the phone, not the password. You can still re-enter the " +
+                "password to rule it out."
+        else
+            "The camera Wi-Fi join failed. This usually means the saved password is out of date " +
+                "— e.g. after a camera factory reset. Re-enter it and try again?"
         AlertDialog.Builder(this)
             .setTitle("Couldn't join $offloadSsid")
-            .setMessage(
-                "The camera Wi-Fi join failed. This usually means the saved password is out of date " +
-                    "— e.g. after a camera factory reset. Re-enter it and try again?"
-            )
+            .setMessage(message)
             .setPositiveButton("Re-enter password") { _, _ ->
                 promptPasswordFor(addr) {
                     offloadPass = savedPassFor(addr)
