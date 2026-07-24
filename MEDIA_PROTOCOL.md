@@ -42,11 +42,12 @@ Handle + size hang off a **record marker `03 ff 19 06` at `head+8`**, present on
 | thumb path | `1a … 00 00 00 02` value | `MISC/THM/<folder>/<base>` |
 | extension  | `0d` filename field | the only field carrying `.MP4`/`.JPG`/… |
 | delete handle | `u32-LE @ head` (`head = marker − 8`) | feeds `0x00/0x28` (§2); `0` = photo, not deletable |
-| byte size | `u32-LE @ head+38` | **video only, and Nano only** — see caveat |
+| **media byte size** | **`u32-LE @ marker − 12`** | the real file size, **all cameras** — ground-truth-verified byte-exact against the SD card |
+| proxy (`.LRF`) size | `u32-LE @ marker + 30` | the low-res sidecar's size; a per-camera *constant* on the Action family, so don't mistake it for the media size (we did, once) |
 | fps | rational `<u32 num><u32 den>` near the record | `a861 0000 e803 0000` = 25000/1000 = **25 fps** |
 
 - **Naming is irrelevant to the parse.** Because the path/name are read by length, the camera's *Naming Management* custom **Folder** and **File** prefixes decode exactly like stock — `DCIM/DJI_001/DJI_…_D.MP4` (stock), `DCIM/DJI_001/DJI_…_D_OP3.MP4` (Pocket 3), `DCIM/DJI_001_OA5/DJI_…_D_DOA5.MP4` (Action 5, custom folder + file suffix), `…_D_A01.MP4` (a user-typed `A01`) — all the same.
-- **Size caveat:** `head+38` is a real per-file size only where it *varies* across the list (the Nano). The whole Action family (Xtra / OA5 / OA6 / Pocket 3) parks a per-camera **constant** there, so trust it only when video sizes differ — otherwise fall back to an HTTP `HEAD`. (The real size, plus resolution/duration, *are* in the record — see the schema below — but in tagged attributes whose exact key→field map we haven't pinned; for now read resolution/duration from the MP4 `moov`.)
+- **Size (solved 2026-07-24).** The media byte size is the `u32-LE` at **`marker − 12`** — confirmed exact for 85/85 Nano files against the camera's own SD card, and varying-per-file on the Action family. The nearby `marker + 30` (our old "`head+38`") is the *proxy* `.LRF` size, which is why it looked plausible on the Nano and read as a constant elsewhere. **Resolution / duration** are also in the record (the schema below names them) but stored as enum/int in the still-unmapped tagged attributes, so keep reading those from the MP4 `moov` for now.
 
 **Read it in Python** (`struct` for the little-endian ints; the buffer is the reassembled `0x00/0x27` payload):
 
@@ -86,8 +87,8 @@ def decode_manifest(buf):
         if m != -1:
             head = m - 8
             handle = struct.unpack_from("<I", buf, head)[0]
-            if ext in ("MP4", "MOV"):
-                size = struct.unpack_from("<I", buf, head + 38)[0]   # Nano-only; else HTTP HEAD
+            if ext in ("MP4", "MOV") and head >= 4:
+                size = struct.unpack_from("<I", buf, head - 4)[0]    # media size @ marker-12 (= head-4)
 
         files.append(dict(folder=folder, name=f"{base}.{ext}" if ext else base,
                           handle=handle, size=size))
@@ -110,7 +111,7 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format — a
 |-------|------|-------|
 | `fileName` | String | e.g. `DJI_…_D.MP4` — our `0d` field |
 | `fileType` | enum `MediaFileType` | photo/video/… → the extension category |
-| `fileSize` | **Long** | the real byte size (our `head+38` u32 guess is right only on the Nano) |
+| `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE @ marker − 12`, verified against the SD card |
 | `duration` | **Long** | video length (ms) |
 | `frameRate` | enum `VideoFrameRate` | our fps rational is the same value |
 | `resolution` | enum `VideoResolution` | **in the record** — today we still read it from the MP4 `moov` |
@@ -121,7 +122,7 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format — a
 | `dirIndex`, `fileIndex`, `subIndex`, `segSubIndex`, `fileGroupIndex` | int | DCF indices |
 | `proxyInfo`, `hasProxy`, `EXIFInfo` (`physicalPathInfo`), `dcfInfo` | nested | proxy/exif/DCF; the `DCIM/…`,`MISC/…` strings live in these nested `physicalPath`s |
 
-So **size, duration, resolution and fps are all present in every record** — they're the tagged `[key][05][u32]` attributes we currently skip (`0x1c`, `0x20`–`0x22`, `0x26`, `0x28`, `0x2b`, `0x2c`, `0x31`, `0x36`, `0x37`). Mapping key→field would drop both the HTTP `HEAD` (size) and MP4 `moov` parse (resolution/duration). The map isn't recovered yet: the parser is **native**, and this app APK is a base split with **no `.so`** (the arm64 code-split isn't in hand), and the capture we have only fetched *thumbnails* — so there's no ground-truth media size to pin the key by correlation. Unlocking it needs the arm64 split APK, or a capture in which Mimo downloads/`HEAD`s full files.
+So **size, duration, resolution and fps are all present in every record**. `fileSize` is now pinned (`marker − 12`, above) by correlating a Mimo capture's tagged records against the **camera's own SD card** mounted over USB — 85/85 files byte-exact. fps we already read (the rational). `frameRate` (enum), `resolution` (enum) and `duration` live in the tagged `[key][type][big-endian value]` attributes we still skip (`0x1c`, `0x20`–`0x22`, `0x26`, `0x28`, `0x2b`, `0x2c`, `0x31`, `0x36`, `0x37`) — they read as small enum codes, not literal pixels/ms, so pinning each needs media with *varied* resolution/duration cross-referenced to those keys (the native parser that would name them directly is in an arm64 code-split not in this base-APK). Doing so would also drop the MP4 `moov` parse.
 
 > **Aside — DJI's `ByteStream` (a *different*, sibling encoding).** The same SDK also serializes `MediaFile` flat via a `ByteStream` codec (`toBytes`/`fromBytes`): **positional, no tags, little-endian** — `bool`=1 B, `int`/enum=4 B, `long`=8 B, `string`=`[u32-LE len][utf8]`, nested = recursive, list = `[count][items]`. This is *not* the camera wire (our records are tagged with 1-byte string lengths); it's the SDK's internal/IPC form. Noted because a capture that ever carries it would decode trivially with this spec.
 

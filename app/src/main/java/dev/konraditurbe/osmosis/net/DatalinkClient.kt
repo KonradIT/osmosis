@@ -488,16 +488,7 @@ class DatalinkClient(
             val hi = if (k + 1 < medias.size) medias[k + 1].pos else bytes.size
             byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi))
         }
-        val files = byPath.values.toList()
-        // Trust head+38 as a real byte size only when the videos' sizes actually *vary* (≥2 distinct)
-        // — that variance is the evidence it's a per-file field, which holds on the Nano. A single
-        // video can't prove it, and the whole Action family (Xtra / OA5 / OA6 / Pocket 3) parks a
-        // per-camera *constant* there. When it's not provably a size, drop it so the app HTTP-HEADs
-        // the real one rather than showing a bogus figure.
-        val sizesVary = files.filter { it.sizeBytes > 0L && it.ext in VIDEO_EXTS }
-            .mapTo(HashSet()) { it.sizeBytes }.size >= 2
-        return if (sizesVary) files
-        else files.map { if (it.sizeBytes > 0L && it.ext in VIDEO_EXTS) it.copy(sizeBytes = 0L) else it }
+        return byPath.values.toList()
     }
 
     /**
@@ -537,8 +528,8 @@ class DatalinkClient(
             n++
         }
 
-        // Video handle/size hang off the marker `03 ff 19 06` (head+8) within the record; photos have
-        // none → handle 0 / size 0, matching the legacy decoder.
+        // Video handle/size hang off the marker `03 ff 19 06` (at head+8) within the record; photos
+        // have none → handle 0 / size 0, matching the legacy decoder.
         var head = -1
         var m = lo
         while (m < hi - 4) {
@@ -553,7 +544,10 @@ class DatalinkClient(
         val path = if (ext.isNotEmpty()) "$mediaDir.$ext" else mediaDir
         val thumbPath = (thumb ?: mediaDir.replaceFirst("DCIM/", "MISC/THM/")) + ".scr"
         val handle = if (hasMarker) u32le(bytes, head) else 0L
-        val size = if (isVideo && hasMarker && head + 42 <= bytes.size) u32le(bytes, head + 38) else 0L
+        // Media byte size = u32-LE at head-4 (marker-12). Ground-truth-verified against the camera's
+        // own SD card (85/85 Nano files, exact) and confirmed varying on the Action family. NB: the old
+        // head+38 read was the *proxy* (`.LRF`) size — right-looking on the Nano, a constant elsewhere.
+        val size = if (isVideo && hasMarker && head >= 4) u32le(bytes, head - 4) else 0L
         val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, hi) else null
         return CameraFile(
             path = path, thumbPath = thumbPath, storage = 0,

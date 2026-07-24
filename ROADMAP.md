@@ -68,11 +68,17 @@ Status per model:
   filename `0d [len]`, delete handle + video size off the `03 ff 19 06` marker. No filename regex at
   all, so the camera's **Naming Management** custom Folder/File prefixes (`_A01`, `_DOA5`, `_OP3`) and
   stock names decode identically — that was the whole blocker: OA5/OA6 scraped to zero on the
-  `DJI_001_OA5` folder suffix, the Pocket 3 lost its extension to the `_OP3` name suffix. Byte size is
-  read at `head+38` but trusted only when the videos' sizes actually vary (the Nano); the Action family
-  parks a per-camera constant there, so otherwise the app HTTP-HEADs it. Decodes **all 45 Nano / 13 Xtra
-  / 2 OA5 / 2 OA6 / 15 Pocket 3** files on real bytes (CompositeManifestTest); Nano + Xtra also confirmed
-  live, the other three await the tester's live `/v2` run.
+  `DJI_001_OA5` folder suffix, the Pocket 3 lost its extension to the `_OP3` name suffix. Decodes
+  **all 45 Nano / 13 Xtra / 2 OA5 / 2 OA6 / 15 Pocket 3** files on real bytes (CompositeManifestTest);
+  Nano + Xtra also confirmed live, the other three await the tester's live `/v2` run.
+- **✅ Real media byte size, all cameras (2026-07-24):** it's the `u32-LE` at **`marker − 12`** — pinned
+  by correlating a Mimo capture's records against the **camera's SD card mounted over USB** (85/85 Nano
+  files byte-exact, varying-per-file on the Action family), so the HTTP `HEAD` is gone. The old `head+38`
+  we misread as size is actually the **`.LRF` proxy** size (right-looking on the Nano, a constant on the
+  Action family). RE of the DJI app dex named the fields (`xtra.sdk.keyvalue.value.media.MediaFile`:
+  `fileSize`/`duration`/`frameRate`/`resolution`/…, see [MEDIA_PROTOCOL.md](MEDIA_PROTOCOL.md)); resolution
+  and duration are in the record too (enum/int in still-unmapped tagged attributes) — mapping them would
+  drop the MP4 `moov` parse next.
 - **⏸️ Osmo 360 (`0x17`) — parked.** BLE pairs and hands out creds, but the phone **never finds the
   `Osmo360` Wi-Fi SSID** ("searching for device…" → timeout), so it never reaches the datalink; both
   WPA3 and the new WPA2-fallback fail because there's no AP to attach to — the 360's AP bring-up
