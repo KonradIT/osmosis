@@ -412,62 +412,23 @@ class DatalinkClient(
     internal fun decodeCompositeForTest(manifest: ByteArray): List<CameraFile> = decodeComposite(manifest)
 
     /**
-     * Decode the reassembled manifest into one [CameraFile] per record. The manifest is a DJI TLV:
-     * a `u32-LE` file count, then fixed-stride records, each an enum block (carries the fps rational
-     * num/den) followed by length-prefixed strings — filename, `DCIM/…` media path, `MISC/THM/…`
-     * thumb path, and an optional `LRF/LRV` proxy. Only the filename field carries an extension (the
-     * path fields don't), so a primary-extension name token appears exactly once per record; we anchor
-     * on those, scope every other field to that record's byte window, and assert the record count
-     * matches the header. That assertion is the safety net: a dropped/duplicated record (the kind the
-     * 0x00/0x27 sub-header bug caused) fails the count check here instead of silently shipping a short
-     * grid. Falls back to the looser whole-blob scrape ([parseFlat]) when the structure doesn't
-     * validate — an unknown model layout, or a manifest whose count includes proxy entries.
+     * Decode the reassembled manifest. [decodeComposite] structurally handles every CompositePack
+     * layout on the Osmo line (Nano, Xtra, Action 5/6, Pocket 3 — photos and videos, stock or
+     * custom-prefixed). Only a blob with *no* CompositePack media-path field at all — a genuinely
+     * different list format — reaches [parseFlat]'s loose scrape, and we dump the bytes so that
+     * unknown layout can be cracked (paths/filenames only — no credentials or coordinates).
      */
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
-        // Structural CompositePack decode first (see [decodeComposite]); the text/regex paths below
-        // remain as the fallback for a layout it can't walk.
-        decodeComposite(bytes).let { comp ->
-            if (comp.isNotEmpty()) {
-                log("datalink: decoded ${comp.size} CompositePack records " +
-                    "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
-                    "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
-                return comp
-            }
+        val comp = decodeComposite(bytes)
+        if (comp.isNotEmpty()) {
+            log("datalink: decoded ${comp.size} CompositePack records " +
+                "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
+                "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
+            return comp
         }
-        val text = String(bytes, Charsets.ISO_8859_1)
-        val declared = if (bytes.size >= 4) u32le(bytes, 0).toInt() else -1
-        val nameRe = Regex("""(?:DJI|CAM)_\d{14}_\d{4}_[A-Z]\.([A-Za-z0-9]{2,4})""")
-        val names = nameRe.findAll(text).filter { it.groupValues[1].uppercase() in primaryExts }.toList()
-        if (names.isEmpty() || names.size != declared) {
-            log("datalink: manifest struct-decode skipped (declared=$declared, records=${names.size}) — flat scrape")
-            // On an unrecognized layout (OA5/OA6 came back with 0 paths; the Pocket 3 lists paths but
-            // no filename+extension token), dump the reassembled manifest so a test run captures the
-            // actual bytes to crack the format. Paths/filenames only — no credentials or coordinates.
-            dumpManifest(bytes)
-            return parseFlat(bytes)
-        }
-        val out = ArrayList<CameraFile>(names.size)
-        for (k in names.indices) {
-            val name = names[k].value
-            val base = name.substringBeforeLast('.'); val ext = name.substringAfterLast('.').uppercase()
-            val qbase = Regex.escape(base)
-            val winStart = if (k == 0) 0 else names[k - 1].range.last + 1
-            val winEnd = if (k + 1 < names.size) names[k + 1].range.first else text.length
-            val win = text.substring(winStart, winEnd)
-            // Media/thumb paths carry no extension in the manifest; append the real one (.scr for thumbs).
-            val mediaDir = Regex("""DCIM/(?:DJI|CAM)_\d{3}/$qbase""").find(win)?.value ?: return parseFlat(bytes)
-            val thumb = Regex("""MISC/THM/(?:DJI|CAM)_\d{3}/$qbase""").find(win)?.value?.plus(".scr")
-                ?: (mediaDir.replaceFirst("DCIM/", "MISC/THM/") + ".scr")
-            val proxy = Regex("""$qbase\.(?:LRF|LRV)""").find(win)?.let { "$mediaDir.${it.value.substringAfterLast('.')}" }
-            val namePos = names[k].range.first
-            val fps = if (ext in VIDEO_EXTS) fpsInRange(bytes, winStart, namePos) else null
-            val handle = handleForName(bytes, namePos)
-            val sizeBytes = sizeForName(bytes, namePos, ext in VIDEO_EXTS)
-            out.add(CameraFile(path = "$mediaDir.$ext", thumbPath = thumb, storage = 0,
-                resLabel = fps?.let { "${it}fps" }, proxyPath = proxy, handle = handle, sizeBytes = sizeBytes))
-        }
-        log("datalink: decoded $declared records (${out.count { it.resLabel != null }} with fps, ${out.count { it.proxyPath != null }} proxies, ${out.count { it.deletable }} deletable, ${out.count { it.sizeBytes > 0 }} sized)")
-        return out
+        log("datalink: no CompositePack records — dumping manifest, falling back to flat scrape")
+        dumpManifest(bytes)
+        return parseFlat(bytes)
     }
 
     /** A length-delimited CompositePack field: its ASCII value and the offset just past it. */
@@ -528,13 +489,15 @@ class DatalinkClient(
             byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi))
         }
         val files = byPath.values.toList()
-        // Vet the head+38 size: on the Nano/Xtra it's the real per-file size (all different); on the
-        // Pocket 3 / OA5 / OA6 it's a per-camera constant. If every sized video reports the *same*
-        // size, it's that constant — drop it so the app HTTP-HEADs the true size instead of showing a
-        // bogus one. (Naming can't tell these apart: stock Action media is suffix-less like the Nano.)
-        val sizedVideos = files.filter { it.sizeBytes > 0L && it.ext in VIDEO_EXTS }
-        val sizeIsConstant = sizedVideos.size >= 2 && sizedVideos.mapTo(HashSet()) { it.sizeBytes }.size == 1
-        return if (sizeIsConstant) files.map { it.copy(sizeBytes = 0L) } else files
+        // Trust head+38 as a real byte size only when the videos' sizes actually *vary* (≥2 distinct)
+        // — that variance is the evidence it's a per-file field, which holds on the Nano. A single
+        // video can't prove it, and the whole Action family (Xtra / OA5 / OA6 / Pocket 3) parks a
+        // per-camera *constant* there. When it's not provably a size, drop it so the app HTTP-HEADs
+        // the real one rather than showing a bogus figure.
+        val sizesVary = files.filter { it.sizeBytes > 0L && it.ext in VIDEO_EXTS }
+            .mapTo(HashSet()) { it.sizeBytes }.size >= 2
+        return if (sizesVary) files
+        else files.map { if (it.sizeBytes > 0L && it.ext in VIDEO_EXTS) it.copy(sizeBytes = 0L) else it }
     }
 
     /**

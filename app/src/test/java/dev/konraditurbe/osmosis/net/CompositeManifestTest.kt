@@ -137,4 +137,41 @@ class CompositeManifestTest {
         assertEquals(0x40104200L, f.handle)
         assertEquals(113459603L, f.sizeBytes)
     }
+
+    // A real Xtra Edge Pro slice: the one video (CAM_…0016_D.MP4) + the first photo
+    // (CAM_…0015_D.JPG), reassembled from a capture. Confirms the CAM_ family and the photo path
+    // (marker-less → handle 0), and that the lone video's head+38 is *not* trusted as a size.
+    private val xtraTwoRecords = hex(
+        "0d000000561a00000797eb5c2ea21202000104400600025f03ff190600000034011a2c000000014443494d2f43414d5f3030" +
+        "312f43414d5f32303236303731313138353631355f303031365f44001b0a0000000201000312131a30000000024d4953432f" +
+        "54484d2f43414d5f3030312f43414d5f32303236303731313138353631355f303031365f44001b0a00000002020114021503" +
+        "0001b88b888d0400000101000700100006000263391d5d00000000000000000017001833000000a8610000e8030000a86100" +
+        "00e803000008050009170b000900e90300000018011000000000002d00000000000100002105000000002205000000002605" +
+        "00000000280600000001002b05000000002a05000000000b43414d000000000000000000008a011000000010400000120100" +
+        "13000d1d43414d5f32303236303731313138353631355f303031365f442e4d503400fc644f5b00d00d00f000044000000000" +
+        "00fe1906000000fe001a2c000000014443494d2f43414d5f3030312f43414d5f32303235313031353130333935375f303031" +
+        "355f44001b08000000010100001a30000000024d4953432f54484d2f43414d5f3030312f43414d5f32303235313031353130" +
+        "333935375f303031355f44001b0a00000002020114021503000201000008ff010000001e0000001801000064000000020020" +
+        "03fdffffff0a000000020001000c001f1000000001000000400e0000b00a0000160000000025070000000101010b43414d00" +
+        "0000000000000000008a010f0000000f40000012010013000d1d43414d5f32303235313031353130333935375f303031355f" +
+        "442e4a504700f8644f5b00a00e00e00004400000000000fe1906000000fe00"
+    )
+
+    @Test
+    fun `xtra decodes the CAM_ family, video vs photo`() {
+        val files = DatalinkClient({}, 10004, false).decodeCompositeForTest(xtraTwoRecords)
+        assertEquals(2, files.size)
+        val video = files.single { it.ext == "MP4" }
+        assertEquals("DCIM/CAM_001/CAM_20260711185615_0016_D.MP4", video.path)
+        assertEquals(0x40040100L, video.handle)
+        assertEquals("25fps", video.resLabel)
+        assertTrue("video is deletable", video.deletable)
+        assertEquals("single Action-family video → size not trusted, HTTP-HEAD instead", 0L, video.sizeBytes)
+
+        val photo = files.single { it.ext == "JPG" }
+        assertEquals("DCIM/CAM_001/CAM_20251015103957_0015_D.JPG", photo.path)
+        assertEquals("photos carry no marker → no delete handle", 0L, photo.handle)
+        assertEquals(null, photo.resLabel)
+    }
+
 }
