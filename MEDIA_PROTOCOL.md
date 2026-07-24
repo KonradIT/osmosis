@@ -124,6 +124,16 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format — a
 
 So **size, duration, resolution and fps are all present in every record**. `fileSize` is now pinned (`marker − 12`, above) by correlating a Mimo capture's tagged records against the **camera's own SD card** mounted over USB — 85/85 files byte-exact. fps we already read (the rational). `frameRate` (enum), `resolution` (enum) and `duration` live in the tagged `[key][type][big-endian value]` attributes we still skip (`0x1c`, `0x20`–`0x22`, `0x26`, `0x28`, `0x2b`, `0x2c`, `0x31`, `0x36`, `0x37`) — they read as small enum codes, not literal pixels/ms, so pinning each needs media with *varied* resolution/duration cross-referenced to those keys (the native parser that would name them directly is in an arm64 code-split not in this base-APK). Doing so would also drop the MP4 `moov` parse.
 
+##### Enum value tables (from the DJI SDK — for decoding the int fields)
+
+The enum fields above are small integer codes; these are the code→meaning tables (RE'd from the `xtra.sdk.keyvalue.value.…` enums), so once a record's tag→field is pinned the value reads directly:
+
+- **`MediaFileStarTag`** (⭐ favourite): `0 = NONE`, `1 = TAGGED` (starred), `255 = UNKNOWN`.
+- **`MediaFileType`**: `0 JPEG · 1 DNG · 2 MOV · 3 MP4 · 4 PANORAMA · 5 TIFF · 10 AUDIO · 19 LRF · 20 THM · 21 SCR · 44 OSV · 65535 UNKNOWN`.
+- **`VideoFrameRate`**: `1 24 · 2 25 · 3 30 · 4 48 · 5 50 · 6 60 · 7 120 · 8 240 · 10 100 · 11 96 · 13-16 precise 24/30/48/60 · 29 15 …`.
+- **`VideoResolution`** (aspect-named codes): e.g. `67 1512×2688 · 103 4:3 2880P · 68 5472×3648 · 12 1920×1440 · 109 9:16 4K · 122 4:3 5K · 254 UNSET`.
+- **`MediaVideoType`**: `0 NORMAL · 1 SLOW_MOTION · 2 HYPER_LAPSE · 3 TIME_LAPSE · 4 HDR · 5 LOOP · 101-104 MASTERSHOT …`. **`MediaPhotoType`**: `0 NORMAL · 1 HDR · 2 AEB · 3 INTERVAL · 4 BURST · 16 HIGH_RESOLUTION …`.
+
 > **Aside — DJI's `ByteStream` (a *different*, sibling encoding).** The same SDK also serializes `MediaFile` flat via a `ByteStream` codec (`toBytes`/`fromBytes`): **positional, no tags, little-endian** — `bool`=1 B, `int`/enum=4 B, `long`=8 B, `string`=`[u32-LE len][utf8]`, nested = recursive, list = `[count][items]`. This is *not* the camera wire (our records are tagged with 1-byte string lengths); it's the SDK's internal/IPC form. Noted because a capture that ever carries it would decode trivially with this spec.
 
 **Parsed — index-based** (older Osmo Action 1/2/3): header `[u32-LE count][u32-LE total_size]`, then fixed **65 B** records, **no path strings** (files keyed by numeric `FileIndex`):
