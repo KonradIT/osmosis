@@ -566,17 +566,21 @@ milestone, tracked separately.
     is the drone serial. So DJI Fly brings the QuickTransfer AP up over a **non-BLE channel** — most
     likely the phone already holds the drone's WiFi creds from first-time **binding** (cached by DJI Fly)
     and joins the AP directly, or negotiates over WiFi-Direct.
-  - **CRACKED (2026-07-25) — the creds *do* come over BLE, gated on QuickTransfer mode.** A fresh-bind
-    snoop (after `pm clear dji.go.v5`, and a **2-second press of the drone battery** to enter
-    QuickTransfer mode) shows the drone answering the **same getters Osmosis already uses for cameras**:
-    `0x07/0x0c`→ WiFi MAC, `0x07/0x07`→ SSID, `0x07/0x0e`→ passphrase, all in the `[status][PackString]`
-    format our `parseStatusPackString` already decodes. It's a **plain WPA2 SoftAP** (the earlier
-    "WiFi-Direct" guess was wrong — DJI Fly just `addNetwork()`s it ephemerally). The reason earlier
-    taps got `e4`/`e0`: the drone wasn't in QuickTransfer mode.
-  - **Takeaway — drone offload needs ~no new protocol.** Put the drone in QuickTransfer mode (2 s battery
-    press) → tap it in Osmosis → it pairs (`0x07/0x45`) and pulls the creds over BLE exactly like a
-    camera. Remaining unknowns: the drone's **media HTTP API** (does it answer `/v2` like a camera?) and
-    its **datalink port**. Next: connect Osmosis to the drone AP and probe the media endpoints.
+  - **Creds *do* come over BLE — via the same getters (2026-07-25).** A fresh-bind snoop of DJI Fly
+    (after `pm clear dji.go.v5` + a **2 s drone-battery press** to confirm) shows the drone answering the
+    **same getters Osmosis uses for cameras**: `0x07/0x0c`→ WiFi MAC, `0x07/0x07`→ SSID, `0x07/0x0e`→
+    passphrase, in the `[status][PackString]` format we already decode. It's a **plain WPA2 SoftAP** (the
+    "WiFi-Direct" guess was wrong — DJI Fly `addNetwork()`s it ephemerally).
+  - **But cred release is gated on the pairing IDENTITY, not the button.** Osmosis ran the identical flow
+    — `0x07/0x45` → `0002` approval-required → 2 s button → approved — and still got `no password`. The
+    tell is the **approval code**: DJI Fly's pairing (token **"DJI FLY"**, a per-bind UUID identifier)
+    gets `0x07/0x46` **[01]** and the creds; Osmosis's (token **"osmo"**, our fixed identifier) gets
+    **[02]** and no creds. Cameras give our "osmo" token **[01]** — the *drone* is what discriminates,
+    withholding QuickTransfer creds from a non-official pairing token.
+  - **The crack to test:** pair with token **"DJI FLY"** (drone-gated, model `0x0070`) and see if the
+    drone returns `[01]` + creds. If the token is the whole gate, drone offload falls out with a one-line
+    change; if it also checks the identifier/account, that's the next wall. Then: probe the drone's media
+    HTTP (does it answer `/v2` like a camera?) and its datalink port.
 - **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
   diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
   and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**
