@@ -62,4 +62,18 @@ class CameraModelBrandTest {
         assertTrue(nano.tcpPoke)
         assertTrue(nano.verified)
     }
+
+    @Test
+    fun `the dji company id makes a renamed drone resolve to DJI, not UNKNOWN`() {
+        // A Mavic 3 renamed "1001": no DJI keyword in the name, non-DJI-list OUI — only the cid gives
+        // it away. Without the cid it's UNKNOWN; with it, DJI.
+        assertEquals(Brand.UNKNOWN, Brand.of("34:D2:62:C4:52:D5", "1001", djiCid = false))
+        assertEquals(Brand.DJI, Brand.of("34:D2:62:C4:52:D5", "1001", djiCid = true))
+    }
+
+    @Test
+    fun `the xtra rebrand still wins over the dji company id`() {
+        // The Xtra carries cid 0x08AA too, but its own OUI must keep it XTRA (it needs port 10004).
+        assertEquals(Brand.XTRA, Brand.of("EC:9E:EA:00:00:01", "XtraEdgePro-2DCA", djiCid = true))
+    }
 }
