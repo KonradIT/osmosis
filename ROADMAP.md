@@ -528,3 +528,22 @@ clip's proxy is only ~17 MB. That cheap random access opens some nice polish on 
 - **Filmstrip / storyboard strip** under the player for quick visual navigation of long clips.
 
 Not a bug fix (previews already work) — a UX layer the proxy's small size + range access make cheap.
+
+## 14. Drone offload support — 🔬 EXPLORATORY
+
+DJI drones speak the **same DUML framing** over BLE/WiFi as the Osmo line, so the pairing + wake +
+media-list machinery here may extend to them with model-specific tweaks. Out of scope for the camera
+milestone, tracked separately.
+
+- **Seen already — DJI Neo 2 (`0x007e`).** In a tester's scan it **pairs over the same BLE DUML**, but
+  returns **no WiFi password** to `0x07/0x0e` (the getter that works on every Osmo) — the app correctly
+  falls back to the manual-password prompt, which the tester didn't complete. So the credential path
+  differs on the drone side; whether it exposes creds via a different cmd, or expects the AP set up
+  another way, is unknown.
+- **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
+  diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
+  and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**
+  app ↔ the drone would hand us the credential + list path directly, same as the Mimo captures did for
+  the cameras.
+- **Scope caveat:** drone media/telemetry pipelines are their own world (DJI Fly, not Mimo); this item
+  is about seeing how far the existing DUML stack reaches, not committing to full drone support.
