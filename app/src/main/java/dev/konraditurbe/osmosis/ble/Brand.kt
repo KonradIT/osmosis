@@ -12,10 +12,10 @@ enum class Brand {
         const val XTRA_OUI = "EC:9E:EA"
 
         /**
-         * [djiCid] = the advertisement carried DJI's BLE company id (`0x08AA`). That's the definitive
+         * [djiCid] = the advertisement carried DJI's BLE company id (0x08AA). That's the definitive
          * DJI tell — every DJI product broadcasts it, across many OUIs and even under a user-renamed
-         * device, so it's more robust than matching an OUI or a keyword in the name. Checked *after*
-         * the Xtra branches so the rebrand, which carries the same id, still wins on its own OUI.
+         * device (a Mavic 3 renamed "1001" still advertises it), so it's more robust than OUI/name.
+         * Checked *after* the Xtra branches so the rebrand (its own OUI) still wins.
          */
         fun of(address: String?, name: String?, djiCid: Boolean = false): Brand {
             val oui = address?.uppercase()?.take(8) ?: ""

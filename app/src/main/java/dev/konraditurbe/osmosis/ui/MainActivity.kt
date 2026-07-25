@@ -1290,10 +1290,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val addr = device.address
         // Brand matters, not just the model id: the Xtra rebrand shares model 0x0015 with the DJI
         // Osmo Action 5 Pro but uses a different datalink port. Its OUI gives it away.
-        val model = CameraModel.resolve(modelId, name, Brand.of(addr, name, djiCid = modelId != null))
-        if (discovered.put(addr, Cam(device, name, Brand.of(addr, name, djiCid = modelId != null), rssi, modelId, model)) == null) {
-            logLine("found ${model.name} [${Brand.of(addr, name, djiCid = modelId != null)}] (${name ?: addr}) rssi=$rssi" +
-                if (!model.verified) "  🧪" else "")
+        // modelId is non-null only when the DJI company id was in the advertisement (OsmoScanner sets
+        // it inside that match), so it doubles as the robust "this is a DJI device" signal for Brand.
+        val brand = Brand.of(addr, name, djiCid = modelId != null)
+        val model = CameraModel.resolve(modelId, name, brand)
+        if (discovered.put(addr, Cam(device, name, brand, rssi, modelId, model)) == null) {
+            logLine("found ${model.name} [$brand] (${name ?: addr}) rssi=$rssi" +
+                if (!model.verified) "  ~experimental" else "")
             main.post { rebuildCameraList() }
         }
     }

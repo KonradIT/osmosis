@@ -547,6 +547,15 @@ DJI drones speak the **same DUML framing** over BLE/WiFi as the Osmo line, so th
 media-list machinery here may extend to them with model-specific tweaks. Out of scope for the camera
 milestone, tracked separately.
 
+- **Detection already works — via the DJI company id.** A drone advertises DJI's BLE company id
+  `0x08AA` in its mfr data exactly like an Osmo, so the scanner already surfaces it as a `HIT` and reads
+  its model id (the `u16-LE` after the cid). Confirmed on a real **Mavic 3** (named "1001"):
+  `mfr[cid=08aa 7000…]` → model **`0x0070`**. `Brand.of` now treats "carries cid `0x08AA`" ⇒ `DJI`
+  (more robust than OUI/name — a renamed drone still shows it), so it labels `[DJI]` instead of
+  `[UNKNOWN]`.
+- **TODO — a drone model-id → name table.** Right now only the confirmed ids are known (`0x0070` Mavic 3,
+  `0x007e` Neo 2); both print `unknown(0x00xx)`. Konrad to source a fuller **DJI drone model-id list** so
+  they resolve by name (and can be tagged "drone" vs "camera"). Add to `BleConstants.MODEL_NAMES`.
 - **Seen already — DJI Neo 2 (`0x007e`).** In a tester's scan it **pairs over the same BLE DUML**, but
   returns **no WiFi password** to `0x07/0x0e` (the getter that works on every Osmo) — the app correctly
   falls back to the manual-password prompt, which the tester didn't complete. So the credential path
