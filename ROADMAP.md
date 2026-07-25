@@ -566,10 +566,17 @@ milestone, tracked separately.
     is the drone serial. So DJI Fly brings the QuickTransfer AP up over a **non-BLE channel** — most
     likely the phone already holds the drone's WiFi creds from first-time **binding** (cached by DJI Fly)
     and joins the AP directly, or negotiates over WiFi-Direct.
-  - **Takeaway:** the BLE path that works for cameras is a dead end for drone WiFi creds (the Mavic
-    `e4`-rejects the getters; DJI Fly doesn't use BLE for WiFi). Pairing is *not* the blocker. Cracking
-    drone offload needs a different capture — the **first-time binding**, the creds **cached in DJI Fly's
-    storage**, or a **WiFi-Direct sniff** — not more BLE snooping.
+  - **CRACKED (2026-07-25) — the creds *do* come over BLE, gated on QuickTransfer mode.** A fresh-bind
+    snoop (after `pm clear dji.go.v5`, and a **2-second press of the drone battery** to enter
+    QuickTransfer mode) shows the drone answering the **same getters Osmosis already uses for cameras**:
+    `0x07/0x0c`→ WiFi MAC, `0x07/0x07`→ SSID, `0x07/0x0e`→ passphrase, all in the `[status][PackString]`
+    format our `parseStatusPackString` already decodes. It's a **plain WPA2 SoftAP** (the earlier
+    "WiFi-Direct" guess was wrong — DJI Fly just `addNetwork()`s it ephemerally). The reason earlier
+    taps got `e4`/`e0`: the drone wasn't in QuickTransfer mode.
+  - **Takeaway — drone offload needs ~no new protocol.** Put the drone in QuickTransfer mode (2 s battery
+    press) → tap it in Osmosis → it pairs (`0x07/0x45`) and pulls the creds over BLE exactly like a
+    camera. Remaining unknowns: the drone's **media HTTP API** (does it answer `/v2` like a camera?) and
+    its **datalink port**. Next: connect Osmosis to the drone AP and probe the media endpoints.
 - **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
   diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
   and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**
