@@ -600,6 +600,14 @@ milestone, tracked separately.
     from adb is walled off by Android per-app routing (only the network-bound app reaches
     `192.168.2.1`). **Next:** PCAPdroid-capture **DJI Fly doing a QuickTransfer browse+download** and
     read the media API off the wire — same technique that cracked the camera list from the Mimo PCAPs.
+  - **Datalink is up on udp/9003, but the list command differs (2026-07-25).** A QuickTransfer PCAP +
+    a live Osmosis attempt pinned it: the drone uses the **same datalink handshake as a camera on
+    `udp/9003`** (no tcp-7001 poke; TCP-6001 probes RST'd). Osmosis now handshakes fine — but its
+    camera list command `0x00/0x26` gets **no `0x00/0x27` back**: the 43 KB it reads is pure noise —
+    25 `0x51/0x01` telemetry frames (the serial heartbeat) + datalink session heartbeat, no media. So
+    the drone's **media-list command is different** and is the one remaining unknown. **Next:** a
+    cleaner DUML capture of DJI Fly's QuickTransfer *browse* on 9003 (PCAPdroid's VPN missed the
+    inbound half of the local traffic), or fuzz the list command now that Osmosis is on the datalink.
 - **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
   diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
   and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**
