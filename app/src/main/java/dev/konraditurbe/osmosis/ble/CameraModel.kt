@@ -21,7 +21,14 @@ data class CameraModel(
     // instead of running the handle/HEAD storage resolution (tester-confirmed storage=0 across every
     // session). Other models can carry SD + internal, so they still resolve per file.
     val singleSdStorage: Boolean = false,
+    // DJI drones (Mavic, Neo, …) speak the same BLE DUML but differ downstream: their WiFi creds only
+    // unlock for the official pairing token ("DJI FLY", not "osmo"), pairing is confirmed by a ~2 s
+    // power-button press, and their media API is NOT the camera datalink (see ROADMAP #14).
+    val isDrone: Boolean = false,
 ) {
+    /** The SetPairingPIN token this device expects: a drone only releases WiFi creds to "DJI FLY". */
+    val pairingToken: String get() = if (isDrone) "DJI FLY" else "osmo"
+
     /**
      * The other datalink config to try when [datalinkPort] never answers: the whole line is either
      * 9004 + TCP-7001 poke or 10004 with no poke, so one retry covers the unknown.
@@ -33,6 +40,8 @@ data class CameraModel(
     companion object {
         val DEFAULT = CameraModel("DJI Osmo camera")
         const val ID_OSMO_NANO = 0x0019
+        const val ID_MAVIC_3 = 0x0070  // drone (confirmed on hardware, mfr 7000…)
+        const val ID_NEO_2 = 0x007e    // drone (tester scan, mfr 7e00…)
 
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0010 to CameraModel("Osmo Action 2"),
@@ -51,6 +60,10 @@ data class CameraModel(
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
             0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
             0x0021 to CameraModel("Osmo Pocket 4"),
+            // Drones (offload exploratory — see ROADMAP #14). BLE pair + WiFi creds work with the
+            // "DJI FLY" token; the media API over the drone AP is still TBD (camera datalink fails).
+            ID_MAVIC_3 to CameraModel("Mavic 3", isDrone = true),
+            ID_NEO_2 to CameraModel("DJI Neo 2", isDrone = true),
         )
 
         /**

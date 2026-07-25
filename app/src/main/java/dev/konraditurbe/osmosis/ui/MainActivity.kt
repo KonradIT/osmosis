@@ -149,6 +149,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // shows its approval popup once, then stores it for silent re-pair). Overridable via
     // `am start ... --es pin <value>`.
     private var pairPin = "osmo"
+    private var pinOverride: String? = null // `--es pin <v>` test hook; wins over the per-model token
 
     // Shown while the camera/drone is waiting for the user to confirm pairing (0x07/45 → 0x02).
     // A camera confirms on its own screen; a drone (e.g. Mavic) needs a ~2 s press of its power button.
@@ -270,7 +271,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
         // Test hooks: `--es pin <v>` overrides the pairing PIN; `--ez autoscan true` auto-starts
         // a scan (perms permitting) so device testing doesn't depend on tapping. Dormant otherwise.
-        intent?.getStringExtra("pin")?.let { pairPin = it; logLine("pairPin set to \"$it\"") }
+        intent?.getStringExtra("pin")?.let { pinOverride = it; pairPin = it; logLine("pairPin set to \"$it\"") }
         if (intent?.getBooleanExtra("autoscan", false) == true) {
             main.postDelayed({ startCameraScan(select = true) }, 500)
         }
@@ -571,6 +572,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         currentModelId = cam?.modelId
         currentAddress = device.address
         offloadSsid = cam?.name ?: safeName(device) ?: "camera"
+        // Pairing token is per-device: a drone only releases its WiFi creds to "DJI FLY", cameras to
+        // "osmo". An explicit `--es pin` (pinOverride) still wins, for testing.
+        pairPin = pinOverride ?: currentModel.pairingToken
         // No up-front password prompt: the camera hands us the passphrase over BLE after pairing
         // (see onPaired). savedPassFor seeds the fallback for models that don't expose it.
         connectAndOffload(device)
@@ -660,10 +664,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** Prompt the user to confirm the pairing on the device (camera screen, or a drone's power button). */
     private fun showPairingApproval() {
         if (isFinishing || isDestroyed) return
+        val msg = if (currentModel.isDrone)
+            "Press and hold the drone's power button for ~2 seconds to confirm pairing."
+        else
+            "Approve the pairing on the camera's screen."
         pairingAlert?.dismiss()
         pairingAlert = AlertDialog.Builder(this)
-            .setTitle("Confirm pairing on the device")
-            .setMessage("Approve the pairing on the camera's screen.\n\nOn a drone (e.g. Mavic), press and hold its power button for ~2 seconds instead.")
+            .setTitle("Confirm pairing on ${currentModel.name}")
+            .setMessage(msg)
             .setCancelable(false)
             .setNegativeButton("Cancel") { _, _ -> gattClient?.disconnect() }
             .show()
