@@ -577,10 +577,17 @@ milestone, tracked separately.
     gets `0x07/0x46` **[01]** and the creds; Osmosis's (token **"osmo"**, our fixed identifier) gets
     **[02]** and no creds. Cameras give our "osmo" token **[01]** — the *drone* is what discriminates,
     withholding QuickTransfer creds from a non-official pairing token.
-  - **The crack to test:** pair with token **"DJI FLY"** (drone-gated, model `0x0070`) and see if the
-    drone returns `[01]` + creds. If the token is the whole gate, drone offload falls out with a one-line
-    change; if it also checks the identifier/account, that's the next wall. Then: probe the drone's media
-    HTTP (does it answer `/v2` like a camera?) and its datalink port.
+  - **CONFIRMED (2026-07-25) — the token *is* the gate.** Pairing the Mavic with token **"DJI FLY"**
+    (via Osmosis's existing `--es pin` hook, no rebuild) flipped the approval to `0x07/0x46` **[01]**,
+    and the drone handed over **SSID + passphrase** over BLE (`0x07/0x07`, `0x07/0x0e`) exactly like a
+    camera. Osmosis then **joined the drone AP** (`WiFi link: ip=192.168.2.100`). So BLE creds + WiFi
+    join are solved; the fix is to drone-gate the pairing token to "DJI FLY".
+  - **Remaining — the drone's media API is NOT the camera datalink.** On the drone AP the DUML datalink
+    handshake fails on **both** `udp/9004` and `udp/10004`, so the manifest comes back empty. The drone
+    serves QuickTransfer media some other way (different port / HTTP / MTP-over-WiFi). Direct probing
+    from adb is walled off by Android per-app routing (only the network-bound app reaches
+    `192.168.2.1`). **Next:** PCAPdroid-capture **DJI Fly doing a QuickTransfer browse+download** and
+    read the media API off the wire — same technique that cracked the camera list from the Mimo PCAPs.
 - **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
   diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
   and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**

@@ -150,6 +150,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // `am start ... --es pin <value>`.
     private var pairPin = "osmo"
 
+    // Shown while the camera/drone is waiting for the user to confirm pairing (0x07/45 → 0x02).
+    // A camera confirms on its own screen; a drone (e.g. Mavic) needs a ~2 s press of its power button.
+    private var pairingAlert: AlertDialog? = null
+
     // End-to-end offload: BLE-pair -> wake AP -> join WiFi -> probe manifest.
     private var offloadMode = false
     private var offloadSsid = ""
@@ -653,7 +657,22 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * entry is needed. The replies land in [onNotification] and drive the join. If the model doesn't
      * answer (older cameras), a fallback timer uses the saved password or prompts. Called once.
      */
+    /** Prompt the user to confirm the pairing on the device (camera screen, or a drone's power button). */
+    private fun showPairingApproval() {
+        if (isFinishing || isDestroyed) return
+        pairingAlert?.dismiss()
+        pairingAlert = AlertDialog.Builder(this)
+            .setTitle("Confirm pairing on the device")
+            .setMessage("Approve the pairing on the camera's screen.\n\nOn a drone (e.g. Mavic), press and hold its power button for ~2 seconds instead.")
+            .setCancelable(false)
+            .setNegativeButton("Cancel") { _, _ -> gattClient?.disconnect() }
+            .show()
+    }
+
+    private fun dismissPairingApproval() { pairingAlert?.dismiss(); pairingAlert = null }
+
     private fun onPaired() {
+        dismissPairingApproval()
         if (!offloadMode || credsRequested) return
         credsRequested = true
         logLine("Paired — running Mimo's post-pair sequence, then reading WiFi creds…")
@@ -1368,10 +1387,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         lastPairStatus = status
                         val meaning = when (status) {
                             0x01 -> "ALREADY PAIRED"
-                            0x02 -> "APPROVAL REQUIRED — approve on the Nano screen"
+                            0x02 -> "APPROVAL REQUIRED — approve on the camera / press the drone button 2s"
                             else -> "status=0x%02x".format(status)
                         }
                         logLine("PAIRING <- 0x07/45 $meaning  [${p.toHex()}]")
+                        if (status == 0x02) main.post { showPairingApproval() }
                     }
                     // onPaired() is load-bearing and idempotent (guarded by credsRequested) — call it on
                     // EVERY already-paired reply, not only when the status *changes*. Gating it on the
@@ -1421,6 +1441,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         stopKeepalive()
         lastPairStatus = -99
         main.post {
+            dismissPairingApproval()
             if (isFinishing || isDestroyed) return@post
             // A BLE drop before the grid is the normal control→WiFi handoff (status=8) — ignore it.
             // A drop while the gallery is up (status=19, camera terminated) means the camera is gone:
