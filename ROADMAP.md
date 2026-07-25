@@ -433,3 +433,19 @@ camera dropping us, `status=19`) is now only a fallback when no creds came over 
 → `FS/data/misc/bluetooth/logs/btsnoop_hci.log`) of **Mimo and Osmosis back to back, with the wake
 button-press wall-clock noted**, then diffing the two frame streams. The timestamps are local
 wall-clock (decode with `utcfromtimestamp`). Same technique that cracked #3.
+
+## 11. Direct USB-C ↔ USB-C media read — 🔬 IDEA
+
+Offload over a **USB-C cable** instead of WiFi, for the Osmo models that expose their storage when
+wired to a phone. Would sidestep the whole BLE-pair → wake-AP → WiFi-join dance and run at cable speed —
+attractive for bulk transfers and for cameras/phones where the AP hop is flaky.
+
+- **Open questions:** does the Osmo present as **MTP / USB mass-storage** when plugged into an Android
+  host, or only through a **proprietary DJI USB protocol** (the way Mimo talks to a wired camera)? Which
+  models support it at all? Some Osmos default to "charge only" and need an on-camera "USB mode" toggle
+  (possibly a DUML command) before they enumerate as storage.
+- **Approach:** enumerate the camera over Android's **USB host API** (`UsbManager`) with the phone as
+  host; if it's MTP, read media via the MediaStore/MTP path; if it's a DJI protocol, capture DJI Mimo/the
+  desktop assistant doing a wired transfer and port it. Needs a USB-C ↔ USB-C cable and a host-capable
+  phone.
+- **Why it's worth it:** no AP, no pairing, no password — just plug in and pull, at USB speed.
