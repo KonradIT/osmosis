@@ -72,6 +72,25 @@ class CameraModelBrandTest {
     }
 
     @Test
+    fun `drones resolve as drones and pair with the DJI FLY token`() {
+        val mavic = CameraModel.resolve(0x0070, "1001", Brand.DJI)
+        assertEquals("Mavic 3", mavic.name)
+        assertTrue(mavic.isDrone)
+        assertEquals("DJI FLY", mavic.pairingToken)
+
+        val neo = CameraModel.resolve(0x007e, "DJI-NEO2-168D", Brand.DJI)
+        assertTrue(neo.isDrone)
+        assertEquals("DJI FLY", neo.pairingToken)
+    }
+
+    @Test
+    fun `cameras stay cameras and pair with the osmo token`() {
+        val nano = CameraModel.resolve(0x0019, "OsmoNano-C2D8", Brand.DJI)
+        assertFalse(nano.isDrone)
+        assertEquals("osmo", nano.pairingToken)
+    }
+
+    @Test
     fun `the xtra rebrand still wins over the dji company id`() {
         // The Xtra carries cid 0x08AA too, but its own OUI must keep it XTRA (it needs port 10004).
         assertEquals(Brand.XTRA, Brand.of("EC:9E:EA:00:00:01", "XtraEdgePro-2DCA", djiCid = true))

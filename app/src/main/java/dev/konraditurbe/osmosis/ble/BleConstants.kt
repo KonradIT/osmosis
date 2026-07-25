@@ -25,5 +25,7 @@ object BleConstants {
         0x0019 to "OsmoNano",   // verified 2026-07-09: OsmoNano-C2D8 advertised model 0x0019
         0x0020 to "OsmoPocket3",
         0x0021 to "OsmoPocket4",
+        0x0070 to "Mavic3",   // drone (offload exploratory — ROADMAP #11)
+        0x007e to "Neo2",     // drone
     )
 }
