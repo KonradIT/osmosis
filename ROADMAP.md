@@ -558,11 +558,18 @@ milestone, tracked separately.
   - **The Mavic rejects the camera WiFi getters with error `0xe4`:** `0x07/0x07` (SSID) and `0x07/0x0e`
     (password) each return a bare `e4`, not a `[status][PackString]`. This is *why* offload falls through
     to the manual prompt (same symptom as the Neo 2, now with the error code).
-  - **DJI Fly never calls those getters.** Its Mavic session is a high-rate `0x51` push stream
-    (telemetry — carries the drone serial), with no `0x07/0x07`/`0x0e`/`0x47`. So the drone's media-WiFi
-    (**QuickTransfer**) is set up some other way — **not captured yet** (this snoop caught the connect,
-    not a QuickTransfer download). **Next:** snoop DJI Fly doing an actual album/QuickTransfer pull to
-    see the WiFi-bring-up command.
+  - **DJI Fly never calls those getters.** Its Mavic session is a high-rate `0x51/0x13` push stream
+    (telemetry — every frame just repeats the drone serial), with no `0x07/0x07`/`0x0e`/`0x47`.
+  - **QuickTransfer WiFi does NOT traverse BLE (confirmed 2026-07-25).** A second snoop taken *during an
+    actual QuickTransfer image pull* carried only the same two things — pairing + the `0x51` telemetry
+    heartbeat. No SSID, no password, no WiFi command, no new cmdset; the only ASCII in the whole capture
+    is the drone serial. So DJI Fly brings the QuickTransfer AP up over a **non-BLE channel** — most
+    likely the phone already holds the drone's WiFi creds from first-time **binding** (cached by DJI Fly)
+    and joins the AP directly, or negotiates over WiFi-Direct.
+  - **Takeaway:** the BLE path that works for cameras is a dead end for drone WiFi creds (the Mavic
+    `e4`-rejects the getters; DJI Fly doesn't use BLE for WiFi). Pairing is *not* the blocker. Cracking
+    drone offload needs a different capture — the **first-time binding**, the creds **cached in DJI Fly's
+    storage**, or a **WiFi-Direct sniff** — not more BLE snooping.
 - **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
   diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
   and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**
