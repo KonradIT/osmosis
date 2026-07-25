@@ -594,8 +594,10 @@ milestone, tracked separately.
     camera list command `0x00/0x26` gets **no `0x00/0x27` back**: the 43 KB it reads is pure noise —
     25 `0x51/0x01` telemetry frames (the serial heartbeat) + datalink session heartbeat, no media. So
     the drone's **media-list command is different** and is the one remaining unknown. **Next:** a
-    cleaner DUML capture of DJI Fly's QuickTransfer *browse* on 9003 (PCAPdroid's VPN missed the
-    inbound half of the local traffic), or fuzz the list command now that Osmosis is on the datalink.
+    cleaner DUML capture of DJI Fly's QuickTransfer *browse* on 9003 — the earlier PCAP had **no
+    inbound** simply because that pairing attempt *failed* (DJI Fly was retrying the handshake into
+    the void), not a capture limitation, so a successful browse should record both directions. Or
+    fuzz the list command now that Osmosis is on the datalink.
 - **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
   diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
   and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**
