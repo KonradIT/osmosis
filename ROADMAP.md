@@ -561,6 +561,20 @@ milestone, tracked separately.
   falls back to the manual-password prompt, which the tester didn't complete. So the credential path
   differs on the drone side; whether it exposes creds via a different cmd, or expects the AP set up
   another way, is unknown.
+- **Mavic 3 (`0x0070`) — BLE snoop findings (2026-07-25).** An HCI snoop of **DJI Fly** then Osmosis,
+  back to back (same method as #3/#10), on a real Mavic 3:
+  - **Pairing is identical to a camera.** Both apps use `0x07/0x45 SetPairingPIN` — DJI Fly with token
+    `"DJI FLY"` (+ a UUID identifier), Osmosis with `"osmo"`. The Mavic accepted our pairing after
+    on-screen approval (`0x07/0x45`→`0002`, then `0x07/0x46`→ approved). So our BLE pairing already
+    reaches a drone.
+  - **The Mavic rejects the camera WiFi getters with error `0xe4`:** `0x07/0x07` (SSID) and `0x07/0x0e`
+    (password) each return a bare `e4`, not a `[status][PackString]`. This is *why* offload falls through
+    to the manual prompt (same symptom as the Neo 2, now with the error code).
+  - **DJI Fly never calls those getters.** Its Mavic session is a high-rate `0x51` push stream
+    (telemetry — carries the drone serial), with no `0x07/0x07`/`0x0e`/`0x47`. So the drone's media-WiFi
+    (**QuickTransfer**) is set up some other way — **not captured yet** (this snoop caught the connect,
+    not a QuickTransfer download). **Next:** snoop DJI Fly doing an actual album/QuickTransfer pull to
+    see the WiFi-bring-up command.
 - **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
   diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
   and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**
