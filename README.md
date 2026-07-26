@@ -33,9 +33,11 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 |---|---|
 | Osmo Nano | Verified on hardware |
 | Osmo Action 5 Pro / Xtra Edge Pro | Verified on hardware |
-| Osmo 360 | Coded, untested (WPA3 AP) |
-| Osmo Pocket 3 / 4 | Coded, untested |
-| Osmo Action 2 / 3 / 4 / 6 | Best-effort default |
+| Osmo Action 6 | Verified on hardware |
+| Osmo Pocket 3 | Verified on hardware |
+| Osmo Action 1 | Started, parked |
+| Osmo 360 | Unplanned (WPA3 AP) |
+| Other DJI Osmo (Action 2 / 3 / 4, etc.) | Best-effort default |
 
 The datalink port and WiFi security are resolved from the camera's BLE **model byte**, not its brand — so an unrecognized DJI Osmo is *attempted*, not refused. Got one working (or broken)? [Open an issue](../../issues) so it can be listed as fully supported.
 
