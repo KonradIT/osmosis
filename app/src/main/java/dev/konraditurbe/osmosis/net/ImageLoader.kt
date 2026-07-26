@@ -7,8 +7,10 @@ import android.widget.ImageView
 import java.util.concurrent.Executors
 
 /**
- * Minimal async thumbnail loader (no third-party image lib). Fetches a `.scr` thumbnail over
- * HTTP, decodes it, caches it, and sets it on the target ImageView (recycling-safe via tag).
+ * Minimal async thumbnail loader (no third-party image lib). Fetches a thumbnail over HTTP,
+ * decodes it, caches it, and sets it on the target ImageView (recycling-safe via tag).
+ * The path we derive is a `.scr` screennail (what video files use); photos instead carry a `.thm`,
+ * so when the `.scr` 404s we retry `.thm` before giving up (see [load]).
  * On the first decode failure it logs the leading bytes so we can identify the thumbnail format.
  */
 class ImageLoader(private val http: HttpClient, private val log: (String) -> Unit) {
@@ -21,7 +23,14 @@ class ImageLoader(private val http: HttpClient, private val log: (String) -> Uni
         cache.get(thumbUrlPath)?.let { view.setImageBitmap(it); return }
         view.setImageBitmap(null)
         exec.submit {
-            val bytes = http.getBytes(thumbUrlPath)
+            // Derived path is a `.scr` screennail (videos). Photos have a `.thm` instead, so if the
+            // `.scr` isn't there, fall back to `.thm` before giving up — the camera lists one or the
+            // other, never both. Only the first view of such a file pays the extra request; the decoded
+            // bitmap caches under the original key.
+            var bytes = http.getBytes(thumbUrlPath)
+            if (bytes == null && thumbUrlPath.endsWith(".scr")) {
+                bytes = http.getBytes(thumbUrlPath.removeSuffix(".scr") + ".thm")
+            }
             val bmp = bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
             if (bmp == null && bytes != null && !loggedFailure) {
                 loggedFailure = true
