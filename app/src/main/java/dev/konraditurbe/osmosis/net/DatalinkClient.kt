@@ -138,6 +138,7 @@ class DatalinkClient(
     /** Handshake + register + list. Socket stays open on success. Empty list on failure. */
     fun fetchFileList(ip: String): List<CameraFile> {
         if (!openAndRegister(ip)) return emptyList()
+        runCatching { syncTime() }   // set the camera clock + timezone to the phone's, on every connect
         onFetchProgress?.invoke(50)
 
         // Fast initial load: osmo-download's proven 3-command sequence → the newest ~45 files (no
@@ -948,6 +949,30 @@ class DatalinkClient(
         b[1] = 'A'.code.toByte(); b[2] = 'P'.code.toByte(); b[3] = 'P'.code.toByte()
         b[41] = 0x02; b[50] = 0x02; b[51] = 0x08
         return b
+    }
+
+    /**
+     * Set the camera clock + timezone to the phone's (DUML **0x00/0x6a**, from a Mimo capture):
+     * `01 00` · **unix seconds** (u64-LE) · **UTC offset minutes** (u16-LE, signed) · `len:u8` ·
+     * IANA tz id ASCII (e.g. `Europe/Madrid`). Fire-and-forget on connect so recorded file timestamps
+     * match the phone. Best-effort — a failure never blocks the media list.
+     */
+    private fun syncTime() {
+        val nowMs = System.currentTimeMillis()
+        val tz = java.util.TimeZone.getDefault()
+        val nowSec = nowMs / 1000L
+        val offMin = tz.getOffset(nowMs) / 60000                  // signed minutes east of UTC
+        val tzId = tz.id.toByteArray(Charsets.US_ASCII)
+        val b = java.io.ByteArrayOutputStream()
+        b.write(0x01); b.write(0x00)
+        for (k in 0 until 8) b.write(((nowSec ushr (k * 8)) and 0xFF).toInt())   // unix seconds, u64-LE
+        b.write(offMin and 0xFF); b.write((offMin shr 8) and 0xFF)              // UTC offset (min), u16-LE
+        b.write(tzId.size); b.write(tzId)
+        // Receiver 0x28 = (id 1 << 5) | type 0x08 — the system/RTC subsystem (same one 0x00/0x99
+        // subscribes to). Mimo addresses SetTime here; the file/media receiver (0x01) silently drops it.
+        sendDuml(0x00, 0x6a, b.toByteArray(), receiverType = 0x08, receiverId = 1)
+        recvAll(300); sendAck()
+        log("datalink: time synced → ${tz.id} (${offMin}min), unix $nowSec")
     }
 
     private fun subscription(name: String, subId: Int): ByteArray {
