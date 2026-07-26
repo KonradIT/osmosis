@@ -24,16 +24,18 @@
         android:textColor="#FFFFFF"
         android:textSize="10sp" />
 
+    <!-- Media badge: ❤️ when favorited, else a type hint (📷 photo / 📹 video). Text set in the adapter.
+         Sized/centered to mirror the checkbox's ~40dp box on the opposite corner. -->
     <TextView
         android:id="@+id/star"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="top|start"
-        android:paddingHorizontal="3dp"
-        android:paddingVertical="1dp"
-        android:text="⭐"
-        android:textSize="12sp"
-        android:visibility="gone" />
+        android:minWidth="40dp"
+        android:minHeight="40dp"
+        android:gravity="center"
+        android:text="❤️"
+        android:textSize="18sp" />
 
     <CheckBox
         android:id="@+id/check"

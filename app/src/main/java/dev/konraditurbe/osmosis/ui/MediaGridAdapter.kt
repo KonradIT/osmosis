@@ -53,9 +53,14 @@ class MediaGridAdapter(
 
         val f = files[position]
         check.isChecked = selected.containsKey(position)
-        star.visibility = if (f.starred) View.VISIBLE else View.GONE
+        // ❤️ when favorited; otherwise a media-type hint (📷 photo / 📹 video).
+        star.text = when {
+            f.starred -> "❤️"
+            f.isVideo -> "📹"
+            else -> "📷"
+        }
         loader.load(f.thumbUrlPath(), thumb)
-        val prefix = "%04d·%s".format(f.seq, f.ext) + if (selected[position] != null) " ✂" else ""
+        val prefix = "%04d".format(f.seq) + if (selected[position] != null) " ✂" else ""
         meta.load(f, name, prefix)
 
         v.setOnClickListener { onOpen(position) }
@@ -69,6 +74,13 @@ class MediaGridAdapter(
     /** Apply the preview's add/remove decision (with optional trim) and refresh. */
     fun setQueued(position: Int, queued: Boolean, trim: TrimRange? = null) {
         if (queued) selected[position] = trim else selected.remove(position)
+        notifyDataSetChanged()
+    }
+
+    /** Reflect a favorite toggle (from the preview) on the grid's ⭐ badge. */
+    fun setStarred(position: Int, starred: Boolean) {
+        if (position !in files.indices || files[position].starred == starred) return
+        files[position] = files[position].copy(starred = starred)
         notifyDataSetChanged()
     }
 

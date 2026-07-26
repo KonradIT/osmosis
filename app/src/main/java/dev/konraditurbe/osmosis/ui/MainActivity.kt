@@ -101,15 +101,30 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val data = result.data ?: return@registerForActivityResult
         val pos = data.getIntExtra(MediaPreviewActivity.EXTRA_POSITION, -1)
         if (pos < 0) return@registerForActivityResult
+        val ad = adapter ?: return@registerForActivityResult
         val queued = data.getBooleanExtra(MediaPreviewActivity.EXTRA_QUEUED, false)
         val s = data.getLongExtra(MediaPreviewActivity.EXTRA_TRIM_START, -1L)
         val e = data.getLongExtra(MediaPreviewActivity.EXTRA_TRIM_END, -1L)
-        adapter?.setQueued(pos, queued, if (s >= 0 && e > s) TrimRange(s, e) else null)
+        ad.setQueued(pos, queued, if (s >= 0 && e > s) TrimRange(s, e) else null)
+
+        // Favorite toggle from the preview → fire the 0x02/0xbf write over the live session (off-UI).
+        // Handle is the favorite index 0x40100000 + seq*0x40 (videos already carry it; photos decode to 0).
+        val f = ad.getItem(pos)
+        val starred = data.getBooleanExtra(MediaPreviewActivity.EXTRA_STARRED, f.starred)
+        if (starred != f.starred) {
+            val favHandle = if (f.handle != 0L) f.handle else 0x40100000L + f.seq.toLong() * 0x40L
+            ad.setStarred(pos, starred)   // optimistic; the write runs in a fresh session below
+            datalink?.let { dl -> favExec.execute { dl.setFavorite(favHandle, starred) } }
+        }
     }
 
     // The datalink session keeps the camera AP alive (the Action 5 sleeps its AP the moment the
     // datalink goes idle). Held open during browse/download; closed on a new offload / exit.
     private var datalink: DatalinkClient? = null
+
+    // Favorites are camera writes that run in a fresh session (~re-handshake each), so serialize them
+    // on one worker — rapid star toggles queue instead of tearing down/rebuilding sessions concurrently.
+    private val favExec = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     // Pairing PIN string sent in SetPairingPIN — an app-chosen token (any value pairs; the camera
     // shows its approval popup once, then stores it for silent re-pair). Overridable via

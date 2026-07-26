@@ -46,6 +46,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var btnQueue: Button
     private lateinit var btnMarkIn: Button
     private lateinit var btnMarkOut: Button
+    private lateinit var btnStar: Button       // favorite toggle (video: next to ]; photo: above Queue)
+    private lateinit var btnStarPhoto: Button
     private lateinit var trimRow: View
     private lateinit var controls: View
     private lateinit var seekBar: SeekBar
@@ -60,6 +62,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var ip = "192.168.2.1"
     private var position = -1
     private var queued = false
+    private var starred = false
     private var resTag: String? = null // resolution, filled in async (moov for video, bounds for photo)
     private var streamCandidates: List<String> = emptyList() // preview URLs, cheapest first
     private var streamIdx = 0          // which candidate we're currently trying
@@ -74,6 +77,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         ip = intent.getStringExtra(EXTRA_IP) ?: "192.168.2.1"
         position = intent.getIntExtra(EXTRA_POSITION, -1)
         queued = intent.getBooleanExtra(EXTRA_QUEUED, false)
+        starred = intent.getBooleanExtra(EXTRA_STARRED, false)
         trimStartMs = intent.getLongExtra(EXTRA_TRIM_START, -1L)
         trimEndMs = intent.getLongExtra(EXTRA_TRIM_END, -1L)
         file = CameraFile(path, "", intent.getIntExtra(EXTRA_STORAGE, 0),
@@ -87,6 +91,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnQueue = findViewById(R.id.btnQueue)
         btnMarkIn = findViewById(R.id.btnMarkIn)
         btnMarkOut = findViewById(R.id.btnMarkOut)
+        btnStar = findViewById(R.id.btnStar)
+        btnStarPhoto = findViewById(R.id.btnStarPhoto)
         trimRow = findViewById(R.id.trimRow)
         controls = findViewById(R.id.controls)
         seekBar = findViewById(R.id.seekBar)
@@ -108,11 +114,30 @@ class MediaPreviewActivity : AppCompatActivity() {
             publishResult()
         }
 
+        val onStar = View.OnClickListener { toggleStar() }
+        btnStar.setOnClickListener(onStar)
+        btnStarPhoto.setOnClickListener(onStar)
+        renderStar()
+
         when {
             file.isVideo -> { setupTrim(); loadVideo() }
-            file.isImage -> loadPhoto()
+            file.isImage -> { btnStarPhoto.visibility = View.VISIBLE; loadPhoto() }
             else -> showStatus("No preview for .${file.ext}")
         }
+    }
+
+    /** Toggle favorite locally (optimistic) and publish it — MainActivity fires the 0x02/0xbf write. */
+    private fun toggleStar() {
+        starred = !starred
+        renderStar()
+        publishResult()
+    }
+
+    private fun renderStar() {
+        val glyph = if (starred) "★" else "☆"
+        val color = if (starred) 0xFFFFC107.toInt() else 0xFFFFFFFF.toInt()
+        btnStar.text = glyph; btnStar.setTextColor(color)
+        btnStarPhoto.text = glyph; btnStarPhoto.setTextColor(color)
     }
 
     private fun hasTrim() = trimStartMs >= 0 && trimEndMs > trimStartMs
@@ -313,6 +338,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         setResult(RESULT_OK, Intent().apply {
             putExtra(EXTRA_POSITION, position)
             putExtra(EXTRA_QUEUED, queued)
+            putExtra(EXTRA_STARRED, starred)
             putExtra(EXTRA_TRIM_START, if (hasTrim()) trimStartMs else -1L)
             putExtra(EXTRA_TRIM_END, if (hasTrim()) trimEndMs else -1L)
         })
@@ -337,6 +363,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         private const val EXTRA_IP = "ip"
         const val EXTRA_POSITION = "position"
         const val EXTRA_QUEUED = "queued"
+        const val EXTRA_STARRED = "starred"
         const val EXTRA_TRIM_START = "trim_start"
         const val EXTRA_TRIM_END = "trim_end"
 
@@ -349,6 +376,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 putExtra(EXTRA_IP, ip)
                 putExtra(EXTRA_POSITION, position)
                 putExtra(EXTRA_QUEUED, queued)
+                putExtra(EXTRA_STARRED, file.starred)
                 putExtra(EXTRA_TRIM_START, trim?.startMs ?: -1L)
                 putExtra(EXTRA_TRIM_END, trim?.endMs ?: -1L)
             }

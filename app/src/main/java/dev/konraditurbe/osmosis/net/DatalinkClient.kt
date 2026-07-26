@@ -415,6 +415,53 @@ class DatalinkClient(
         return null
     }
 
+    private var favCounter = 1
+
+    /**
+     * Star / un-star a file (DUML **0x02/0xbf**, decoded from a Mimo capture). Like delete and paging,
+     * this is a **write that the live keep-alive session silently drops**, and the pcap shows Mimo only
+     * ever favorites with **playback mode active** — so we run it in a fresh registered session that
+     * enters playback first, exactly like [freshSessionPage]. Payload: `01 01` · `[handle:u32-LE]` ·
+     * `[counter:u32-LE]` · `00` · `[on:u8]` · `00 00 00`, to receiver `0x01`; the handle is the favorite
+     * index `0x40100000 + seq*0x40`. Returns true on the camera's `0x00` ack. Blocks (~re-handshake);
+     * call on a background thread, serialized so rapid toggles don't overlap sessions.
+     */
+    fun setFavorite(handle: Long, on: Boolean): Boolean {
+        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return false
+        keepAliveOn = false
+        Thread.sleep(600)                // let the keep-alive loop finish its recv and exit
+        runCatching { sock.close() }     // free udp/$port for the fresh session
+        val ok = runCatching { freshSessionFavorite(ip, handle, on) }
+            .getOrElse { log("datalink: favorite session error: ${it.message}"); false }
+        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        return ok
+    }
+
+    private fun freshSessionFavorite(ip: String, handle: Long, on: Boolean): Boolean {
+        if (!openAndRegister(ip, subscribe = false)) { log("datalink: favorite — fresh session open FAILED"); return false }
+        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)   // enter playback mode
+        recvAll(200)
+        val b = java.io.ByteArrayOutputStream()
+        b.write(byteArrayOf(0x01, 0x01))
+        b.write(le32(handle.toInt()))
+        b.write(le32(favCounter++))
+        b.write(0x00)
+        b.write(if (on) 0x01 else 0x00)
+        b.write(byteArrayOf(0x00, 0x00, 0x00))
+        log("datalink: FAVORITE 0x02/0xbf handle=0x%08x on=%b".format(handle, on))
+        sendDuml(0x02, 0xbf, b.toByteArray(), receiverType = 0x01, receiverId = 0)
+        var status: Int? = null
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (status == null && System.nanoTime() < deadline) {
+            for (d in recvAll(200)) { status = findRespStatus(d, 0x02, 0xbf); if (status != null) break }
+            if (status == null) sendAck()
+        }
+        sendDuml(0x02, 0x0c, hex("01010000"), receiverType = 0x01, receiverId = 0)   // leave playback mode
+        recvAll(150)
+        log("datalink: FAVORITE reply status=${status?.let { "0x%04x".format(it) } ?: "none"}")
+        return status == 0
+    }
+
     /** Scan a datagram for a DUML response frame with [set]/[id] and return its leading status word. */
     private fun findRespStatus(d: ByteArray, set: Int, id: Int): Int? {
         var i = 0
