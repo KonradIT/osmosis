@@ -471,3 +471,21 @@ session warm with a constant `0x02/0x8e` heartbeat — so *its* pagination is ef
   the camera's UI in playback; our per-fetch enter/exit is more polite and leaves it usable between loads.
 - **Payoff:** near-instant infinite scroll instead of ~15 s/page — a much nicer feel on 100s-of-clips
   libraries. See `DatalinkClient.fetchNextPage` and [[pagination-index-first]] in memory.
+
+## 13. Improve previews by byte-range-streaming the LRF — 🔬 IDEA
+
+We already stream the low-res `.lrf`/`.lrv` proxy for preview (`MediaPreviewActivity`: `VideoView` +
+native MediaPlayer, which does its own HTTP range requests over the camera's `/v2` endpoint) and it
+plays cleanly. A DJI-Mimo capture shows *how small and range-addressable* the proxy is: Mimo pulls the
+MP4 header (`bytes 0-4095`) + the `moov` atom at the tail, then progressive ~5 MB chunks — a whole
+clip's proxy is only ~17 MB. That cheap random access opens some nice polish on top of what we have:
+
+- **YouTube-style scrub preview** — a small snapshot window floating above the seek bar while you drag,
+  showing the frame under the cursor. Because the `.lrf` is tiny + range-seekable, decode frames on the
+  fly with `MediaMetadataRetriever.getFrameAtTime` (against the proxy URL or a cached copy), or
+  pre-extract a sparse keyframe filmstrip once.
+- **Cache the proxy locally on open** — ~17 MB, so one background fetch gives *instant* seeking/scrubbing
+  (no re-buffer on jumps) and feeds the scrub thumbnails with zero extra range round-trips.
+- **Filmstrip / storyboard strip** under the player for quick visual navigation of long clips.
+
+Not a bug fix (previews already work) — a UX layer the proxy's small size + range access make cheap.
