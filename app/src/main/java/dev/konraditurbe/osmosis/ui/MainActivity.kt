@@ -669,14 +669,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     // SD list and an internal list back to back, and probing only the first file stamped
                     // that one store on every file — so whichever half didn't match 404'd (blank
                     // thumbnails, failed downloads). Probe once per list instead: 1-2 HEADs per group.
-                    val storageFor = files.groupBy { it.group }
-                        .mapValues { (_, group) -> detectStorage(group.first()) }
-                    val fixed = files.map { it.copy(storage = storageFor[it.group] ?: 0) }
-                        .sortedWith(compareByDescending<CameraFile> { it.timestamp }.thenByDescending { it.seq })
+                    storageByGroup = emptyMap()                 // fresh list → reset the group→store cache
+                    val fixed = applyStorageAndSort(files)
                     logLine("MANIFEST: ${fixed.size} files — " +
-                        storageFor.entries.joinToString(", ") { (g, s) ->
+                        storageByGroup.entries.joinToString(", ") { (g, s) ->
                             "list $g on storage=$s (${files.count { it.group == g }} files)"
-                        })
+                        } + (if (dl.moreAvailable) " · more on scroll" else ""))
                     main.post { showGrid(fixed) }
                 }.start()
             }
@@ -756,7 +754,87 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val ad = MediaGridAdapter(files, loader, ml, onOpen = { openPreview(it) }, onLongPress = { onGridLongPress(it) })
         adapter = ad
         grid.adapter = ad
+        loadingMore = false
+        installPullToLoadMore()
         logLine("Grid ready: ${files.size} files. Tap a cell to preview + queue, then Download. Long-press a cell to delete.")
+    }
+
+    // ---- lazy grid pagination (pull up past the last row to load older pages) --------------------
+    private var storageByGroup: Map<Int, Int> = emptyMap()
+    private var loadingMore = false
+
+    /** Stamp each file's storage from its manifest group (probing a group the first time it's seen) and
+     *  sort newest-first — shared by the initial fetch and every lazily-loaded older page. */
+    private fun applyStorageAndSort(files: List<CameraFile>): List<CameraFile> {
+        val map = storageByGroup.toMutableMap()
+        val out = files.map { f -> f.copy(storage = map.getOrPut(f.group) { detectStorage(f) }) }
+        storageByGroup = map
+        return out.sortedWith(compareByDescending<CameraFile> { it.timestamp }.thenByDescending { it.seq })
+    }
+
+    /**
+     * Pull-up-to-load-more: while the grid is scrolled to the very bottom and there are more pages, an
+     * upward drag raises + fades in the bottom spinner; releasing past the threshold spins it and fetches
+     * the next (older) page. We only OBSERVE touches (never consume them) so normal scrolling/taps still
+     * work — the grid absorbs the scroll, and any extra past the bottom is our "pull".
+     */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun installPullToLoadMore() {
+        val spinner = findViewById<View>(R.id.loadMoreSpinner) ?: return
+        val armPx = resources.displayMetrics.density * 88f       // drag distance to arm the load
+        var lastY = 0f
+        var pull = 0f
+        fun render() {
+            if (loadingMore) return
+            val p = (pull / armPx).coerceIn(0f, 1f)
+            if (p <= 0f) { spinner.visibility = View.GONE; return }
+            spinner.visibility = View.VISIBLE
+            spinner.alpha = p
+            spinner.scaleX = 0.6f + 0.4f * p; spinner.scaleY = spinner.scaleX
+            spinner.translationY = (1f - p) * armPx * 0.5f       // rises from below as you pull
+        }
+        grid.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> { lastY = ev.y; pull = 0f }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dy = lastY - ev.y; lastY = ev.y
+                    val more = datalink?.moreAvailable == true
+                    if (!loadingMore && more && !grid.canScrollVertically(1) && dy > 0f)
+                        pull = (pull + dy).coerceAtMost(armPx * 1.4f)
+                    else if (pull > 0f && dy < 0f)
+                        pull = (pull + dy).coerceAtLeast(0f)
+                    render()
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    if (!loadingMore && pull >= armPx) loadMorePages()
+                    else if (!loadingMore) spinner.animate().alpha(0f).setDuration(150)
+                        .withEndAction { spinner.visibility = View.GONE }.start()
+                    pull = 0f
+                }
+            }
+            false   // never consume — grid keeps handling scroll + cell taps
+        }
+    }
+
+    /** Fetch + append the next older page (guarded against re-entrancy); spinner spins meanwhile. */
+    private fun loadMorePages() {
+        val dl = datalink ?: return
+        if (loadingMore || !dl.moreAvailable) return
+        loadingMore = true
+        findViewById<View>(R.id.loadMoreSpinner)?.apply {
+            visibility = View.VISIBLE; alpha = 1f; scaleX = 1f; scaleY = 1f; translationY = 0f
+        }
+        Thread {
+            val more = runCatching { applyStorageAndSort(dl.fetchNextPage()) }.getOrElse { emptyList() }
+            main.post {
+                adapter?.append(more)
+                findViewById<View>(R.id.loadMoreSpinner)?.animate()?.alpha(0f)?.setDuration(180)
+                    ?.withEndAction { findViewById<View>(R.id.loadMoreSpinner)?.visibility = View.GONE }?.start()
+                if (more.isNotEmpty()) logLine("Loaded ${more.size} older (${adapter?.count ?: 0} total)")
+                else logLine("No more media to load.")
+                loadingMore = false
+            }
+        }.start()
     }
 
     private fun pillName() = "${currentModel.name} ${offloadSsid.substringAfterLast('-', "")}".trim()

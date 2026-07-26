@@ -233,6 +233,19 @@
                 android:verticalSpacing="2dp" />
         </LinearLayout>
 
+        <!-- Pull-up-to-load-more spinner (see portrait layout). -->
+        <com.google.android.material.progressindicator.CircularProgressIndicator
+            android:id="@+id/loadMoreSpinner"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="12dp"
+            android:indeterminate="true"
+            android:visibility="gone"
+            app:indicatorColor="@color/osmo_accent"
+            app:indicatorSize="34dp"
+            app:trackThickness="3dp" />
+
         <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
             android:id="@+id/fabDownload"
             android:layout_width="wrap_content"

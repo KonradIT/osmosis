@@ -449,3 +449,25 @@ attractive for bulk transfers and for cameras/phones where the AP hop is flaky.
   desktop assistant doing a wired transfer and port it. Needs a USB-C ↔ USB-C cable and a host-capable
   phone.
 - **Why it's worth it:** no AP, no pairing, no password — just plug in and pull, at USB speed.
+
+## 12. Persistent playback mode for instant pagination — 🔬 IDEA
+
+The media list only paginates while the camera is in **playback mode** (`0x02/0x0c` `01 01 00 01`;
+`01 01 00 00` leaves). We enter it **only for the duration of a fetch** — once on the initial
+newest-45 load, and again inside every `fetchNextPage()` — and each older page spins up a **fresh
+registered session** (~15 s/page). We have to, because the camera drops the datalink after ~2 pages and
+any keepalive we insert just drifts our `udpSeq` out of the accept window (see `freshSessionPage`).
+
+DJI Mimo instead **stays in playback mode the entire time the gallery is open**, keeping one long-lived
+session warm with a constant `0x02/0x8e` heartbeat — so *its* pagination is effectively **instantaneous**
+(no re-handshake, no re-enter-playback per page).
+
+- **Idea:** hold the camera in playback for the whole browse session (enter on grid open, leave on
+  `onDestroy`) and keep a single paging session alive, so each scroll-page is one quick query.
+- **Blocker / why we don't already:** it needs the `udpSeq`-window / ~2-page session drop solved — the
+  exact thing that forced fresh-session-per-page. Mimo's constant heartbeat evidently keeps the window
+  aligned; ours (inserted mid-fetch) corrupted the stream, so it needs its own reversing pass.
+- **Trade-off:** persistent playback probably blocks on-camera recording while we're attached and holds
+  the camera's UI in playback; our per-fetch enter/exit is more polite and leaves it usable between loads.
+- **Payoff:** near-instant infinite scroll instead of ~15 s/page — a much nicer feel on 100s-of-clips
+  libraries. See `DatalinkClient.fetchNextPage` and [[pagination-index-first]] in memory.

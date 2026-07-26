@@ -65,6 +65,16 @@ class DatalinkClient(
     @Volatile var handshakeOk = false
         private set
 
+    // Lazy grid pagination: [pageCursor] = oldest video handle seen (the next page's selector),
+    // [seenPaths] dedups across pages, [moreAvailable] = another older page is likely to exist. Video
+    // record handles live at/above VIDEO_HANDLE_BASE (0x4010xxxx on the Nano); the paging cursor only
+    // steps through those, so stray low-namespace handles don't derail it.
+    private val VIDEO_HANDLE_BASE = 0x40000000L
+    private var pageCursor = 0x40000001L
+    private val seenPaths = HashSet<String>()
+    @Volatile var moreAvailable = false
+        private set
+
     /**
      * Open the udp/[port] datalink and bring the session up to the point commands are accepted: TCP
      * poke, handshake (retry until the camera answers), drain heartbeats to learn its channel + start
@@ -130,9 +140,9 @@ class DatalinkClient(
         if (!openAndRegister(ip)) return emptyList()
         onFetchProgress?.invoke(50)
 
-        // File-list request (0x00/0x26). Records stream back over several packets. Page the list up
-        // front (indices 0.., 42.., 64..), then collect only until the parsed record count stops
-        // growing — instead of always waiting a fixed 15 s.
+        // Fast initial load: osmo-download's proven 3-command sequence → the newest ~45 files (no
+        // playback mode needed, quick, zero issues). OLDER pages are lazy — the grid's infinite scroll
+        // calls fetchNextPage(), which enters playback and pages by the 4-byte handle cursor.
         sendDuml(0x00, 0x26, hex(
             "4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000"
         ), receiverType = 0x01, receiverId = 0)
@@ -140,8 +150,7 @@ class DatalinkClient(
         var lastCount = -1
         var stable = 0
         for (batch in 0 until 15) {
-            val resps = recvAll(800); sendAck()
-            for (r in resps) blob.write(r)
+            for (r in recvAll(800)) blob.write(r); sendAck()
             if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"),
                 receiverType = 0x01, receiverId = 0)
             if (batch == 2) sendDuml(0x00, 0x26, hex(
@@ -153,13 +162,84 @@ class DatalinkClient(
             if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = count
         }
-
-        val raw = blob.toByteArray()
-        val bytes = manifestBytes(raw) // reassemble the fragmented file-list frames (see manifestBytes)
-        val files = decodeManifest(bytes)
-        log("datalink: parsed ${files.size} media files (${bytes.size}B)")
+        val files = decodeManifest(manifestBytes(blob.toByteArray()))
+        // Seed lazy-pagination state: dedup set + cursor = oldest video handle on this page.
+        seenPaths.clear(); seenPaths.addAll(files.map { it.path })
+        pageCursor = files.map { it.handle }.filter { it >= VIDEO_HANDLE_BASE }.minOrNull() ?: 0L
+        moreAvailable = pageCursor > 0L
+        log("datalink: parsed ${files.size} media files (newest page; more=$moreAvailable)")
         onFetchProgress?.invoke(100)
         return files
+    }
+
+    private fun listCmd(ctr: Int, cursor: Long): ByteArray =
+        hex("4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000").also {
+            it[4] = ctr.toByte()
+            it[10] = (cursor and 0xFF).toByte()
+            it[11] = ((cursor ushr 8) and 0xFF).toByte()
+            it[12] = ((cursor ushr 16) and 0xFF).toByte()
+            it[13] = ((cursor ushr 24) and 0xFF).toByte()
+        }
+
+    /**
+     * Fetch the next OLDER page for the grid's infinite scroll, returning ONLY the newly-seen files
+     * (empty when exhausted). Pagination (from a DJI-Mimo pcap): enter PLAYBACK MODE (0x02/0x0c=01 01 00
+     * 01), then per page query(cursor=1) → trigger → query(cursor=[oldest video handle], 4-byte LE at
+     * bytes 10-13). The camera drops the datalink after ~2 pages and any keepalive drifts udpSeq out of
+     * window, so each call runs in a FRESH registered session (like the delete flow), then restores the
+     * browse keep-alive. Blocking; call off the UI thread.
+     */
+    fun fetchNextPage(): List<CameraFile> {
+        if (!moreAvailable) return emptyList()
+        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return emptyList()
+        keepAliveOn = false
+        Thread.sleep(600)                 // let the keep-alive loop finish its current recv and exit
+        runCatching { sock.close() }      // free udp/$port for the fresh session
+        val fresh = runCatching { freshSessionPage(ip) }
+            .getOrElse { log("datalink: next-page session error: ${it.message}"); emptyList() }
+        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        return fresh
+    }
+
+    /** One older page in a fresh playback session; advances [pageCursor]/[moreAvailable]; returns new files. */
+    private fun freshSessionPage(ip: String): List<CameraFile> {
+        if (!openAndRegister(ip, subscribe = false)) { log("datalink: next-page open FAILED"); return emptyList() }
+        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)     // enter playback
+        for (b in 0 until 2) { recvAll(250); sendAck() }
+        val blob = java.io.ByteArrayOutputStream()
+        sendDuml(0x00, 0x26, listCmd(1, 1L), receiverType = 0x01, receiverId = 0)       // query cursor=1
+        var lastCount = -1; var stable = 0
+        for (batch in 0 until 12) {
+            for (r in recvAll(800)) blob.write(r); sendAck()
+            if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"), receiverType = 0x01, receiverId = 0)
+            if (batch == 2) sendDuml(0x00, 0x26, listCmd(2, pageCursor), receiverType = 0x01, receiverId = 0)  // page selector
+            val c = distinctPaths(blob)
+            if (batch >= 4 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
+            lastCount = c
+        }
+        val page = decodeManifest(manifestBytes(blob.toByteArray()))
+        val step = stepPagination(pageCursor, page, seenPaths)
+        pageCursor = step.nextCursor
+        moreAvailable = step.moreAvailable
+        log("datalink: next page cursor=0x${pageCursor.toString(16)} +${step.fresh.size} new (more=$moreAvailable)")
+        return step.fresh
+    }
+
+    internal data class PageStep(val fresh: List<CameraFile>, val nextCursor: Long, val moreAvailable: Boolean)
+
+    /**
+     * Pure pagination step for the grid's infinite scroll. Given the current [cursor] (a 4-byte file
+     * handle) and a freshly-decoded [page], returns: the files not already in [seen] (which it updates);
+     * the next cursor = the OLDEST video handle (>= [VIDEO_HANDLE_BASE]) on the page that is strictly
+     * older (smaller) than [cursor]; and whether another older page is likely (new files AND the cursor
+     * actually advanced). Only handles in `[VIDEO_HANDLE_BASE, cursor)` qualify, so a stray low-namespace
+     * handle (e.g. a 0x0010xxxx photo like seq 0022) can't drag the cursor to the bottom and stall paging.
+     */
+    internal fun stepPagination(cursor: Long, page: List<CameraFile>, seen: MutableSet<String>): PageStep {
+        val fresh = page.filter { seen.add(it.path) }
+        val oldestVideo = page.map { it.handle }.filter { it in VIDEO_HANDLE_BASE until cursor }.minOrNull()
+        return if (oldestVideo != null && fresh.isNotEmpty()) PageStep(fresh, oldestVideo, true)
+        else PageStep(fresh, cursor, false)
     }
 
     /**
@@ -425,6 +505,9 @@ class DatalinkClient(
 
     /** Test seam: decode an already-reassembled CompositePack manifest (post frame-reassembly). */
     internal fun decodeCompositeForTest(manifest: ByteArray): List<CameraFile> = decodeComposite(manifest)
+
+    /** Test seam: build a file-list request for a given counter + 4-byte handle cursor. */
+    internal fun buildListCmdForTest(ctr: Int, cursor: Long): ByteArray = listCmd(ctr, cursor)
 
     /** Test seam: feed one status push and read back the decoded [CameraStatus]. */
     internal fun applyStatusFrameForTest(set: Int, id: Int, payload: ByteArray): CameraStatus {

@@ -23,9 +23,67 @@ camera by mistake and it answers `e0` (reject) and stays asleep; nothing else hi
 - Cmd ID: `0x26`  (response `0x00/0x27`)
 - Dir / transport: App → Camera(`0x01`), datalink
 - Payload (page 1): `4a002a10 01000000 0000 01000000 2d00 0d0100 ffffffffffffffff 0001000000000000 000000`
-- Paging: page 2 `4a040e10 01000000 0000 01000000` · page 3 `4a002a10 02000000 0000 01000040 2d00 …`
 - Response: chunked `0x00/0x27` frames, each payload = `[10B sub-header 4A 01 xx xx <seq:u16LE@6> 00 00][chunk]`. **Strip the sub-header, concat chunks in arrival order** → the manifest.
 - DUML example: <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000010000002d000d0100ffffffffffffffff0001000000000000000000000000008185>
+
+#### Paginate the full library
+
+One `0x00/0x26` returns only the **newest ~45 files** (the `2d` = 45 count at payload byte 14). To reach older files the request carries a **cursor = a 4-byte little-endian file *handle* at payload bytes 10-13** — the same handle the record exposes for delete (§2, `u32-LE @ head`). Two things make it page:
+
+1. **Enter playback mode first.** The list only paginates while the camera is in playback — `0x02/0x0c` payload `01 01 00 01` to enter (`01 01 00 00` to leave). A plain query without it just re-returns the newest 45.
+2. **Per page send three frames** — `query(cursor=1)` → `trigger` → `query(cursor=pageCursor)`. The **second query's cursor selects the page**; the first (`cursor = 0x00000001`) and the trigger (`4a040e10`) prime the stream.
+
+| page | cursor @ bytes 10-13 (u32-LE) | returns |
+|------|-------------------------------|---------|
+| newest | `0x00000001` — `01 00 00 00` (or the `0x40000001` sentinel) | newest ~45 |
+| next older | the **oldest video handle** of the previous page (`0x40xxxxxx`, e.g. `80 2b 10 40` = `0x40102b80`) | next ~45, older |
+| … | repeat with each page's oldest video handle | until a page adds nothing new |
+
+- Only handles **`≥ 0x40000000`** (video records) advance the cursor — a stray low-namespace handle (a `0x0010xxxx` photo) is skipped so it can't jerk the cursor to the bottom and stall paging.
+- Consecutive pages overlap by exactly the one boundary file, so **dedup by media path** (≈ 44 new per page).
+- The camera drops the datalink after ~2 pages (and any keepalive drifts the app's UDP sequence out of the accept window), so **re-open a fresh registered session — and re-enter playback — per page**.
+
+DUML examples (cursors from a real 195-file Nano library):
+- enter playback (`0x02/0x0c 01 01 00 01`): <https://b3yond.d3vl.com/duml/#55110492020100a040020c01010001b63b>
+- newest page (cursor `0x00000001`): <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000010000002d000d0100ffffffffffffffff0001000000000000000000000000008185>
+- trigger (`4a040e10`): <https://b3yond.d3vl.com/duml/#551b0475020100a04000264a040e10010000000000010000008d86>
+- next page (cursor `0x401036c0`): <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000c03610402d000d0100ffffffffffffffff000100000000000000000000000000a7d3>
+- page after (cursor `0x40102b80`): <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000802b10402d000d0100ffffffffffffffff0001000000000000000000000000007701>
+
+```python
+import struct
+
+_LIST    = bytes.fromhex("4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000")
+_TRIGGER = bytes.fromhex("4a040e1001000000000001000000")
+VIDEO_HANDLE_BASE = 0x40000000   # video record handles live here (0x4010xxxx on the Nano)
+
+def list_cmd(cursor: int) -> bytes:
+    """0x00/0x26 payload with a 4-byte little-endian handle cursor at bytes 10-13."""
+    p = bytearray(_LIST)
+    struct.pack_into("<I", p, 10, cursor)
+    return bytes(p)
+
+def next_cursor(page_handles, cursor):
+    """The oldest video handle strictly older than `cursor`, or None once exhausted."""
+    older = [h for h in page_handles if VIDEO_HANDLE_BASE <= h < cursor]
+    return min(older) if older else None
+
+def all_media(send_duml, collect_manifest, open_session):
+    """`send_duml(0x00,0x26,payload)` queues a frame; `collect_manifest()` reassembles the
+       0x00/0x27 stream + decodes it to records (see decode_manifest below); `open_session()`
+       re-handshakes a fresh registered session and enters playback (0x02/0x0c 01 01 00 01)."""
+    seen, cursor = set(), 0x40000001            # 0x40000001 == newest page
+    while cursor is not None:
+        open_session()                          # fresh session + playback, per page
+        send_duml(0x00, 0x26, list_cmd(1))      # prime: query newest
+        send_duml(0x00, 0x26, _TRIGGER)         # trigger the stream
+        send_duml(0x00, 0x26, list_cmd(cursor)) # 2nd query's cursor selects the page
+        page = collect_manifest()
+        for f in page:                          # dedup the one-file boundary overlap
+            if f.path not in seen:
+                seen.add(f.path); yield f
+        cursor = next_cursor([f.handle for f in page], cursor)
+```
 
 **Parsed — DJI CompositePack (TLV).** The reassembled manifest opens with a `u32-LE` file count (present on the Nano/Xtra/Pocket 3; **`0` on the Action 5/6** — count the records instead), then one record per file. Every field is **length-delimited**, so you read *tag → length → value* — there is no need to recognise what a filename looks like, and no regex. The self-identifying anchor is the **media-path** field; the filename is read only for its extension:
 

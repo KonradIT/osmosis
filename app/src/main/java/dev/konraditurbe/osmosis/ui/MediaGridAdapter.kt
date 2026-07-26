@@ -19,15 +19,25 @@ import dev.konraditurbe.osmosis.net.MetaLoader
  * the preview via [onOpen]; queueing itself happens there and flows back through [setQueued].
  */
 class MediaGridAdapter(
-    private val files: List<CameraFile>,
+    initial: List<CameraFile>,
     private val loader: ImageLoader,
     private val meta: MetaLoader,
     private val onOpen: (Int) -> Unit,
     private val onLongPress: (Int) -> Unit = {},
 ) : BaseAdapter() {
 
+    // Backing list grows as older pages load on scroll (append only — existing positions/queue stay valid).
+    private val files: MutableList<CameraFile> = initial.toMutableList()
+
     // position -> optional trim (null = whole file). Presence in the map = queued.
     private val selected = LinkedHashMap<Int, TrimRange?>()
+
+    /** Append the next (older) page to the end; existing positions and the queued set are unaffected. */
+    fun append(more: List<CameraFile>) {
+        if (more.isEmpty()) return
+        files.addAll(more)
+        notifyDataSetChanged()
+    }
 
     override fun getCount() = files.size
     override fun getItem(position: Int) = files[position]
