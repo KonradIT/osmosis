@@ -6,7 +6,7 @@ Every DUML command we use / know for browsing, fetching, and controlling media o
 [DJI-Wifi-Connect/pocket3](https://github.com/sniffingpickles/DJI-Wifi-Connect/tree/main/pocket3). Each **DUML example** is a full, valid
 frame (correct CRC8+CRC16) — paste it into <https://b3yond.d3vl.com/duml/> and it decodes.
 
-Transports: **BLE** = write GATT `fff5`, notify `fff4` (frame `[6:8]` msg-id is **big-endian**).
+Transports: **BLE** = write GATT `fff5`, notify `fff4` (the `[6:8]` msg-id round-trips either way — we encode/decode it **little-endian** and the camera echoes the bytes back, so its true endianness is moot for request/response matching). **Both transports are plaintext** — no BLE bonding/SMP (our HCI captures show *zero* encryption events on the phone↔camera link) and no DUML-payload crypto; the `0x07/0x45` pairing is an app-level token approval, not link encryption.
 **Datalink** = UDP (DJI-standard `9004` + TCP-7001 poke first — Nano, Action 5/6, Pocket 3; the **Xtra Edge Pro**
 rebrand alone speaks `10004` with no poke), DUML wrapped
 in `[8B udp hdr][12B routing hdr][frame]`. Addressing byte `(id<<5)|type`: App `0x02`, Camera `0x01`,
@@ -300,7 +300,7 @@ The record's int fields are small enum codes; these are the code→meaning table
 
 ### 5. Device info
 - Cmd Set / ID: `0x00` / `0x81`  ·  App → DM368(`0x08`, id 2), cmd_type `4`
-- Payload: `00 "APP" 00×37 02 00×8 02 08 00×10` (64 B)
+- Payload: `00 "APP" 00×37 02 00×8 02 08 00×10` (62 B — 1+3+37+1+8+2+10; `DatalinkClient.appDeviceInfo` / `OsmoCommands.APP_DEVICE_INFO`)
 - DUML example: <https://b3yond.d3vl.com/duml/#554b0402024800a08000810041505000000000000000000000000000000000000000000000000000000000000000000000000000020000000000000000020800000000000000000000ad80>
 
 ### 6. Register
@@ -314,7 +314,7 @@ The record's int fields are small enum codes; these are the code→meaning table
 - DUML example: <https://b3yond.d3vl.com/duml/#551204c7020300a04003da05ffffffff4490>
 
 ### 8. Subscribe param
-- Cmd Set / ID: `0x00` / `0x99`  ·  App → DM368(`0x08`, id 1)
+- Cmd Set / ID: `0x00` / `0x99`  ·  App → DM368(`0x08`, id 1) — used over **BLE** as a control surface as well as the datalink (Mimo subscribes the same params over BLE; a single-frame group-subscribe variant also exists there, which we don't use)
 - Payload: `02020000 <sub_id:u32LE> 00000000 <len:u16LE> 00 <name_len:u8> 00 <name padded to 20> 00000000`
 - Sent once per param: `camcap_mode_profile`, `camcap_video_format`, `camcap_fov`, `camcap_iso`, `camcap_photo_storage_format`, `camcap_color_mode`, `cam_storage`, `cam_status`
 - DUML example (`cam_status`): <https://b3yond.d3vl.com/duml/#5536043d022800a040009902020000df690000000000001a00000a0063616d5f7374617475730000000000000000000000000000ffe6>
@@ -330,7 +330,8 @@ The record's int fields are small enum codes; these are the code→meaning table
 
 From [DJI-Wifi-Connect/pocket3](https://github.com/sniffingpickles/DJI-Wifi-Connect/tree/main/pocket3) + [osmo-download](https://github.com/SemiConscious/osmo-download). Cmd Set `0x02`, App → Camera(`0x01`,
 id 0), over the datalink. **Derived from the DJI protocol standard — cmdIds solid, payloads may need
-per-model adjustment; not yet verified on our Nano/Xtra.**
+per-model adjustment; not yet verified on our Nano/Xtra, and they appear in *none* of our captures
+(WiFi or BLE), so treat this whole block as unconfirmed.**
 
 ### 10. Take photo
 - Cmd Set / ID: `0x02` / `0x01`  ·  empty payload
@@ -348,8 +349,8 @@ per-model adjustment; not yet verified on our Nano/Xtra.**
 - Cmd Set / ID: `0x02` / `0x02`  ·  payload `[mode:u8]` — `0` Photo, `1` Video, `2` Playback, `3` SlowMo, `4` Timelapse, `5` Panorama
 - DUML example (Video): <https://b3yond.d3vl.com/duml/#550e0466020100a0000202017bb8>
 
-### 14. Camera heartbeat  *(Mimo sends ~15 Hz to keep the camera awake)*
-- Cmd Set / ID: `0x02` / `0x8E`  ·  cmd_type PUSH  ·  payload `00 01 14 00`
+### 14. Camera heartbeat  *(UDP datalink; Mimo sends it ~15 Hz while browsing)*
+- Cmd Set / ID: `0x02` / `0x8E`  ·  cmd_type PUSH  ·  payload `00 01 14 00` — really a **parameter poll** (pid `0x0014`), not a session keepalive. We ride it as datalink traffic while browsing; what actually keeps the camera *awake* is the **BLE** keepalive `0x00/0x2b 01 01` (#21).
 - DUML example: <https://b3yond.d3vl.com/duml/#55110492020100a040028e00011400a858>
 
 ### 15. Camera state query
@@ -386,7 +387,8 @@ per-model adjustment; not yet verified on our Nano/Xtra.**
 
 ### 18. Camera status
 - Cmd Set / ID: `0x02` / `0x80`  (~10 Hz push, 60 B)
-- Fields we read: **storage total** = `u32-LE MiB @ byte 5`, **free** = `@ byte 9`. `recording` = `byte1 & 0x01` (per Pocket 3 repo).
+- Fields we read: **storage total** = `u32-LE MiB @ byte 5`, **free** = `@ byte 9`.
+- **Recording** is *not* `byte1 & 0x01` (a Pocket 3-repo claim that can never fire — `byte1` is a static `0x02`, the cmdSet echo, in both states; confirmed across 2279 frames in our capture). It's reported as **`payload[0] & 0x80`** (independent RE; our idle capture shows `payload[0] = 0x01`, consistent). We don't decode it yet.
 - Quirks: reports the **active store only** (internal vs SD). Nano + Xtra.
 
 ### 19. SD / storage  *(both stores in one frame)*
@@ -445,7 +447,7 @@ shows Mimo never advertises at all. The wake is an ordinary **command sequence**
 | 3 | `0x00/0x2b` `01 01` | `0xF0` | then repeating ~1 Hz, forever, as the keepalive |
 | 4 | `0x53/0x10` `00 00 00 00` | `0x1C` | camera answers `01 00 00 00` and **wakes** |
 
-Pace the writes ~100–500 ms apart: `fff5` is write-without-response, so back-to-back frames are dropped.
+Space the writes so `fff5` (write-without-response) doesn't drop back-to-back frames — the floor is roughly the BLE connection interval. Mimo runs tight (**~20–40 ms** between writes in the captures); ~100–500 ms is a conservative margin, not a hard requirement.
 Mimo does **not** send ConnectToWiFi (#25) anywhere in this flow.
 
 ### 21. Session wake / keepalive
@@ -494,7 +496,7 @@ Mimo does **not** send ConnectToWiFi (#25) anywhere in this flow.
 ### 27. GetWifiPassword
 - Cmd Set / ID: `0x07` / `0x0e`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][PackString passphrase]`
-- Quirks: **pace after GetWifiSsid by ~500 ms** (`fff5` is write-without-response). Verified on Xtra / Action 5 Pro; Nano rides the saved-password fallback.
+- Quirks: **give it a beat after GetWifiSsid** (`fff5` is write-without-response; Mimo spaces these ~20–40 ms, ~500 ms is just a safe margin). Verified on Xtra / Action 5 Pro; Nano rides the saved-password fallback.
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070eb5ef>
 
 ### 28. GetWifiMac
