@@ -449,7 +449,7 @@ shows Mimo never advertises at all. The wake is an ordinary **command sequence**
 | 3 | `0x00/0x2b` `01 01` | `0xF0` | then repeating ~1 Hz, forever, as the keepalive |
 | 4 | `0x53/0x10` `00 00 00 00` | `0x1C` | camera answers `01 00 00 00` and **wakes** |
 
-Space the writes so `fff5` (write-without-response) doesn't drop back-to-back frames — the floor is roughly the BLE connection interval. Mimo runs tight (**~20–40 ms** between writes in the captures); ~100–500 ms is a conservative margin, not a hard requirement.
+Space the writes so `fff5` (write-without-response) doesn't drop back-to-back frames — the floor is roughly the BLE connection interval. Mimo bursts consecutive writes **~8–40 ms** apart (measured from `0x52` write-command timing in our HCI snoops — p50 **9 ms** on the Nano, 71% of gaps under 50 ms); ~100–500 ms is a conservative margin, not a hard requirement.
 Mimo does **not** send ConnectToWiFi (#25) anywhere in this flow.
 
 ### 21. Session wake / keepalive
@@ -498,7 +498,7 @@ Mimo does **not** send ConnectToWiFi (#25) anywhere in this flow.
 ### 27. GetWifiPassword
 - Cmd Set / ID: `0x07` / `0x0e`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][PackString passphrase]`
-- Quirks: **give it a beat after GetWifiSsid** (`fff5` is write-without-response; Mimo spaces these ~20–40 ms, ~500 ms is just a safe margin). Verified on Xtra / Action 5 Pro; Nano rides the saved-password fallback.
+- Quirks: **give it a beat after GetWifiSsid** (`fff5` is write-without-response; Mimo actually spaces these only a few tens of ms — see §20 — so ~500 ms is just a safe margin). Verified on Xtra / Action 5 Pro; Nano rides the saved-password fallback.
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070eb5ef>
 
 ### 28. GetWifiMac
