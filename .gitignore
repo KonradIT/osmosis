@@ -16,9 +16,10 @@
 /keystore.properties
 app-keystore.jks
 
-# Packet captures (may contain WiFi creds) — never commit
+# Packet & BLE-HCI captures (may contain WiFi creds) — never commit
 *.pcap
 *.pcapng
+btsnoop*
 # JVM/msys crash droppings
 hs_err_pid*.log
 replay_pid*.log
