@@ -330,26 +330,37 @@ The record's int fields are small enum codes; these are the code→meaning table
 
 ## Camera control
 
-From [DJI-Wifi-Connect/pocket3](https://github.com/sniffingpickles/DJI-Wifi-Connect/tree/main/pocket3) + [osmo-download](https://github.com/SemiConscious/osmo-download). Cmd Set `0x02`, App → Camera(`0x01`,
-id 0), over the datalink. **Derived from the DJI protocol standard — cmdIds solid, payloads may need
-per-model adjustment; not yet verified on our Nano/Xtra, and they appear in *none* of our captures
-(WiFi or BLE), so treat this whole block as unconfirmed.**
+Cmd Set `0x02`, App → Camera (`0x01`). **Every app→camera frame must use `cmd_type` `0x40`** (request; `0xC0` = response) — a `0x00` frame is silently dropped before the dispatcher, so the command just looks dead. Record control is **hardware-tested on a Nano** via the [DJI-Remote](https://github.com/KonradIT/DJI-Remote) ESP32 firmware (2026-07-28), over the encrypted BLE link — nothing here answers without it. (The upstream repos' `0x02/0x20`/`0x21` record commands **don't exist** on Osmo firmware — they answer `e0` from every receiver; `0x02/0x02` is the record control.)
+
+Once the link is up the camera answers *every* request, so the **reply byte is an oracle** — send an unknown cmdId with an empty payload and read the reply to map the command space:
+
+| reply | meaning |
+|---|---|
+| `00` | success |
+| `d9` | supported, **wrong state** (e.g. already recording) |
+| `df` | supported, **wrong parameter** |
+| `e3` | supported, **bad/missing parameter** |
+| `e0` | **not supported** |
+| *(no reply)* | that receiver does not exist |
 
 ### 10. Take photo
-- Cmd Set / ID: `0x02` / `0x01`  ·  empty payload
+- Cmd Set / ID: `0x02` / `0x01`  ·  `cmd_type 0x40`  ·  argument **not yet found**
+- The cmdId exists (never answers `e0`), but empty → `e3`, `[00]` → `df`, `[01]` → `d9` (idle *and* recording) — so it wants an argument we haven't cracked, and it is **not** the record toggle.
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a00002017677>
 
 ### 11. Start recording
-- Cmd Set / ID: `0x02` / `0x20`  ·  empty payload
-- DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a0000220fd47>
+- Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[01]`
+- Reply `00`; recording starts ~860 ms later (the `0x02/0x80` recording bit sets — §18).
+- DUML example: <https://b3yond.d3vl.com/duml/#550e046602010204400202014e61>
 
 ### 12. Stop recording
-- Cmd Set / ID: `0x02` / `0x21`  ·  empty payload
-- DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a00002217456>
+- Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[00]`
+- Reply `00`; the recording bit clears ~2.4 s later. **Not a toggle** — re-sending `[01]` while recording answers `df`, so drive start/stop off the decoded recording bit (§18), never by toggling blind.
+- DUML example: <https://b3yond.d3vl.com/duml/#550e04660201020440020200c770>
 
 ### 13. Set mode
-- Cmd Set / ID: `0x02` / `0x02`  ·  payload `[mode:u8]` — `0` Photo, `1` Video, `2` Playback, `3` SlowMo, `4` Timelapse, `5` Panorama
-- DUML example (Video): <https://b3yond.d3vl.com/duml/#550e0466020100a0000202017bb8>
+- Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[mode:u8]`
+- Nominally `0` Photo · `1` Video · `2` Playback · `3` SlowMo · `4` Timelapse · `5` Panorama — but `0x02/0x02` **is** the record control above, so on the Nano `0`/`1` **stop/start a recording** rather than switch a mode. ⚠ A "Video" button mapped to `[01]` starts a recording behind the user's back — exclude `0`/`1` from any mode switcher. `2`–`5` untested on this body.
 
 ### 14. Camera heartbeat  *(UDP datalink; Mimo sends it ~15 Hz while browsing)*
 - Cmd Set / ID: `0x02` / `0x8E`  ·  cmd_type PUSH  ·  payload `00 01 14 00` — really a **parameter poll** (pid `0x0014`), not a session keepalive. We ride it as datalink traffic while browsing; what actually keeps the camera *awake* is the **BLE** keepalive `0x00/0x2b 01 01` (#21).
@@ -389,8 +400,19 @@ per-model adjustment; not yet verified on our Nano/Xtra, and they appear in *non
 
 ### 18. Camera status
 - Cmd Set / ID: `0x02` / `0x80`  (~10 Hz push, 60 B)
-- Fields we read: **storage total** = `u32-LE MiB @ byte 5`, **free** = `@ byte 9`.
-- **Recording** is *not* `byte1 & 0x01` (a Pocket 3-repo claim that can never fire — `byte1` is a static `0x02`, the cmdSet echo, in both states; confirmed across 2279 frames in our capture). It's reported as **`payload[0] & 0x80`** (independent RE; our idle capture shows `payload[0] = 0x01`, consistent). We don't decode it yet.
+- **Recording** is *not* `byte1 & 0x01` (a Pocket 3-repo claim that can never fire — `byte1` is a static `0x02`, the cmdSet echo, in both states; confirmed across 2279 frames in our capture). It is **`payload[0] & 0x80`** — ✅ now ground-truthed twice: by recording with the camera's own button and diffing the payload, and by driving §13 from an ESP32 and watching the bit follow.
+- ✅ **`payload[0]` is a bitfield, not an enum.** Observed `01` idle, `41` transitional, **`81` recording**, `c1`. Bit 6 also toggles around mode changes, so match on **bit 7 alone** — an equality test against `0x81` will miss states.
+- Offsets, all ✅ ground-truthed by diffing an idle capture against a recording one:
+
+| offset | type | field | idle → recording |
+|--------|------|-------|------------------|
+| `@0` | `u8` bitfield | **bit7 = recording** | `01` → `81` |
+| `@5` | `u32-LE` | storage total, MiB | unchanged |
+| `@9` | `u32-LE` | storage free, MiB | falls while recording |
+| `@17` | `u16-LE` | **remaining recordable seconds** | counts down |
+| `@29` | `u16-LE` | **elapsed record time, seconds** | `0` → counts up |
+
+- `@17`/`@29` are enough to drive a live recording timer and a "space left" readout without polling anything.
 - Quirks: reports the **active store only** (internal vs SD). Nano + Xtra.
 
 ### 19. SD / storage  *(both stores in one frame)*
