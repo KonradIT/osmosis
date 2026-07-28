@@ -31,6 +31,8 @@ class MediaGridAdapter(
 
     // position -> optional trim (null = whole file). Presence in the map = queued.
     private val selected = LinkedHashMap<Int, TrimRange?>()
+    // position -> the specific burst frame the user chose to download (else the cell's own file).
+    private val selectedMember = HashMap<Int, CameraFile>()
 
     /** Append the next (older) page to the end; existing positions and the queued set are unaffected. */
     fun append(more: List<CameraFile>) {
@@ -53,14 +55,16 @@ class MediaGridAdapter(
 
         val f = files[position]
         check.isChecked = selected.containsKey(position)
-        // ❤️ when favorited; otherwise a media-type hint (📷 photo / 📹 video).
+        // ❤️ favorited; 🎞️ burst/interval group; else a media-type hint (📷 photo / 📹 video).
         star.text = when {
             f.starred -> "❤️"
+            f.isBurst -> "🎞️"
             f.isVideo -> "📹"
             else -> "📷"
         }
         loader.load(f.thumbUrlPath(), thumb)
-        val prefix = "%04d".format(f.seq) + if (selected[position] != null) " ✂" else ""
+        // Grid shows the 🎞️ badge only; a burst's frame count/strip live in the viewer (probed on open).
+        val prefix = "%04d".format(f.seq) + (if (selected[position] != null) " ✂" else "")
         meta.load(f, name, prefix)
 
         v.setOnClickListener { onOpen(position) }
@@ -71,9 +75,17 @@ class MediaGridAdapter(
     fun isQueued(position: Int): Boolean = selected.containsKey(position)
     fun trimFor(position: Int): TrimRange? = selected[position]
 
-    /** Apply the preview's add/remove decision (with optional trim) and refresh. */
-    fun setQueued(position: Int, queued: Boolean, trim: TrimRange? = null) {
-        if (queued) selected[position] = trim else selected.remove(position)
+    /**
+     * Apply the preview's add/remove decision and refresh. [member] is the specific burst frame the
+     * user was viewing (queued instead of the group's lead); null = queue the cell's own file.
+     */
+    fun setQueued(position: Int, queued: Boolean, trim: TrimRange? = null, member: CameraFile? = null) {
+        if (queued) {
+            selected[position] = trim
+            if (member != null) selectedMember[position] = member else selectedMember.remove(position)
+        } else {
+            selected.remove(position); selectedMember.remove(position)
+        }
         notifyDataSetChanged()
     }
 
@@ -85,7 +97,7 @@ class MediaGridAdapter(
     }
 
     fun selectedEntries(): List<Pair<CameraFile, TrimRange?>> =
-        selected.entries.sortedBy { it.key }.map { files[it.key] to it.value }
+        selected.entries.sortedBy { it.key }.map { (selectedMember[it.key] ?: files[it.key]) to it.value }
     fun selectedCount() = selected.size
 
     fun toggleAll() {

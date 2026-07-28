@@ -70,6 +70,9 @@ class DatalinkClient(
     // record handles live at/above VIDEO_HANDLE_BASE (0x4010xxxx on the Nano); the paging cursor only
     // steps through those, so stray low-namespace handles don't derail it.
     private val VIDEO_HANDLE_BASE = 0x40000000L
+    // Frame limit for a burst/interval group-expand query (byte 14). Generous — covers long interval
+    // timelapses; any spill into older files is filtered out by the group base name. See expandBurstGroup.
+    private val GROUP_EXPAND_LIMIT = 120
     private var pageCursor = 0x40000001L
     private val seenPaths = HashSet<String>()
     @Volatile var moreAvailable = false
@@ -224,6 +227,61 @@ class DatalinkClient(
         moreAvailable = step.moreAvailable
         log("datalink: next page cursor=0x${pageCursor.toString(16)} +${step.fresh.size} new (more=$moreAvailable)")
         return step.fresh
+    }
+
+    /**
+     * Enumerate a burst/interval group's frames WITHOUT probing — the group-expand `0x00/0x26` query the
+     * official app uses (RE'd from a Mimo pcap). The grid manifest lists only the group lead (`…_001`);
+     * re-querying with the GROUP HANDLE returns a small manifest of every frame with its real path, thumb
+     * and size. Handle = `0x40100000 + seq*0x40` (the favorite-handle formula). Runs in a fresh playback
+     * session (the live keep-alive would drop the write), like [fetchNextPage]. Blocking; call off-UI.
+     * Returns the frames in sub-index order, or just [lead] if it isn't a group / the query came back empty.
+     */
+    fun expandBurstGroup(lead: CameraFile): List<CameraFile> {
+        val base = lead.groupKey ?: return listOf(lead)
+        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return listOf(lead)
+        val handle = 0x40100000L + lead.seq.toLong() * 0x40L
+        keepAliveOn = false
+        Thread.sleep(600)                 // let the keep-alive loop exit before we take the socket
+        runCatching { sock.close() }
+        val frames = runCatching { freshSessionExpand(ip, handle, base) }
+            .getOrElse { log("datalink: group-expand error: ${it.message}"); emptyList() }
+        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        return frames.takeIf { it.size > 1 } ?: listOf(lead)
+    }
+
+    /** The group-expand request: grid template with the group handle (bytes 10-13), a generous frame
+     *  limit (byte 14) and "group mode" (byte 16 = 0x10, vs 0x0d for the full list). */
+    private fun groupCmd(ctr: Int, handle: Long, count: Int): ByteArray =
+        hex("4a002a10190000000000804710400600100100ffffffffffffffff000100000000000000000000010000").also {
+            it[4] = ctr.toByte()
+            it[10] = (handle and 0xFF).toByte()
+            it[11] = ((handle ushr 8) and 0xFF).toByte()
+            it[12] = ((handle ushr 16) and 0xFF).toByte()
+            it[13] = ((handle ushr 24) and 0xFF).toByte()
+            it[14] = count.toByte()
+        }
+
+    /** One group-expand in a fresh playback session; returns the frames whose name shares [base] (the
+     *  query can spill into older files, so filter to the group), oldest-first by sub-index. */
+    private fun freshSessionExpand(ip: String, handle: Long, base: String): List<CameraFile> {
+        if (!openAndRegister(ip, subscribe = false)) { log("datalink: group-expand open FAILED"); return emptyList() }
+        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)     // enter playback
+        for (b in 0 until 2) { recvAll(250); sendAck() }
+        val blob = java.io.ByteArrayOutputStream()
+        sendDuml(0x00, 0x26, groupCmd(1, handle, GROUP_EXPAND_LIMIT), receiverType = 0x01, receiverId = 0)
+        var lastCount = -1; var stable = 0
+        for (batch in 0 until 10) {
+            for (r in recvAll(700)) blob.write(r); sendAck()
+            if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"), receiverType = 0x01, receiverId = 0)
+            val c = distinctPaths(blob)
+            if (batch >= 3 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
+            lastCount = c
+        }
+        val all = decodeManifest(manifestBytes(blob.toByteArray()))
+        val group = all.filter { it.name.startsWith(base) }.sortedBy { it.subIndex }
+        log("datalink: group-expand $base → ${group.size} frames (of ${all.size} returned)")
+        return group
     }
 
     internal data class PageStep(val fresh: List<CameraFile>, val nextCursor: Long, val moreAvailable: Boolean)

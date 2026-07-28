@@ -26,6 +26,16 @@ data class CameraFile(
     val timestamp: String get() = Regex("""_(\d{14})_""").find(name)?.groupValues?.get(1) ?: ""
     val seq: Int get() = Regex("""_(\d{4})_D""").find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
+    /** 3-digit burst/interval sub-index (`…_0286_D_001.JPG` → 1), or 0 if this isn't a group frame. */
+    val subIndex: Int get() = Regex("""_(\d{3})\.\w+$""").find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    /** The shared name-prefix that groups burst/interval frames (everything before `_NNN.ext`), or null. */
+    val groupKey: String? get() = Regex("""^(.+)_\d{3}\.\w+$""").find(name)?.groupValues?.get(1)
+    /** A burst/interval frame — its name carries a `_NNN` sub-index. The manifest lists ONLY the group's
+     *  first frame (`…_0286_D_001.JPG`) and standalone photos have no suffix, so this is the reliable
+     *  burst signal (→ the 🎞️ badge). The other frames aren't in the manifest — the viewer enumerates
+     *  them by probing `_002…` on open (see MediaPreviewActivity.probeBurstFrames). */
+    val isBurst: Boolean get() = groupKey != null
+
     /** Human date from the 14-digit timestamp: "2026-07-09 19:56". */
     val dateTaken: String get() = timestamp.takeIf { it.length == 14 }?.let {
         "${it.substring(0, 4)}-${it.substring(4, 6)}-${it.substring(6, 8)} ${it.substring(8, 10)}:${it.substring(10, 12)}"

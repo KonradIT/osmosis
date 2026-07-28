@@ -13,16 +13,19 @@ import android.view.View
 import android.widget.Button
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.net.HttpClient
+import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.VideoMeta
 
 /**
@@ -69,6 +72,15 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var trimStartMs = -1L      // trim in/out points (ms), -1 = unset
     private var trimEndMs = -1L
 
+    // Burst / interval group: the frames' media + thumb paths (sub-index order) and which one is shown.
+    // Enumerated up-front by MainActivity via the DUML group-expand query and passed in through the intent.
+    private var groupPaths: List<String> = emptyList()
+    private var groupThumbs: List<String> = emptyList()
+    private var selectedFrame = 0
+    private lateinit var burstRow: LinearLayout
+    private lateinit var burstStrip: View
+    private val imageLoader by lazy { ImageLoader(http) { Log.i("Osmosis", it) } }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_preview)
@@ -80,6 +92,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         starred = intent.getBooleanExtra(EXTRA_STARRED, false)
         trimStartMs = intent.getLongExtra(EXTRA_TRIM_START, -1L)
         trimEndMs = intent.getLongExtra(EXTRA_TRIM_END, -1L)
+        groupPaths = intent.getStringArrayListExtra(EXTRA_GROUP_PATHS) ?: emptyList()
+        groupThumbs = intent.getStringArrayListExtra(EXTRA_GROUP_THUMBS) ?: emptyList()
         file = CameraFile(path, "", intent.getIntExtra(EXTRA_STORAGE, 0),
             intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY))
 
@@ -101,6 +115,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnPlay = findViewById(R.id.btnPlay)
         btnRew = findViewById(R.id.btnRew)
         btnFf = findViewById(R.id.btnFf)
+        burstRow = findViewById(R.id.burstRow)
+        burstStrip = findViewById(R.id.burstStrip)
 
         // Tap the media to hide/show the overlays (full-frame view).
         videoView.setOnClickListener { toggleControls() }
@@ -121,10 +137,52 @@ class MediaPreviewActivity : AppCompatActivity() {
 
         when {
             file.isVideo -> { setupTrim(); loadVideo() }
-            file.isImage -> { btnStarPhoto.visibility = View.VISIBLE; loadPhoto() }
+            file.isImage -> {
+                btnStarPhoto.visibility = View.VISIBLE
+                if (groupPaths.size > 1) setupBurstStrip()   // frames came from the DUML group-expand
+                loadPhoto()
+            }
             else -> showStatus("No preview for .${file.ext}")
         }
     }
+
+    /** Build the 1×n burst/interval frame strip: a thumbnail per frame, tap to view it, accent border on
+     *  the selected one. Frame 0 (`_001`) starts selected; the shown frame is what Add-to-Queue queues. */
+    private fun setupBurstStrip() {
+        burstStrip.visibility = View.VISIBLE
+        val d = resources.displayMetrics.density
+        val size = (54 * d).toInt(); val gap = (3 * d).toInt(); val pad = (2 * d).toInt()
+        groupThumbs.forEachIndexed { i, thumbPath ->
+            val iv = ImageView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(size, size).apply { setMargins(gap, 0, gap, 0) }
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setPadding(pad, pad, pad, pad)   // background shows through the padding as the border
+                setOnClickListener { selectFrame(i) }
+            }
+            burstRow.addView(iv)
+            imageLoader.load("/v2?storage=${file.storage}&path=$thumbPath", iv)
+        }
+        updateBurstSelection()
+    }
+
+    private fun selectFrame(i: Int) {
+        if (i == selectedFrame || i !in groupPaths.indices) return
+        selectedFrame = i
+        updateBurstSelection()
+        loadPhoto()          // re-fetch the chosen frame (spinner shows while it loads)
+        publishResult()      // the "currently viewed" frame changed — keep the pending result current
+    }
+
+    private fun updateBurstSelection() {
+        val accent = ContextCompat.getColor(this, R.color.osmo_accent)
+        for (i in 0 until burstRow.childCount) {
+            burstRow.getChildAt(i).setBackgroundColor(if (i == selectedFrame) accent else 0x00000000)
+        }
+    }
+
+    /** URL of the frame currently shown — a group's selected frame, or the single file. */
+    private fun currentUrl(): String =
+        if (groupPaths.isNotEmpty()) "/v2?storage=${file.storage}&path=${groupPaths[selectedFrame]}" else file.urlPath()
 
     /** Toggle favorite locally (optimistic) and publish it — MainActivity fires the 0x02/0xbf write. */
     private fun toggleStar() {
@@ -229,7 +287,10 @@ class MediaPreviewActivity : AppCompatActivity() {
     /** filename · date · <resolution>·<fps> */
     private fun renderTop() {
         val resFps = listOfNotNull(resTag, file.resLabel).joinToString("·").ifBlank { "—" }
-        topInfo.text = "${file.name}   ·   ${file.dateTaken}   ·   $resFps"
+        val name = if (groupPaths.isNotEmpty())
+            groupPaths[selectedFrame].substringAfterLast('/') + "  (${selectedFrame + 1}/${groupPaths.size})"
+        else file.name
+        topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
     }
 
     private fun loadVideo() {
@@ -290,8 +351,12 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private fun loadPhoto() {
         val dm = resources.displayMetrics
+        val frame = selectedFrame            // guard against a fast frame switch racing the fetch
+        val url = currentUrl()
+        spinner.visibility = ProgressBar.VISIBLE
+        statusText.visibility = TextView.GONE
         Thread {
-            val bytes = runCatching { http.getBytes(file.urlPath()) }.getOrNull()
+            val bytes = runCatching { http.getBytes(url) }.getOrNull()
             var bmp: Bitmap? = null
             if (bytes != null) {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -305,7 +370,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 }.getOrNull()
             }
             main.post {
-                if (isFinishing) return@post
+                if (isFinishing || frame != selectedFrame) return@post   // a newer frame is loading
                 renderTop()
                 if (bmp != null) {
                     photoView.setImageBitmap(bmp)
@@ -335,10 +400,15 @@ class MediaPreviewActivity : AppCompatActivity() {
     }
 
     private fun publishResult() {
+        // For a burst, hand back the *viewed* frame's own path/thumb so the queue grabs that frame — the
+        // grid never probed the group, so it can't resolve an index. Frame 0 (or non-burst) → no override.
+        val selPath = groupPaths.getOrNull(selectedFrame).takeIf { selectedFrame > 0 }
         setResult(RESULT_OK, Intent().apply {
             putExtra(EXTRA_POSITION, position)
             putExtra(EXTRA_QUEUED, queued)
             putExtra(EXTRA_STARRED, starred)
+            putExtra(EXTRA_GROUP_SEL_PATH, selPath)
+            putExtra(EXTRA_GROUP_SEL_THUMB, selPath?.let { groupThumbs.getOrNull(selectedFrame) })
             putExtra(EXTRA_TRIM_START, if (hasTrim()) trimStartMs else -1L)
             putExtra(EXTRA_TRIM_END, if (hasTrim()) trimEndMs else -1L)
         })
@@ -353,6 +423,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         super.onDestroy()
         main.removeCallbacks(tick)
         runCatching { videoView.stopPlayback() }
+        imageLoader.shutdown()
     }
 
     companion object {
@@ -364,10 +435,17 @@ class MediaPreviewActivity : AppCompatActivity() {
         const val EXTRA_POSITION = "position"
         const val EXTRA_QUEUED = "queued"
         const val EXTRA_STARRED = "starred"
+        const val EXTRA_GROUP_SEL_PATH = "group_sel_path"    // out: viewed burst frame's path (queue this)
+        const val EXTRA_GROUP_SEL_THUMB = "group_sel_thumb"  // out: …and its thumb path
+        private const val EXTRA_GROUP_PATHS = "group_paths"
+        private const val EXTRA_GROUP_THUMBS = "group_thumbs"
         const val EXTRA_TRIM_START = "trim_start"
         const val EXTRA_TRIM_END = "trim_end"
 
-        fun intent(ctx: Context, ip: String, file: CameraFile, position: Int, queued: Boolean, trim: TrimRange?) =
+        /** [group] = a burst/interval group's frames (from DatalinkClient.expandBurstGroup), sub-index
+         *  order, [file] being the lead; empty/size-1 for a normal file → no strip. */
+        fun intent(ctx: Context, ip: String, file: CameraFile, position: Int, queued: Boolean,
+                   trim: TrimRange?, group: List<CameraFile> = emptyList()) =
             Intent(ctx, MediaPreviewActivity::class.java).apply {
                 putExtra(EXTRA_PATH, file.path)
                 putExtra(EXTRA_STORAGE, file.storage)
@@ -379,6 +457,10 @@ class MediaPreviewActivity : AppCompatActivity() {
                 putExtra(EXTRA_STARRED, file.starred)
                 putExtra(EXTRA_TRIM_START, trim?.startMs ?: -1L)
                 putExtra(EXTRA_TRIM_END, trim?.endMs ?: -1L)
+                if (group.size > 1) {
+                    putStringArrayListExtra(EXTRA_GROUP_PATHS, ArrayList(group.map { it.path }))
+                    putStringArrayListExtra(EXTRA_GROUP_THUMBS, ArrayList(group.map { it.thumbPath }))
+                }
             }
     }
 }

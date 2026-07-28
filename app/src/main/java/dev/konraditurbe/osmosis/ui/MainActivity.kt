@@ -105,11 +105,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val queued = data.getBooleanExtra(MediaPreviewActivity.EXTRA_QUEUED, false)
         val s = data.getLongExtra(MediaPreviewActivity.EXTRA_TRIM_START, -1L)
         val e = data.getLongExtra(MediaPreviewActivity.EXTRA_TRIM_END, -1L)
-        ad.setQueued(pos, queued, if (s >= 0 && e > s) TrimRange(s, e) else null)
+        val f = ad.getItem(pos)
+        // A burst preview queues the exact frame the user was viewing: the viewer hands back that frame's
+        // own path/thumb (the grid never probed the group), so we rebuild it off the lead. Null → the lead.
+        val selPath = data.getStringExtra(MediaPreviewActivity.EXTRA_GROUP_SEL_PATH)
+        val member = selPath?.let {
+            f.copy(path = it, thumbPath = data.getStringExtra(MediaPreviewActivity.EXTRA_GROUP_SEL_THUMB) ?: f.thumbPath)
+        }
+        ad.setQueued(pos, queued, if (s >= 0 && e > s) TrimRange(s, e) else null, member)
 
         // Favorite toggle from the preview → fire the 0x02/0xbf write over the live session (off-UI).
         // Handle is the favorite index 0x40100000 + seq*0x40 (videos already carry it; photos decode to 0).
-        val f = ad.getItem(pos)
         val starred = data.getBooleanExtra(MediaPreviewActivity.EXTRA_STARRED, f.starred)
         if (starred != f.starred) {
             val favHandle = if (f.handle != 0L) f.handle else 0x40100000L + f.seq.toLong() * 0x40L
@@ -880,12 +886,26 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         }
     }
 
-    /** Open the full-screen preview for the tapped cell; queue changes flow back via the launcher. */
+    /** Open the full-screen preview for the tapped cell; queue changes flow back via the launcher. For a
+     *  burst/interval group, first enumerate its frames off-UI (DUML group-expand, no probing) so the
+     *  viewer opens with the thumbnail strip ready. */
     private fun openPreview(position: Int) {
         val ad = adapter ?: return
         val f = ad.getItem(position)
-        previewLauncher.launch(
-            MediaPreviewActivity.intent(this, "192.168.2.1", f, position, ad.isQueued(position), ad.trimFor(position)))
+        val dl = datalink
+        if (f.isBurst && dl != null) {
+            toast("Loading burst…")
+            Thread {
+                val frames = runCatching { dl.expandBurstGroup(f) }.getOrElse { listOf(f) }
+                main.post { launchPreview(position, f, frames) }
+            }.start()
+        } else launchPreview(position, f, emptyList())
+    }
+
+    private fun launchPreview(position: Int, f: CameraFile, group: List<CameraFile>) {
+        val ad = adapter ?: return
+        previewLauncher.launch(MediaPreviewActivity.intent(
+            this, "192.168.2.1", f, position, ad.isQueued(position), ad.trimFor(position), group))
     }
 
     /**
