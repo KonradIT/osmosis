@@ -8,7 +8,15 @@ frame (correct CRC8+CRC16) — paste it into <https://b3yond.d3vl.com/duml/> and
 
 Transports: **BLE** = write GATT `fff5`, notify `fff4` (the `[6:8]` msg-id round-trips either way — we encode/decode it **little-endian** and the camera echoes the bytes back, so its true endianness is moot for request/response matching).
 
-> ⚠️ **The BLE link must be LE-encrypted (bonded) before the camera will talk to you.** Unencrypted, it silently ignores every write and drops the link in ~600 ms; once the transport is encrypted the camera answers (the first-ever `0xC0` response) and the session lives 20 s+. **Android and iOS escalate LE security transparently and reuse the bond**, so this step is invisible in app code *and* in app-side/HCI captures — a reused bond shows no fresh SMP pairing or encryption-change event (verified: our own btsnoop of a working session has zero of either), which is exactly why it's so easy to miss. A bare-metal client (ESP32 / NimBLE — and GoPro's BLE behaves the same) **must enable encryption/bonding explicitly** before sending any DUML. This is the *transport* bond: the DUML payload itself is plaintext and `0x07/0x45` pairing is a separate app-level token approval. The WiFi **UDP datalink** that follows is plaintext DUML.
+> ⚠️ **A bare-metal BLE client needs the GATT setup below before the camera will act on anything.** Get it wrong and the camera ATT-acks every write, silently ignores it, and answers nothing — which reads exactly like an unsupported command, so you will hunt the wrong layer for days. Required, all hardware-verified on a Nano:
+> - **Subscribe the CCCDs of BOTH `fff4` and `fff5`** (0xFFF5's is easy to miss if service discovery is range-limited to the write characteristic).
+> - **Write `01 00` to the `fff4` characteristic VALUE** (not its CCCD), with response, after the CCCDs and before any `fff5` traffic, then let it settle ~200 ms.
+> - **`fff5` is WRITE_NO_RSP only** (`props=0x36`) — a Write Request on it is a spec violation.
+> - **Every app→camera frame needs `cmd_type` `0x40`**, never `0x00`.
+> - **MTU 500.** Negotiating 517 made the camera stop answering *every* request in our build (its NimBLE buffers are sized for 500) — raise the buffer config too or leave it alone.
+> - **Wait for the `0x07/0x45` pairing reply before sending the wake.** Ours arrives at ~+232 ms, far later than the ~+21 ms a Mimo capture suggests.
+>
+> **LE encryption/bonding is NOT required**
 **Datalink** = UDP (DJI-standard `9004` + TCP-7001 poke first — Nano, Action 5/6, Pocket 3; the **Xtra Edge Pro**
 rebrand alone speaks `10004` with no poke), DUML wrapped
 in `[8B udp hdr][12B routing hdr][frame]`. Addressing byte `(id<<5)|type`: App `0x02`, Camera `0x01`,
@@ -330,7 +338,9 @@ The record's int fields are small enum codes; these are the code→meaning table
 
 ## Camera control
 
-Cmd Set `0x02`, App → Camera (`0x01`). **Every app→camera frame must use `cmd_type` `0x40`** (request; `0xC0` = response) — a `0x00` frame is silently dropped before the dispatcher, so the command just looks dead. Record control is **hardware-tested on a Nano** via the [DJI-Remote](https://github.com/KonradIT/DJI-Remote) ESP32 firmware (2026-07-28), over the encrypted BLE link — nothing here answers without it. (The upstream repos' `0x02/0x20`/`0x21` record commands **don't exist** on Osmo firmware — they answer `e0` from every receiver; `0x02/0x02` is the record control.)
+Cmd Set `0x02`, App → Camera (`0x01`). **Every app→camera frame must use `cmd_type` `0x40`** (request; `0xC0` = response) — a `0x00` frame is silently dropped before the dispatcher, so the command just looks dead. Record control is **hardware-tested on an Osmo Nano** via the [DJI-Remote](https://github.com/KonradIT/DJI-Remote) ESP32 firmware (2026-07-28). (The upstream repos' `0x02/0x20`/`0x21` record commands **don't exist** on Osmo firmware — they answer `e0` from every receiver; `0x02/0x02` is the record control.)
+
+> ⚠️ **Everything in this section is Nano-verified only.** On an **Xtra Edge Pro** (Action-family rebrand), on the same firmware and the same session, commands to receiver `0x01` get **no reply at all** — while that same camera answers `0x07/0x45` pairing and the `0x53/0x10` wake normally and streams `0x02/0x80` status. So the link is healthy and the *camera command set differs between the two families*. Don't assume these opcodes port across bodies.
 
 Once the link is up the camera answers *every* request, so the **reply byte is an oracle** — send an unknown cmdId with an empty payload and read the reply to map the command space:
 
@@ -358,13 +368,65 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 - Reply `00`; the recording bit clears ~2.4 s later. **Not a toggle** — re-sending `[01]` while recording answers `df`, so drive start/stop off the decoded recording bit (§18), never by toggling blind.
 - DUML example: <https://b3yond.d3vl.com/duml/#550e04660201020440020200c770>
 
-### 13. Set mode
+### 13. Set mode — ⚠️ *this is the **work** mode, not the shooting mode (see §13a)*
 - Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[mode:u8]`
-- Nominally `0` Photo · `1` Video · `2` Playback · `3` SlowMo · `4` Timelapse · `5` Panorama — but `0x02/0x02` **is** the record control above, so on the Nano `0`/`1` **stop/start a recording** rather than switch a mode. ⚠ A "Video" button mapped to `[01]` starts a recording behind the user's back — exclude `0`/`1` from any mode switcher. `2`–`5` untested on this body.
+- Nominally `0` Photo · `1` Video · `2` Playback · `3` SlowMo · `4` Timelapse · `5` Panorama — but `0x02/0x02` **is** the record control above, so on the Nano `0`/`1` **stop/start a recording** rather than switch a mode. ⚠ A "Video" button mapped to `[01]` starts a recording behind the user's back — exclude `0`/`1` from any mode switcher.
+- Valid range is `0`–`3` (`[04]` answers `df`), i.e. DJI's four-value *work* mode — capture / record / playback / download. `[03]` is accepted but changes nothing visible. **To change the shooting mode use `0x02/0xE1`.**
 
-### 14. Camera heartbeat  *(UDP datalink; Mimo sends it ~15 Hz while browsing)*
-- Cmd Set / ID: `0x02` / `0x8E`  ·  cmd_type PUSH  ·  payload `00 01 14 00` — really a **parameter poll** (pid `0x0014`), not a session keepalive. We ride it as datalink traffic while browsing; what actually keeps the camera *awake* is the **BLE** keepalive `0x00/0x2b 01 01` (#21).
-- DUML example: <https://b3yond.d3vl.com/duml/#55110492020100a040028e00011400a858>
+### 13a. Set **shooting mode** — `0x02/0xE1` ✅ *(Video / Photo / SlowMo / …)*
+- Cmd Set / ID: `0x02` / `0xE1`  ·  App → Camera(`0x01`)  ·  `cmd_type 0x40`  ·  payload `[mode:u8]`  ·  reply `00`
+- **Absent from the upstream repos and from this doc until now.** Recovered by CRC-scanning `capture_full.pcap` and tallying *every* app→camera command rather than grepping for expected opcodes — Mimo sends 8 of these while the user cycles modes. An empty payload answers `e3` (bad parameter), which is why probing the opcode alone looked like a dead end.
+
+| value | mode | DUML example |
+|-------|------|--------------|
+| `0x00` | SlowMo | <https://b3yond.d3vl.com/duml/#550e0466020102044002e10036b3> |
+| `0x01` | Video | <https://b3yond.d3vl.com/duml/#550e0466020102044002e101bfa2> |
+| `0x02` | TimeLapse | <https://b3yond.d3vl.com/duml/#550e0466020102044002e1022490> |
+| `0x05` | Photo | <https://b3yond.d3vl.com/duml/#550e0466020102044002e1059be4> |
+| `0x0a` | HyperLapse | <https://b3yond.d3vl.com/duml/#550e0466020102044002e10a6c1c> |
+| `0x28` | SuperNight | <https://b3yond.d3vl.com/duml/#550e0466020102044002e1287c1e> |
+
+- **The enum is sparse and unordered — table it, never compute it.** The camera's on-screen carousel order is Video → Photo → TimeLapse → HyperLapse → SuperNight → SlowMo, which is *not* the numeric order.
+- ✅ **Readback:** the camera echoes the current mode in its `0x02/0x80` push at **byte `@57`**, in this same encoding — verified across ~20 writes with zero mismatches, and every value above was then confirmed by selecting that mode by hand and reading the byte. So mode is both settable and observable, and a remote stays in sync when the user changes it on the camera.
+- 🚫 **Do NOT sweep the value space.** Walking `0x00`–`0xFF` to discover the rest of the enum **froze a Nano solid** (power-cycle required). Unknown values are *not* harmlessly rejected. Read the mode out of `@57` instead of probing for it.
+- Why Photo never appears in the capture: the camera **booted into it**, so Mimo never needed to write `0x05`.
+
+### 14. Camera parameters — `0x02/0x8E` GET **and SET** ✅ *(the writable control surface over BLE)*
+
+**This is how you change camera settings.** `0x02/0x8E` is a keyed parameter store, not a heartbeat: the `00 01 14 00` payload Mimo sends ~15 Hz while browsing is simply *GET pid `0x0014`*. (What keeps the camera *awake* is the BLE keepalive `0x00/0x2b 01 01`, §21.) Both directions are **hardware-confirmed over BLE** on a Nano — App → Camera(`0x01`), `cmd_type 0x40`:
+
+```
+GET = 00 01 <pid:u16-LE>                    -> 00 00 01 <pid:u16-LE> <len:u8> <value…>
+SET = 01 01 <pid:u16-LE> <len:u8> <value…>  -> 00
+```
+
+A GET for a pid that isn't valid in the current state answers a **single error byte** instead of a value (`e3` most often, then `df`, `d9`) — so a sweep doubles as a map of which pids exist. Note this contrasts with §8's `0x00/0x99`: over BLE the group-subscribe there is ACKed with `plen=0` and **zero items ever follow**, so on real hardware `0x02/0x8E` — not `0x00/0x99` — is the control surface that actually works.
+
+**Known pids**
+
+| pid | field | values | status |
+|-----|-------|--------|--------|
+| `0x0009` | **field of view** | `05` = Natural-Wide · `01` = Wide | ✅ confirmed by writing it — the Nano's FOV switches on screen |
+| `0x000f` | **ISO limit** | `04` = 100-800 · `05` = 100-1600 | ✅ confirmed by writing it — the ISO range switches on screen |
+| `0x0014` | — | 3 B, reads `00 00 00` | what Mimo polls; meaning unknown |
+| `0x0039` | capability table | 15 entries of `<idx:u16-LE> 01 <value>` | looks like a settings/limits table |
+
+⚠️ **The shooting mode (Video/Photo/SlowMo/Timelapse) is _not_ a parameter** — at least not in `0x0000`–`0x007f`. Two independent ground-truth mode changes moved **only** the settings that hang off a mode (FOV, ISO) and never a pid that could be the mode itself. Combined with `0x02/0x02` being the *work* mode (§13, range 0–3), the shooting mode is still unlocated: the `0x0039` table, pids above `0x7f`, and `0x00/0x99` are the remaining places to look.
+
+Mimo polls `06 08 09 0f 14 15 18 1f 20 28 29 30 39` at ~1 Hz — a good shortlist to sweep first.
+
+**How to find a pid — sweep, change it by hand, diff (A→B→A).** GET `0x0000`–`0x007f` (space the frames ~60 ms; a sweep takes ~15 s), then: sweep → change the setting **on the camera itself** → sweep → change it **back** → sweep. Only trust a pid that **moves and moves back**. Both pids above were found this way, and the round trip is what makes it reliable — in the ISO run exactly one pid out of 21 showed A-B-A and it was the right one. Three traps, all hit for real:
+
+- **An error reply is not a change.** A pid that returned a value in one sweep and an error byte in the next simply wasn't answerable then. Counting those as changes produced ~7 false candidates out of 9 on the first attempt. Compare only value-to-value.
+- **Settings are stored per mode**, so changing the *mode* swaps in that mode's saved values and drags its settings along. Both `0x0009` and `0x000f` looked like textbook mode pids (`05`→`01`→`05` and `05`→`04`→`05`) purely as passengers; writing them showed they were FOV and ISO. **A correlation is not a control — confirm by writing it.**
+- **Only one sweep at a time.** Two overlapping sweeps interleave their replies and the camera starts rejecting the extra traffic (89 → 99 `e3` errors, a third of the values lost), which quietly corrupts the diff rather than failing loudly.
+
+- DUML example (GET pid `0x0009`): <https://b3yond.d3vl.com/duml/#551104920201020440028e00010900778d>
+- DUML example (**SET** pid `0x0009` = `01`, Wide): <https://b3yond.d3vl.com/duml/#551304030201020440028e01010900010189d4>
+- DUML example (**SET** pid `0x0009` = `05`, Natural-Wide): <https://b3yond.d3vl.com/duml/#551304030201020440028e010109000105ad92>
+- DUML example (**SET** pid `0x000f` = `04`, ISO 100-800): <https://b3yond.d3vl.com/duml/#551304030201020440028e01010f000104bec8>
+- DUML example (**SET** pid `0x000f` = `05`, ISO 100-1600): <https://b3yond.d3vl.com/duml/#551304030201020440028e01010f00010537d9>
+- DUML example (the datalink poll Mimo sends, GET pid `0x0014`): <https://b3yond.d3vl.com/duml/#55110492020100a040028e00011400a858>
 
 ### 15. Camera state query
 - Cmd Set / ID: `0x02` / `0xA0`  ·  cmd_type PUSH  ·  empty payload
@@ -409,8 +471,24 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 | `@0` | `u8` bitfield | **bit7 = recording** | `01` → `81` |
 | `@5` | `u32-LE` | storage total, MiB | unchanged |
 | `@9` | `u32-LE` | storage free, MiB | falls while recording |
-| `@17` | `u16-LE` | **remaining recordable seconds** | counts down |
+| `@17` | `u16-LE` | **remaining recordable seconds** | counts down (reads `0` in Photo mode) |
 | `@29` | `u16-LE` | **elapsed record time, seconds** | `0` → counts up |
+| `@57` | `u8` | **current shooting mode** (§13a encoding) | changes with the mode |
+| `@4` | `u8` | `1` = a video-ish mode, `0` = Photo | — |
+| `@13` | `u16-LE` | photos remaining | `0` outside Photo mode |
+
+**Worked example — the same camera in three modes**, selected by hand and read off the push (this is how the mode byte was pinned):
+
+| offset | Video | SlowMo | Photo | field |
+|--------|-------|--------|-------|-------|
+| `@57` | `01` | `00` | `05` | **shooting mode** — matches §13a exactly |
+| `@4` | `01` | `01` | `00` | video-vs-photo flag |
+| `@17` `u16-LE` | 1050 | 953 | **0** | remaining recordable seconds (meaningless in Photo) |
+| `@13` `u16-LE` | 0 | 0 | **5048** | photos remaining (meaningless outside Photo) |
+
+Note `@17` and `@13` are **mutually exclusive** — each reads 0 in the modes where it doesn't apply, so don't render either without checking `@4` or `@57` first, or a Photo-mode UI will show "0 seconds left".
+
+> **`@57` uses the *same* encoding as the `0x02/0xE1` write values — it is not a separate enum.** Worth stating because the opposite is an easy conclusion to reach: `@57` reads `01` in Video while a naive reading of a button-cycling test suggests Video is written as `00`. The tie-breaker is a log of writes against subsequent `@57` values — across ~20 writes the reported byte equalled the written byte every time, and the three modes in the table above then confirmed it against the camera's own screen. If the two ever appear to disagree, the mode→value mapping is what's wrong, not the encoding.
 
 - `@17`/`@29` are enough to drive a live recording timer and a "space left" readout without polling anything.
 - Quirks: reports the **active store only** (internal vs SD). Nano + Xtra.
