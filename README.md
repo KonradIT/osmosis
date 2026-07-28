@@ -35,11 +35,22 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 | Osmo Action 5 Pro / Xtra Edge Pro | Verified on hardware |
 | Osmo Action 6 | Verified on hardware |
 | Osmo Pocket 3 | Verified on hardware |
+| Xtra Atto / Edge / Muse (rebadged Nano / Action 4 / Pocket 3) | Untested — Xtra profile (10004, no poke) |
 | Osmo Action 1 | Started, parked |
 | Osmo 360 | Unplanned (WPA3 AP) |
 | Other DJI Osmo (Action 2 / 3 / 4, etc.) | Best-effort default |
 
-The datalink port and WiFi security are resolved from the camera's BLE **model byte**, not its brand — so an unrecognized DJI Osmo is *attempted*, not refused. Got one working (or broken)? [Open an issue](../../issues) so it can be listed as fully supported.
+The datalink port and WiFi security are resolved from the camera's BLE **model byte** — so an unrecognized DJI Osmo is *attempted*, not refused. Got one working (or broken)? [Open an issue](../../issues) so it can be listed as fully supported.
+
+**Xtra rebadges.** Xtra is a [DJI front company that sells rebadged Osmo cameras US-only to sidestep the DJI ban](https://github.com/KonradIT/dji-front-companies):
+- **Edge Pro** = Action 5 Pro
+- **Atto** = Nano
+- **Edge** = Action 4
+- **Muse** = Pocket 3.
+
+Each advertises the *same* BLE model id as its DJI twin but runs a **10004 / no-poke** datalink — a global change in the Xtra firmware's native datalink transport (confirmed by decompiling the Xtra app: the port is baked into the JNI transport lib, with no per-model logic). 
+
+The app flags a Xtra by its OUI `EC:9E:EA` and applies that profile, falling back to 9004 if wrong. Only the **Edge Pro** is hardware-verified; the rest are coded-but-untested.
 
 ## How it works
 

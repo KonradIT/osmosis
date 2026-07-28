@@ -50,21 +50,36 @@ data class CameraModel(
         )
 
         /**
+         * Xtra's shell-company product names for the DJI models they rebadge.
+         * Keyed by the shared DJI BLE model id — the Xtra units advertise the *same* id
+         * as the DJI original (confirmed on the Edge Pro / `0x0015`).
+         */
+        private val XTRA_NAMES: Map<Int, String> = mapOf(
+            0x0019 to "Xtra Atto",      // rebadged Osmo Nano
+            0x0014 to "Xtra Edge",      // rebadged Osmo Action 4
+            0x0015 to "Xtra Edge Pro",  // rebadged Osmo Action 5 Pro — the only Xtra we've verified
+            0x0020 to "Xtra Muse",      // rebadged Osmo Pocket 3
+        )
+
+        /**
          * Resolve by BLE model id, then the local name (the Pocket 3 sends no mfr data), then [brand].
          *
-         * **Why brand matters:** the Xtra Edge Pro is a rebadged Osmo Action 5 Pro and advertises the
-         * *same* model id `0x0015`, but 10004/no-poke was only ever confirmed on the **Xtra** — that
-         * looks like a rebrand firmware change, not a DJI one. So the genuine DJI unit keeps the
-         * DJI-standard 9004 + poke (now tester-confirmed on a real Action 5 Pro), and the Xtra —
-         * identified hardware-side by its own OUI `EC:9E:EA` — gets the 10004 quirk. If either guess
-         * is wrong the datalink retries [alternate] and logs which port actually answered.
+         * **Why brand matters:** the whole Xtra line runs a **10004 / no-poke** datalink, not the
+         * DJI-standard 9004 + poke — a rebrand *firmware* change. The Edge Pro advertises the *same*
+         * model id `0x0015` as a genuine Action 5 Pro (identical hardware) yet speaks 10004, and
+         * decompiling the Xtra app shows its datalink is a **native JNI transport with the port baked
+         * in as one global constant** — no per-model logic, no port passed from Java. So *every* Xtra
+         * unit (identified hardware-side by its own OUI `EC:9E:EA`) gets 10004/no-poke, while genuine
+         * DJI models keep 9004 + poke. If a guess is ever wrong the datalink retries [alternate] and
+         * logs which port answered. Only the Edge Pro is hardware-verified; the other Xtra rebadges are
+         * attempted-but-untested (no hardware to confirm).
          */
         fun resolve(modelId: Int?, name: String?, brand: Brand = Brand.UNKNOWN): CameraModel {
             val base = byIdOrName(modelId, name)
             if (brand != Brand.XTRA) return base
             val isEdgePro = modelId == 0x0015 || base.name.contains("Action 5")
             return base.copy(
-                name = if (isEdgePro) "Xtra Edge Pro" else "Xtra ${base.name}",
+                name = XTRA_NAMES[modelId] ?: if (isEdgePro) "Xtra Edge Pro" else "Xtra ${base.name}",
                 datalinkPort = 10004, tcpPoke = false, verified = isEdgePro,
             )
         }
@@ -72,14 +87,18 @@ data class CameraModel(
         private fun byIdOrName(modelId: Int?, name: String?): CameraModel {
             BY_ID[modelId]?.let { return it }
             val n = name?.lowercase()?.replace(" ", "").orEmpty()
+            // Xtra product names map to their DJI twin (Atto=Nano, Edge=Action 4, Edge Pro=Action 5
+            // Pro, Muse=Pocket 3). Matters for the mfr-data-less units (Pocket 3 / Muse) that only
+            // resolve by name — a bare "xtra" must NOT fall through to 0x0015 or the Muse reads as an
+            // Edge Pro. "edgepro" is tested before "edge" so the Pro isn't swallowed by the Action 4.
             return when {
-                n.contains("pocket3") -> BY_ID.getValue(0x0020)
+                n.contains("pocket3") || n.contains("muse") -> BY_ID.getValue(0x0020)
                 n.contains("pocket4") -> BY_ID.getValue(0x0021)
                 n.contains("360") -> BY_ID.getValue(0x0017)
-                n.contains("nano") -> BY_ID.getValue(0x0019)
+                n.contains("nano") || n.contains("atto") -> BY_ID.getValue(0x0019)
                 n.contains("action6") -> BY_ID.getValue(0x0018)
-                n.contains("action5") || n.contains("edge") || n.contains("xtra") -> BY_ID.getValue(0x0015)
-                n.contains("action4") -> BY_ID.getValue(0x0014)
+                n.contains("action5") || n.contains("edgepro") -> BY_ID.getValue(0x0015)
+                n.contains("action4") || n.contains("edge") -> BY_ID.getValue(0x0014)
                 n.contains("action3") -> BY_ID.getValue(0x0012)
                 n.contains("action2") -> BY_ID.getValue(0x0010)
                 else -> DEFAULT.copy(name = name?.takeIf { it.isNotBlank() } ?: DEFAULT.name)
