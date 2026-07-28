@@ -323,11 +323,31 @@ The record's int fields are small enum codes; these are the code→meaning table
 - Payload: `05ffffffff`
 - DUML example: <https://b3yond.d3vl.com/duml/#551204c7020300a04003da05ffffffff4490>
 
-### 8. Subscribe param
-- Cmd Set / ID: `0x00` / `0x99`  ·  App → DM368(`0x08`, id 1) — used over **BLE** as a control surface as well as the datalink (Mimo subscribes the same params over BLE; a single-frame group-subscribe variant also exists there, which we don't use)
-- Payload: `02020000 <sub_id:u32LE> 00000000 <len:u16LE> 00 <name_len:u8> 00 <name padded to 20> 00000000`
-- Sent once per param: `camcap_mode_profile`, `camcap_video_format`, `camcap_fov`, `camcap_iso`, `camcap_photo_storage_format`, `camcap_color_mode`, `cam_storage`, `cam_status`
-- DUML example (`cam_status`): <https://b3yond.d3vl.com/duml/#5536043d022800a040009902020000df690000000000001a00000a0063616d5f7374617475730000000000000000000000000000ffe6>
+### 8. Subscribe param ✅ *(hardware-verified over BLE — this is the settings surface)*
+- Cmd Set / ID: `0x00` / `0x99`  ·  App → DM368(`0x08`, id 1), `cmd_type 0x40`
+- **Works over BLE exactly as on the datalink** — ✅ confirmed on a Nano: 11 subscriptions produced **1243 pushes**. Each subscribe is ACKed `plen=10`, then the camera sends that parameter's value and every later change, unprompted.
+- **Subscribe payload — one frame PER PARAMETER, verb `0x02`:**
+```
+02 02 00 00 | sub_id:u32-LE | 00 00 00 | (name_len+6):u16-LE | name_len:u16-LE | <name ascii> | 00 00 00 00
+```
+  Corrections to the earlier spec here: the name-length field is **u16-LE, not u8**, and the name is **not padded to 20** — frames are variable length (`camcap_base` = 30 B, `camcap_photo_time_limited_burst_param` = 56 B). `sub_id` increments per subscription.
+- ⚠ **There is no working group subscribe.** A single `01 00 06 00 "camera"` (verb `0x01`) is **ACKed with `plen=0` and never sends an item** — indistinguishable from an unsupported channel, and it cost us days. Subscribe each name individually.
+- **Push payload — self-describing, so no `sub_id` bookkeeping is needed:**
+```
+02 06 00 00 | idx:u32-LE | 00 00 00 | total_len:u16-LE | name_len:u16-LE | <name> | 00 x6 | value_len:u16-LE | <value>
+```
+- 🔑 **Naming rule: `camcap_*` = what the body SUPPORTS (a capability table); `cam_*` = the CURRENT value.** Subscribing to `camcap_fov`/`camcap_eis` gives you the supported modes and never the active setting. (Learned the hard way.)
+
+**Decoded values** (Nano, ✅ hardware-verified):
+
+| name | contents |
+|------|----------|
+| `cam_video_param_v2` | **`[resolution:u8][fps_idx:u8]…`** — the live video setting. `67 02` = res 103 (4K 4:3) @ fps idx 2 (25 fps). Codes match §1's `VideoResolution`/`VideoFrameRate` tables. |
+| `camcap_video_format` | **capability list**: `01 \| len:u16-LE \| count:u8 \| count × [res:u8][fps_idx:u8][flags:u8]`. Self-validating (`3×35+1 = 106` = declared len). Nano returns 35 pairs — 4K 16:9, 2.7K 16:9, 2.7K 4:3, 1080p and res `0x0c` at 24–60; **4K 4:3 caps at 50**. `0x0c` (12) is not in the known resolution enum. |
+| `cam_storage` 40 B · `cam_status` 9 B · `cam_record_time` 6 B · `cam_image_effect` 16 B · `cam_lens_state` 66 B · `cam_custom_mode_params` 161 B | present, not yet decoded |
+
+- **All 53 names Mimo subscribes** (the complete settings surface): `camcap_base camcap_video_format camcap_fov camcap_iso camcap_photo_storage_format camcap_color_mode camcap_wb camcap_photo_size camcap_video_codec camcap_shutter camcap_photo_timer_interval camcap_exposure_mode camcap_zoom camcap_antiflicker camcap_sharpness camcap_denoise camcap_aperture camcap_shutter_max camcap_eis camcap_iso_auto_max camcap_loop_video_duration camcap_hyperlapse_ratio camcap_slowmotion_ratio camcap_timelapse_duration camcap_countdown camcap_photo_time_limited_burst_param camcap_capture_aspect_type camcap_style_filter_mode cam_storage cam_status cam_record_time cam_expo_param shutter_param cam_photo_param_new cam_lapse_param cam_video_param_v2 cam_image_effect v_quality_enhance_status cam_fov cam_lens_state cam_audio_status_v2 audio_timecode_status temp_curve camcap_common cam_imu_calib_info timecode_info cam_custom_mode_params cam_super_slowmotion_status media_file_sync upgrade_status cam_capture_aspect_type gui_autorecord_param cam_style_filter_status`
+- DUML example (`cam_status`, original capture): <https://b3yond.d3vl.com/duml/#5536043d022800a040009902020000df690000000000001a00000a0063616d5f7374617475730000000000000000000000000000ffe6>
 
 ### 9. Get version
 - Cmd Set / ID: `0x00` / `0x00`  ·  App → DM368(`0x08`, id 2), cmd_type `4`
@@ -390,6 +410,7 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 - ✅ **Readback:** the camera echoes the current mode in its `0x02/0x80` push at **byte `@57`**, in this same encoding — verified across ~20 writes with zero mismatches, and every value above was then confirmed by selecting that mode by hand and reading the byte. So mode is both settable and observable, and a remote stays in sync when the user changes it on the camera.
 - 🚫 **Do NOT sweep the value space.** Walking `0x00`–`0xFF` to discover the rest of the enum **froze a Nano solid** (power-cycle required). Unknown values are *not* harmlessly rejected. Read the mode out of `@57` instead of probing for it.
 - Why Photo never appears in the capture: the camera **booted into it**, so Mimo never needed to write `0x05`.
+- ⚠️ **`0x02/0xE1` is probably a general camera-*action* command, not only "set mode".** `lib-osmo-ble/PROTOCOL.md` documents the same cmdId with payload `[0x1A]` as *PrepareToLiveStream*. That reconciles with the sparse, unordered value set above: some values select a shooting mode, others trigger actions. So treat unlisted values as unknown actions — and **do not sweep them** (see the freeze warning).
 
 ### 14. Camera parameters — `0x02/0x8E` GET **and SET** ✅ *(the writable control surface over BLE)*
 
