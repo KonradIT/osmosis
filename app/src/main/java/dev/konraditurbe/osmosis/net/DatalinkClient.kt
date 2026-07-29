@@ -78,6 +78,7 @@ class DatalinkClient(
     @Volatile var moreAvailable = false
         private set
 
+
     /**
      * Open the udp/[port] datalink and bring the session up to the point commands are accepted: TCP
      * poke, handshake (retry until the camera answers), drain heartbeats to learn its channel + start
@@ -784,8 +785,11 @@ class DatalinkClient(
                     bytes[q + 1] == 0x19.toByte() && bytes[q + 2] == 0x06.toByte()
                 ) {
                     val mk = q + 1                                   // index of the 19 06 pair
-                    if (mk >= 14) photoSize = u32le(bytes, mk - 14)
-                    if (mk + 66 <= bytes.size) {
+                    if (mk >= 14) photoSize = u32le(bytes, mk - 14)  // size is pre-marker → both layouts
+                    // Pixel W×H sit AFTER the marker — only in the DJI-proper (Nano) layout. The CAM_
+                    // family (Xtra/Action) put the path there, so leave it null → the preview falls back
+                    // to decoding the JPEG bounds.
+                    if (base.startsWith("DJI_") && mk + 66 <= bytes.size) {
                         val w = u32le(bytes, mk + 58).toInt(); val h = u32le(bytes, mk + 62).toInt()
                         if (w in 1..60000 && h in 1..60000) photoRes = "${w}x${h}"
                     }
@@ -802,10 +806,12 @@ class DatalinkClient(
         // (above). Ground-truth-verified byte-exact against the SD card (video) and HTTP (photo).
         val size = if (isVideo && hasMarker && head >= 4) u32le(bytes, head - 4) else photoSize
         val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, hi) else null
-        // Video duration in whole seconds = u16-LE at marker+26 (= head+34). Matches floor(moov ms/1000)
-        // 16/16 across a varied-length clip set — enough for the mm:ss label (kills the moov duration read).
-        val durationSec = if (isVideo && hasMarker && head + 36 <= bytes.size)
-            (bytes[head + 34].toInt() and 0xFF) or ((bytes[head + 35].toInt() and 0xFF) shl 8) else 0
+        // Video duration in whole seconds = u16-LE at **marker-4** (= head+4), immediately before the
+        // frameRate/resolution codes: `… [dur:u16-LE][fps:u8][res:u8] 03 ff 19 06 …`. Universal —
+        // ground-truthed 16/16 on the Nano and 3/3 on the Xtra (incl. a 75 s clip). NB the Nano also
+        // mirrors it at marker+26; that copy does NOT exist on the CAM_ family, so read it here.
+        val durationSec = if (isVideo && hasMarker && head + 6 <= bytes.size)
+            (bytes[head + 4].toInt() and 0xFF) or ((bytes[head + 5].toInt() and 0xFF) shl 8) else 0
         // ⭐ starTag and the resolution index, both u8, ground-truth-verified against the SD card.
         // The star byte sits 9 bytes past the record's `[ff|fe] 19 06` marker (videos use `03 ff 19 06`,
         // photos a `fe 19 06` variant); the resolution index is at marker-1 (video header only).

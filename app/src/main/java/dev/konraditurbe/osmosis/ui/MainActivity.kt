@@ -113,15 +113,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             f.copy(path = it, thumbPath = data.getStringExtra(MediaPreviewActivity.EXTRA_GROUP_SEL_THUMB) ?: f.thumbPath)
         }
         ad.setQueued(pos, queued, if (s >= 0 && e > s) TrimRange(s, e) else null, member)
-
-        // Favorite toggle from the preview → fire the 0x02/0xbf write over the live session (off-UI).
-        // Handle is the favorite index 0x40100000 + seq*0x40 (videos already carry it; photos decode to 0).
-        val starred = data.getBooleanExtra(MediaPreviewActivity.EXTRA_STARRED, f.starred)
-        if (starred != f.starred) {
-            val favHandle = if (f.handle != 0L) f.handle else 0x40100000L + f.seq.toLong() * 0x40L
-            ad.setStarred(pos, starred)   // optimistic; the write runs in a fresh session below
-            datalink?.let { dl -> favExec.execute { dl.setFavorite(favHandle, starred) } }
-        }
+        // Favorite lives on the grid long-press now (see onGridLongPress), not the preview — the preview
+        // no longer touches the datalink, so it can't perturb the browse keep-alive.
     }
 
     // The datalink session keeps the camera AP alive (the Action 5 sleeps its AP the moment the
@@ -909,19 +902,41 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     /**
-     * Long-press a cell → delete that file from the camera (DUML 0x00/0x28). Guarded by a confirm
-     * dialog and irreversible; only offered when the manifest yielded a delete handle for the file.
-     * The delete rides the open datalink (single socket owner is the keep-alive thread).
+     * Long-press a cell → an actions dialog: **Favorite/Unfavorite** (DUML 0x02/0xbf) and, when the file
+     * has a delete handle, **Delete** (0x00/0x28). Both are camera writes run off the UI thread. Keeping
+     * these on the grid (not the preview) means the preview never touches the datalink.
      */
     private fun onGridLongPress(position: Int) {
         val ad = adapter ?: return
         val f = ad.getItem(position)
-        if (!f.deletable) {
-            logLine("Delete: no handle for ${f.name} — not deletable.")
-            toast("Can't delete ${f.name} — no handle")
-            return
+        val dl = datalink ?: run { logLine("Long-press: no live datalink session."); toast("Not connected"); return }
+        val fav = if (f.starred) "Unfavorite" else "Favorite"
+        val actions = if (f.deletable) arrayOf(fav, "Delete") else arrayOf(fav)
+        AlertDialog.Builder(this)
+            .setTitle(f.name)
+            .setItems(actions) { _, which ->
+                if (actions[which] == "Delete") confirmDelete(position, f, dl) else toggleFavorite(position, f, dl)
+            }
+            .show()
+    }
+
+    /** Toggle the camera's ⭐ favorite for [f] (DUML 0x02/0xbf). Optimistic grid badge; the write runs on
+     *  the serialized favorite worker and reverts the badge on failure. */
+    private fun toggleFavorite(position: Int, f: CameraFile, dl: DatalinkClient) {
+        val on = !f.starred
+        val favHandle = if (f.handle != 0L) f.handle else 0x40100000L + f.seq.toLong() * 0x40L
+        // Optimistic badge only — the camera's manifest is the single source of truth for star state, so a
+        // reload shows whatever the camera reports (the Xtra reports none; that's fine, we don't fake it).
+        adapter?.setStarred(position, on)
+        toast(if (on) "Favoriting ${f.name}…" else "Unfavoriting ${f.name}…")
+        favExec.execute {
+            val ok = runCatching { dl.setFavorite(favHandle, on) }.getOrDefault(false)
+            if (!ok) main.post { adapter?.setStarred(position, !on); toast("Favorite failed") }
         }
-        val dl = datalink ?: run { logLine("Delete: no live datalink session."); return }
+    }
+
+    /** Confirm + delete [f] from the camera (DUML 0x00/0x28) — irreversible, so it's gated by a dialog. */
+    private fun confirmDelete(position: Int, f: CameraFile, dl: DatalinkClient) {
         val hx = "0x%08x".format(f.handle)
         AlertDialog.Builder(this)
             .setTitle("Delete from camera?")

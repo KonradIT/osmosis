@@ -313,6 +313,13 @@ The record's int fields are small enum codes; these are the code→meaning table
 - **Session** — like delete (#2) this is a *write* the browse keep-alive silently drops, and the capture shows Mimo only ever favorites with **playback mode active** (`0x02/0x0c` payload `01 01 00 01`, the same mode paging uses). Run it in a fresh datalink session: register → enter playback → send → read the `00` ack. Verified on a Nano — survives a reconnect.
 - DUML example (favorite handle `0x40104040`, seq 0257): <https://b3yond.d3vl.com/duml/#551c041b0201befd4002bf0101404010400100000000010000008c88>
 
+### 3a. Highlight / moment marks — `0x02/0xff` ✅
+- Cmd Set / ID: `0x02` / `0xff`  ·  App → Camera(`0x01`), datalink  ·  the SDK's generic `camera_expansion_cmd` (`PullHighLightAction`)
+- Request: `40 2f 00 01 0b 00 00 00 [handle:u32-LE] 00 00` — `handle` = the video's manifest delete-handle (§2).
+- Reply: `00 · 40 2f 00 01 · [len:u32-LE] · [handle:u32-LE] · [count:u8] · 00 · { 00 [startTimeMs:u32-LE] } × count`. Count at reply byte 13, first mark at 16, stride 5.
+- **Read-only**, so unlike delete/favorite it runs fine inline on the live session (pause keep-alive, query, resume — `DatalinkClient.getHighlights`). Each mark is a `startTimeMs` (ms); no separate duration was distinguishable, so marks read as points.
+- **RE'd + hardware-verified** from an Xtra pcap (2026-07-29): a 2-mark clip returned `4000, 7000` ms and a 3-mark clip `1000, 3000, 5000` ms, matching the app's trim view exactly. Xtra handles are `0x4004xxxx`; the Nano's `0x4010xxxx` use the same command. See ROADMAP #7.
+
 ---
 
 ## Datalink session (sent before the list, over UDP)
@@ -350,13 +357,16 @@ The record's int fields are small enum codes; these are the code→meaning table
 02 06 00 00 | idx:u32-LE | 00 00 00 | total_len:u16-LE | name_len:u16-LE | <name> | 00 x6 | value_len:u16-LE | <value>
 ```
 - 🔑 **Naming rule: `camcap_*` = what the body SUPPORTS (a capability table); `cam_*` = the CURRENT value.** Subscribing to `camcap_fov`/`camcap_eis` gives you the supported modes and never the active setting. (Learned the hard way.)
+- ⏱ **`cam_*` values re-push continuously (~0.5–1 Hz on a Nano); `camcap_*` tables are sent once, right after the subscribe.** So a capability table is easy to *miss* — a subscribed `camcap_photo_size` never arrived across several minutes of capture on a Nano while `cam_photo_param_new` pushed 68 times, most likely dropped in the burst that follows connect. If you need a `camcap_*` table, be ready to receive it in that first burst or re-subscribe to ask again.
+- 🧪 **Method for an unmapped `cam_*` value: A→B→A on hardware.** Log the value at rest, change exactly ONE setting on the camera, change it back, and keep only the byte that moved *and returned*. Both `cam_photo_param_new` fields below were pinned this way in two runs (44/12 and 35/13 pushes) — a byte that moves once is drift, not the field. Never sweep a value space to find codes faster: enumerating `0x02/0xE1` froze a Nano solid.
 
 **Decoded values** (Nano, ✅ hardware-verified):
 
 | name | contents |
 |------|----------|
 | `cam_video_param_v2` | **`[resolution:u8][fps_idx:u8]…`** — the live video setting. `67 02` = res 103 (4K 4:3) @ fps idx 2 (25 fps). Codes match §1's `VideoResolution`/`VideoFrameRate` tables. |
-| `camcap_video_format` | **capability list**: `01 \| len:u16-LE \| count:u8 \| count × [res:u8][fps_idx:u8][flags:u8]`. Self-validating (`3×35+1 = 106` = declared len). Nano returns 35 pairs — 4K 16:9, 2.7K 16:9, 2.7K 4:3, 1080p and res `0x0c` at 24–60; **4K 4:3 caps at 50**. `0x0c` (12) is not in the known resolution enum. |
+| `camcap_video_format` | **capability list**: `01 \| len:u16-LE \| count:u8 \| count × [res:u8][fps_idx:u8][flags:u8]`. Self-validating (`3×35+1 = 106` = declared len). Nano returns 35 pairs — 4K 16:9, 2.7K 16:9, 2.7K 4:3, 1080p and res `0x0c` at 24–60; **4K 4:3 caps at 50**. `0x0c` (12) = **1920×1440 (1080p 4:3)** per §1's verified Resolution table — the same enum, so the capability list and the manifest read through one another. |
+| `cam_photo_param_new` | **the live PHOTO setting** (24 B) — `[?][0x15][00][size:u8][aspect:u8]…`, i.e. **size @ byte 3, aspect ratio @ byte 4**. `02 15 00 04 00 …` = L, 4:3. Sizes are the camera's own **letter** labels, *not* megapixels (the pixel count differs per body), and they do **not** use §1's `VideoResolution` enum. Size `0x03` = M, `0x04` = L — **a Nano offers only these two, there is no S**, so the size enum is complete for this body; expect other bodies to add codes rather than reuse these. Aspect `0x00` = 4:3, `0x01` = 16:9. Needed because `cam_video_param_v2` keeps reporting the *video* resolution while the camera sits in photo mode, so a UI that reads it in photo mode shows a wrong spec. |
 | `cam_storage` 40 B · `cam_status` 9 B · `cam_record_time` 6 B · `cam_image_effect` 16 B · `cam_lens_state` 66 B · `cam_custom_mode_params` 161 B | present, not yet decoded |
 
 - **All 53 names Mimo subscribes** (the complete settings surface): `camcap_base camcap_video_format camcap_fov camcap_iso camcap_photo_storage_format camcap_color_mode camcap_wb camcap_photo_size camcap_video_codec camcap_shutter camcap_photo_timer_interval camcap_exposure_mode camcap_zoom camcap_antiflicker camcap_sharpness camcap_denoise camcap_aperture camcap_shutter_max camcap_eis camcap_iso_auto_max camcap_loop_video_duration camcap_hyperlapse_ratio camcap_slowmotion_ratio camcap_timelapse_duration camcap_countdown camcap_photo_time_limited_burst_param camcap_capture_aspect_type camcap_style_filter_mode cam_storage cam_status cam_record_time cam_expo_param shutter_param cam_photo_param_new cam_lapse_param cam_video_param_v2 cam_image_effect v_quality_enhance_status cam_fov cam_lens_state cam_audio_status_v2 audio_timecode_status temp_curve camcap_common cam_imu_calib_info timecode_info cam_custom_mode_params cam_super_slowmotion_status media_file_sync upgrade_status cam_capture_aspect_type gui_autorecord_param cam_style_filter_status`
@@ -406,6 +416,9 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 - Reply `0x02/0x01` (ack, `cmd_type 0xc0`) with payload `00` = success.
 - **Fire-and-forget, one press = one capture in the camera's *current* photo mode.** Ground-truthed from a Mimo↔Nano pcap: two presses (`[01]` each, ~40 ms round-trip) produced the two new files that followed — one a single JPEG, one a 6-frame burst — so `[01]` is a generic shutter *trigger*, **not** the photo type. The mode (single / burst / interval / HDR / …) is set separately; the camera completes a burst/interval on its own (no stop press, unlike record §11/§12).
 - Symmetric with record: photo = `0x02/0x01 [01]` (shoot); record = `0x02/0x02 [01]`/`[00]` (start/stop).
+- ✅ **Confirmed on ESP32/BLE (Nano):** `[01]` is required — an **empty** payload answers `e3` (parameter missing), and `[01]` sent while the camera is in a *video* shooting mode answers `d9` (wrong state), never `e0`. So set the shooting mode first (§13a `0x02/0xE1 [05]`); `d9` here means "right command, wrong mode", not "unsupported".
+
+> ⚠️ **Same opcodes ≠ same reachability.** A Mimo↔**Xtra** datalink capture shows the Xtra accepting this exact set — `0x02/0x01 [01]`, `0x02/0x02 [01]`/`[00]`, `0x02/0xE1 [mode]`, all acked `00` — so the Action family does **not** use a different command set. But over **BLE** an Xtra answers every other receiver we address (`0x07` pairing, `0x1C` wake, `0x28` config, `0x88`) and streams `0x02/0x80` *from* `src=0x01`, while frames sent **to** receiver `0x01` get total silence — where a Nano on the same session replies to each. Camera reachable outbound, mute inbound: the BLE path needs something the datalink path does not. Do not read a datalink capture as proof that a command will route over BLE.
 
 ### 13. Set mode — ⚠️ *this is the **work** mode, not the shooting mode (see §13a)*
 - Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[mode:u8]`

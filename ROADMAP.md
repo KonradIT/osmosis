@@ -7,8 +7,8 @@ below, see [docs/01-protocol-map.md](docs/01-protocol-map.md).
 and **Pocket 3** (all datalink UDP 9004 + poke), plus the **Xtra Edge Pro** rebrand (UDP 10004, no poke).
 Full pipeline: BLE pair → wake AP → media list → thumbnail grid → LRF preview + download queue →
 resumable high-res `/v2` downloads, across **internal *and* SD** (both stores listed and labelled).
-fps, **byte size**, **resolution** and **⭐ starred** all come from the DUML manifest (no HTTP `HEAD`);
-only clip **duration** still needs the MP4 `moov`. Also shipped (v0.5): **delete a file off the camera**
+fps, **byte size**, **resolution**, **duration** and **⭐ starred** all come from the DUML manifest —
+**no MP4 `moov` parse and no HTTP `HEAD`** anywhere in the browse path. Also shipped (v0.5): **delete a file off the camera**
 (long-press → confirm, DUML `0x00/0x28` — #4) and **R-SDK GPS sync** (🛰️ toggle, streams the phone's
 GPS into the camera over BLE — #9, hardware-verified on an Action 5 Pro).
 
@@ -90,9 +90,14 @@ Status per model:
 - **✅ frameRate, resolution, ⭐ starred — all off the manifest now (2026-07-24):** `frameRate` at
   `marker−2`, `resolution` at `marker−1` (a **DJI-wide** video-format index — Nano and Xtra emit the
   same codes; ground-truthed by ffprobe: `95`=2.7K 4:3, `103`=4K 4:3, `10`=1080p, `16`=4K 16:9,
-  `45`=2.7K 16:9), and the `MediaFileStarTag` at `[ff|fe] 19 06 + 9` (Nano videos + photos; **the Action
-  family carries no star flag**, so it degrades to "none"). The star renders in the grid. **Only
-  `duration` is still unmapped** — the one field keeping the MP4 `moov` parse alive.
+  `45`=2.7K 16:9, `12`=1080p 4:3), and the `MediaFileStarTag` at `[ff|fe] 19 06 + 9` (Nano videos + photos;
+  **the Action family carries no star flag**, so it degrades to "none"). The star renders in the grid.
+- **✅ duration — the last field, mapped (2026-07-29):** `u16-LE @ marker−4` (whole **seconds**), sitting
+  immediately before the fps/resolution codes: `… [dur:u16][fps:u8][res:u8] 03 ff 19 06 …`. Ground-truthed
+  **16/16 on the Nano and 3/3 on the Xtra**. With it the **MP4 `moov` parse is deleted** — every grid/preview
+  value now comes from the manifest. (Beware: the Nano *mirrors* duration at `marker+26`, the Xtra does not —
+  reading the mirror showed every Xtra clip as `201:21`, which is `"1/"` out of `CAM_001/`. Anchor record
+  windows on the **media-path** fields like the decoder does; filename-anchored windows drift a record.)
 - **✅ Internal + SD, both stores (2026-07-24):** the manifest is **two concatenated per-storage lists**
   (SD first, then internal), each with its own `[u32 count][u32 size][u32 ts]` header — proven because a
   no-card manifest is byte-identical to the mixed manifest's *second* list. Storage is now resolved
@@ -296,28 +301,36 @@ resume. Diagnosis came from an app log + a decrypted **RTOS** log. Below, findin
 
 **Resume artifacts:** `reference/osmo-action/` (raw list blob + RTOS log).
 
-## 7. Retrieve highlight / moment markers — 🔬 RE'd to the SDK, cmd id blocked — ⏸️ PARKED (2026-07-15)
+## 7. Retrieve highlight / moment markers — ✅ PROTOCOL SOLVED, ⏸️ UI blocked on #12 (2026-07-29)
 
 DJI "highlight" marks (side-button presses during recording) are **NOT stored in the MP4** — proven
 by an exhaustive teardown of an Action 4 + Xtra clip: not in chapters/tags, not in the `dvtm` protobuf
 metadata track (per-frame telemetry only — orientation quat, ISO, shutter, WB), not in the `dbgi`
 (sensor-debug) track, not in `udta`, not as HEVC SEI. They live **on the camera** and are pulled on
-demand — confirmed because the Xtra app shows them in its *trim/editor* view (not playback).
+demand — the Xtra app shows them in its *trim/editor* view.
 
-**Mechanism (RE'd from `libxtrasdk_jni.so`):**
-- KeyHandler **`PullHighLightAction`** → `SendGetPack<xtra::core::set_camera_expansion_cmd_pack>` — a
-  **generic `camera_expansion_cmd`** DUML command with **sub-type `0x4`** (from the disasm:
-  `orr w1, wzr, #0x4`). The same generic cmd serves `PullSuperSlowMotionPointAction`,
-  `PanoFusionTypeGet`, etc. — different sub-types.
-- Response `camera_expansion_cmd_rsp` → `xtra::sdk::HighLightMsg` = a list of
-  **`HighLightItem { startTimeMs, duration }`** (each mark is a time *range*, not a point). Surfaced to
-  Kotlin as `LctHighLightMsg`/`LctHighLightItem` (`getHighLightStartTimeMs`/`getHighLightDuration`).
-- **Read-only** (unlike delete) → safe to probe empirically once the cmd is known.
+**The command is `0x02/0xff`** (the SDK's generic `camera_expansion_cmd`; `PullHighLightAction`).
+RE'd empirically from a PCAPdroid capture of the Xtra app opening two marked clips' trim views —
+which matched hardware ground truth byte-for-byte (a 2-mark clip → 4000/7000 ms; a 3-mark clip →
+1000/3000/5000 ms). Read-only, so we run it inline on the live datalink (pause the keep-alive, query,
+resume — `DatalinkClient.getHighlights`).
 
-**Missing:** the numeric **cmdset/cmdid of the generic `camera_expansion_cmd`** (buried in the pack
-serialization, same wall as #4). Blocked on the same two paths — a live datalink capture (infeasible,
-see #4) or a Ghidra trace. Parked. Resume with a capture (over-the-air/root) of the Xtra app opening a
-marked clip's trim view, or Ghidra on `SendGetPack<set_camera_expansion_cmd_pack>`.
+```
+request  0x02/0xff → Camera(0x01):  40 2f 00 01 0b 00 00 00 [handle:u32-LE] 00 00
+reply    0x02/0xff:  00 · 40 2f 00 01 · [len:u32-LE] · [handle:u32-LE] · [count:u8] · 00 ·
+                     { 00 [startTimeMs:u32-LE] } × count     # count @ byte 13, first mark @ 16, stride 5
+```
+- `handle` = the video's manifest delete-handle (§2). `startTimeMs` = mark start in ms (we show whole
+  marks; a `duration` field wasn't distinguishable in the reply — the marks read as points).
+
+**Why there's no UI yet.** The camera only answers `0x02/0xff` on a **freshly registered session** — on the
+live browse session it silently ignores it (proven: the request goes out byte-identical to the app's, and
+status polls on the same sequence *are* answered). Doing a teardown+re-register per video open worked but
+the churn **destabilized the Xtra**: the manifest's two-storage split collapsed (every file stamped
+`storage=0` → internal-storage thumbnails and previews 404'd), and it persisted across reconnects. So the
+implementation was **removed rather than left dormant** — the byte spec above (and MEDIA_PROTOCOL §3a) is
+the deliverable. Re-add it (~30 lines: query + parse + a row of tappable ⚑ m:ss chips that seek) once **#10**
+lands a faithful session, where it runs inline with no re-registration.
 
 ## 8. Camera control + live settings (mode / resolution / fps, shutter) — 🔬 R-SDK read done via #9; media-path read + all control unimplemented
 
@@ -450,7 +463,25 @@ attractive for bulk transfers and for cameras/phones where the AP hop is flaky.
   phone.
 - **Why it's worth it:** no AP, no pairing, no password — just plug in and pull, at USB speed.
 
-## 12. Persistent playback mode for instant pagination — 🔬 IDEA
+## 12. Faithful long-lived session (persistent playback + in-window `udpSeq`) — 🔬 NEXT UP, unblocks #7 & more
+
+> **This is the keystone item.** Every "fresh registered session" workaround in the app — paging, delete,
+> favorite, and the highlight pull (#7) — exists because our session drifts out of the camera's accept
+> window. Worse, the churn is actively harmful: repeated teardown/re-register **destabilized an Xtra** so
+> its manifest's two-storage split collapsed (all files stamped `storage=0` → half the thumbnails/previews
+> 404'd), persisting across reconnects. Fixing the session removes the workarounds *and* the fragility.
+>
+> **The diagnosis.** We set `udpSeq = lastCamSeq + 8` at registration, then advance it only when *we*
+> send. The camera meanwhile floods telemetry (`0x00/0x99`, `0x02/0x80`) and races its own sequence ahead,
+> so ours falls behind the write-accept window: reads still answer, writes and expansion commands are
+> silently dropped. Mimo/Xtra keep the two locked with a constant heartbeat, which is why *their* delete,
+> favorite, highlight and pagination all work inline on one session with no pauses.
+>
+> **The fix:** re-derive `udpSeq` from the camera's current `lastCamSeq` on every keep-alive tick (track
+> the camera instead of drifting), hold playback mode for the whole browse session, and mirror Mimo's
+> fuller heartbeat set (`0x02/0x8e` for each subsystem id it polls: 06,08,09,0f,14,15,18,1f,20,28,29 —
+> we only send `14`). Then convert each command back to inline and re-verify on-device one at a time.
+> Ground truth for all of it is in the `reference/` pcaps (Nano + Xtra).
 
 The media list only paginates while the camera is in **playback mode** (`0x02/0x0c` `01 01 00 01`;
 `01 01 00 00` leaves). We enter it **only for the duration of a fetch** — once on the initial

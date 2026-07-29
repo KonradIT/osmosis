@@ -167,33 +167,8 @@
                     android:textColor="#FFFFFF"
                     android:textSize="16sp"
                     android:textStyle="bold" />
-
-                <!-- Favorite / heart toggle, right of the ] end-trim marker. -->
-                <Button
-                    android:id="@+id/btnStar"
-                    style="?android:attr/borderlessButtonStyle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="4dp"
-                    android:minWidth="48dp"
-                    android:text="☆"
-                    android:textColor="#FFFFFF"
-                    android:textSize="20sp" />
             </LinearLayout>
         </LinearLayout>
-
-        <!-- Photos have no trim row, so their favorite toggle lives here (right-aligned above Queue). -->
-        <Button
-            android:id="@+id/btnStarPhoto"
-            style="?android:attr/borderlessButtonStyle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="end"
-            android:minWidth="48dp"
-            android:text="☆"
-            android:textColor="#FFFFFF"
-            android:textSize="22sp"
-            android:visibility="gone" />
 
         <!-- Burst / interval frame strip: a centered 1×n row of thumbnails, built in code; the selected
              frame gets an accent border and is what "Add to Queue" queues. Shown only for a group. -->

@@ -48,8 +48,6 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var btnQueue: Button
     private lateinit var btnMarkIn: Button
     private lateinit var btnMarkOut: Button
-    private lateinit var btnStar: Button       // favorite toggle (video: next to ]; photo: above Queue)
-    private lateinit var btnStarPhoto: Button
     private lateinit var trimRow: View
     private lateinit var controls: View
     private lateinit var seekBar: SeekBar
@@ -64,7 +62,6 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var ip = "192.168.2.1"
     private var position = -1
     private var queued = false
-    private var starred = false
     private var resTag: String? = null // resolution label, from the manifest (video enum / photo W×H)
     private var streamCandidates: List<String> = emptyList() // preview URLs, cheapest first
     private var streamIdx = 0          // which candidate we're currently trying
@@ -88,7 +85,6 @@ class MediaPreviewActivity : AppCompatActivity() {
         ip = intent.getStringExtra(EXTRA_IP) ?: "192.168.2.1"
         position = intent.getIntExtra(EXTRA_POSITION, -1)
         queued = intent.getBooleanExtra(EXTRA_QUEUED, false)
-        starred = intent.getBooleanExtra(EXTRA_STARRED, false)
         trimStartMs = intent.getLongExtra(EXTRA_TRIM_START, -1L)
         trimEndMs = intent.getLongExtra(EXTRA_TRIM_END, -1L)
         groupPaths = intent.getStringArrayListExtra(EXTRA_GROUP_PATHS) ?: emptyList()
@@ -105,8 +101,6 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnQueue = findViewById(R.id.btnQueue)
         btnMarkIn = findViewById(R.id.btnMarkIn)
         btnMarkOut = findViewById(R.id.btnMarkOut)
-        btnStar = findViewById(R.id.btnStar)
-        btnStarPhoto = findViewById(R.id.btnStarPhoto)
         trimRow = findViewById(R.id.trimRow)
         controls = findViewById(R.id.controls)
         seekBar = findViewById(R.id.seekBar)
@@ -130,15 +124,9 @@ class MediaPreviewActivity : AppCompatActivity() {
             publishResult()
         }
 
-        val onStar = View.OnClickListener { toggleStar() }
-        btnStar.setOnClickListener(onStar)
-        btnStarPhoto.setOnClickListener(onStar)
-        renderStar()
-
         when {
             file.isVideo -> { setupTrim(); loadVideo() }
             file.isImage -> {
-                btnStarPhoto.visibility = View.VISIBLE
                 resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
                 if (groupPaths.size > 1) setupBurstStrip()   // frames came from the DUML group-expand
                 loadPhoto()
@@ -184,20 +172,6 @@ class MediaPreviewActivity : AppCompatActivity() {
     /** URL of the frame currently shown — a group's selected frame, or the single file. */
     private fun currentUrl(): String =
         if (groupPaths.isNotEmpty()) "/v2?storage=${file.storage}&path=${groupPaths[selectedFrame]}" else file.urlPath()
-
-    /** Toggle favorite locally (optimistic) and publish it — MainActivity fires the 0x02/0xbf write. */
-    private fun toggleStar() {
-        starred = !starred
-        renderStar()
-        publishResult()
-    }
-
-    private fun renderStar() {
-        val glyph = if (starred) "★" else "☆"
-        val color = if (starred) 0xFFFFC107.toInt() else 0xFFFFFFFF.toInt()
-        btnStar.text = glyph; btnStar.setTextColor(color)
-        btnStarPhoto.text = glyph; btnStarPhoto.setTextColor(color)
-    }
 
     private fun hasTrim() = trimStartMs >= 0 && trimEndMs > trimStartMs
 
@@ -350,10 +324,11 @@ class MediaPreviewActivity : AppCompatActivity() {
             val bytes = runCatching { http.getBytes(url) }.getOrNull()
             var bmp: Bitmap? = null
             if (bytes != null) {
-                // Bounds are decoded only to pick a safe downsample factor — the resolution shown comes
-                // from the manifest (set in onCreate), not from decoding the JPEG.
+                // Bounds are decoded to pick a safe downsample factor; they also backfill the resolution
+                // label for the CAM_ family (Xtra/Action), whose manifest photo dims we don't decode.
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                if (resTag == null && bounds.outWidth > 0) resTag = "${bounds.outWidth}×${bounds.outHeight}"
                 var sample = 1
                 while (bounds.outWidth / sample > dm.widthPixels || bounds.outHeight / sample > dm.heightPixels) sample *= 2
                 bmp = runCatching {
@@ -398,7 +373,6 @@ class MediaPreviewActivity : AppCompatActivity() {
         setResult(RESULT_OK, Intent().apply {
             putExtra(EXTRA_POSITION, position)
             putExtra(EXTRA_QUEUED, queued)
-            putExtra(EXTRA_STARRED, starred)
             putExtra(EXTRA_GROUP_SEL_PATH, selPath)
             putExtra(EXTRA_GROUP_SEL_THUMB, selPath?.let { groupThumbs.getOrNull(selectedFrame) })
             putExtra(EXTRA_TRIM_START, if (hasTrim()) trimStartMs else -1L)
@@ -427,7 +401,6 @@ class MediaPreviewActivity : AppCompatActivity() {
         private const val EXTRA_IP = "ip"
         const val EXTRA_POSITION = "position"
         const val EXTRA_QUEUED = "queued"
-        const val EXTRA_STARRED = "starred"
         const val EXTRA_GROUP_SEL_PATH = "group_sel_path"    // out: viewed burst frame's path (queue this)
         const val EXTRA_GROUP_SEL_THUMB = "group_sel_thumb"  // out: …and its thumb path
         private const val EXTRA_GROUP_PATHS = "group_paths"
@@ -448,7 +421,6 @@ class MediaPreviewActivity : AppCompatActivity() {
                 putExtra(EXTRA_IP, ip)
                 putExtra(EXTRA_POSITION, position)
                 putExtra(EXTRA_QUEUED, queued)
-                putExtra(EXTRA_STARRED, file.starred)
                 putExtra(EXTRA_TRIM_START, trim?.startMs ?: -1L)
                 putExtra(EXTRA_TRIM_END, trim?.endMs ?: -1L)
                 if (group.size > 1) {
