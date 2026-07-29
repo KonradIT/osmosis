@@ -773,24 +773,50 @@ class DatalinkClient(
         val hasMarker = head >= 0
         val isVideo = ext in VIDEO_EXTS
 
+        // Photos carry no `03 ff 19 06` head; their size + pixel dimensions hang off their own
+        // `[ff|fe] 19 06` marker — size @ marker-14, width/height @ marker+58/+62, all u32-LE. RE'd
+        // against ground truth (moov/HTTP/JPEG bounds) over a controlled clip+photo set.
+        var photoSize = 0L; var photoRes: String? = null
+        if (!isVideo) {
+            var q = lo
+            while (q < hi - 3) {
+                if ((bytes[q] == 0xFF.toByte() || bytes[q] == 0xFE.toByte()) &&
+                    bytes[q + 1] == 0x19.toByte() && bytes[q + 2] == 0x06.toByte()
+                ) {
+                    val mk = q + 1                                   // index of the 19 06 pair
+                    if (mk >= 14) photoSize = u32le(bytes, mk - 14)
+                    if (mk + 66 <= bytes.size) {
+                        val w = u32le(bytes, mk + 58).toInt(); val h = u32le(bytes, mk + 62).toInt()
+                        if (w in 1..60000 && h in 1..60000) photoRes = "${w}x${h}"
+                    }
+                    break
+                }
+                q++
+            }
+        }
+
         val path = if (ext.isNotEmpty()) "$mediaDir.$ext" else mediaDir
         val thumbPath = (thumb ?: mediaDir.replaceFirst("DCIM/", "MISC/THM/")) + ".scr"
         val handle = if (hasMarker) u32le(bytes, head) else 0L
-        // Media byte size = u32-LE at head-4 (marker-12). Ground-truth-verified against the camera's
-        // own SD card (85/85 Nano files, exact) and confirmed varying on the Action family. NB: the old
-        // head+38 read was the *proxy* (`.LRF`) size — right-looking on the Nano, a constant elsewhere.
-        val size = if (isVideo && hasMarker && head >= 4) u32le(bytes, head - 4) else 0L
+        // Media byte size = u32-LE at head-4 (marker-12) for video; photos read it off their own marker
+        // (above). Ground-truth-verified byte-exact against the SD card (video) and HTTP (photo).
+        val size = if (isVideo && hasMarker && head >= 4) u32le(bytes, head - 4) else photoSize
         val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, hi) else null
+        // Video duration in whole seconds = u16-LE at marker+26 (= head+34). Matches floor(moov ms/1000)
+        // 16/16 across a varied-length clip set — enough for the mm:ss label (kills the moov duration read).
+        val durationSec = if (isVideo && hasMarker && head + 36 <= bytes.size)
+            (bytes[head + 34].toInt() and 0xFF) or ((bytes[head + 35].toInt() and 0xFF) shl 8) else 0
         // ⭐ starTag and the resolution index, both u8, ground-truth-verified against the SD card.
         // The star byte sits 9 bytes past the record's `[ff|fe] 19 06` marker (videos use `03 ff 19 06`,
         // photos a `fe 19 06` variant); the resolution index is at marker-1 (video header only).
         val starred = starFlag(bytes, lo, hi)
         val resolution = if (isVideo && hasMarker && head + 7 < bytes.size)
-            resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else null
+            resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else photoRes
         return CameraFile(
             path = path, thumbPath = thumbPath, storage = 0,
             resLabel = fps?.let { "${it}fps" }, proxyPath = proxyExt?.let { "$mediaDir.$it" },
             handle = handle, sizeBytes = size, starred = starred, resolution = resolution,
+            durationSec = durationSec,
         )
     }
 
@@ -816,6 +842,7 @@ class DatalinkClient(
 
     private fun resolutionForIndex(code: Int): String? = when (code) {
         10 -> "1920x1080"  // 1080p 16:9  (Xtra-verified)
+        12 -> "1920x1440"  // 1080p 4:3
         16 -> "3840x2160"  // 4K 16:9
         45 -> "2688x1512"  // 2.7K 16:9
         95 -> "2688x2016"  // 2.7K 4:3

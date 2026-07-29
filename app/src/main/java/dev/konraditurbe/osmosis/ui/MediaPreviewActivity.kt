@@ -26,7 +26,6 @@ import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.net.ImageLoader
-import dev.konraditurbe.osmosis.net.VideoMeta
 
 /**
  * Full-screen media preview. Videos stream DJI's low-res .LRF proxy straight off the camera —
@@ -66,7 +65,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var position = -1
     private var queued = false
     private var starred = false
-    private var resTag: String? = null // resolution, filled in async (moov for video, bounds for photo)
+    private var resTag: String? = null // resolution label, from the manifest (video enum / photo W×H)
     private var streamCandidates: List<String> = emptyList() // preview URLs, cheapest first
     private var streamIdx = 0          // which candidate we're currently trying
     private var trimStartMs = -1L      // trim in/out points (ms), -1 = unset
@@ -95,7 +94,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         groupPaths = intent.getStringArrayListExtra(EXTRA_GROUP_PATHS) ?: emptyList()
         groupThumbs = intent.getStringArrayListExtra(EXTRA_GROUP_THUMBS) ?: emptyList()
         file = CameraFile(path, "", intent.getIntExtra(EXTRA_STORAGE, 0),
-            intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY))
+            intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY),
+            resolution = intent.getStringExtra(EXTRA_RESOLUTION))
 
         videoView = findViewById(R.id.videoView)
         photoView = findViewById(R.id.photoView)
@@ -139,6 +139,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             file.isVideo -> { setupTrim(); loadVideo() }
             file.isImage -> {
                 btnStarPhoto.visibility = View.VISIBLE
+                resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
                 if (groupPaths.size > 1) setupBurstStrip()   // frames came from the DUML group-expand
                 loadPhoto()
             }
@@ -294,20 +295,10 @@ class MediaPreviewActivity : AppCompatActivity() {
     }
 
     private fun loadVideo() {
-        // Prefer the resolution decoded straight from the manifest (marker-1 index); only fall back to
-        // the MP4 moov when the camera used a resolution code we haven't mapped yet.
-        val manifestRes = file.resolution?.split('x')?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 2 }
-        if (manifestRes != null) {
-            resTag = coarseRes(manifestRes[0], manifestRes[1])
-        } else {
-            Thread {
-                val wh = runCatching { VideoMeta.resolution(http, file) }.getOrNull()
-                if (wh != null) {
-                    resTag = coarseRes(wh.first, wh.second)
-                    main.post { if (!isFinishing) renderTop() }
-                }
-            }.start()
-        }
+        // Resolution comes straight from the manifest (res-index enum, marker-1) — no moov. An unmapped
+        // code just leaves it blank (the clip still plays); add the code to resolutionForIndex when seen.
+        file.resolution?.split('x')?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 2 }
+            ?.let { resTag = coarseRes(it[0], it[1]); renderTop() }   // onCreate already drew the top bar
         // Try the low-res proxy first (listed .LRF/.LRV, or a derived .XRF sidecar the Xtra/Action 5
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
         streamCandidates = file.previewCandidates()
@@ -359,9 +350,10 @@ class MediaPreviewActivity : AppCompatActivity() {
             val bytes = runCatching { http.getBytes(url) }.getOrNull()
             var bmp: Bitmap? = null
             if (bytes != null) {
+                // Bounds are decoded only to pick a safe downsample factor — the resolution shown comes
+                // from the manifest (set in onCreate), not from decoding the JPEG.
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                if (bounds.outWidth > 0) resTag = "${bounds.outWidth}×${bounds.outHeight}"
                 var sample = 1
                 while (bounds.outWidth / sample > dm.widthPixels || bounds.outHeight / sample > dm.heightPixels) sample *= 2
                 bmp = runCatching {
@@ -429,7 +421,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     companion object {
         private const val EXTRA_PATH = "path"
         private const val EXTRA_STORAGE = "storage"
-        private const val EXTRA_RES = "res"
+        private const val EXTRA_RES = "res"          // fps label ("25fps")
+        private const val EXTRA_RESOLUTION = "resolution"  // pixel W×H ("3840x2160") from the manifest
         private const val EXTRA_PROXY = "proxy"
         private const val EXTRA_IP = "ip"
         const val EXTRA_POSITION = "position"
@@ -450,6 +443,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 putExtra(EXTRA_PATH, file.path)
                 putExtra(EXTRA_STORAGE, file.storage)
                 putExtra(EXTRA_RES, file.resLabel)
+                putExtra(EXTRA_RESOLUTION, file.resolution)
                 putExtra(EXTRA_PROXY, file.proxyPath)
                 putExtra(EXTRA_IP, ip)
                 putExtra(EXTRA_POSITION, position)

@@ -61,13 +61,14 @@ class MediaDownloader(
         p.onComplete(saved, skipped, failed)
     }
 
-    /** Full remote size for whole jobs; a duration-proportional estimate for trims (for the bars). */
+    /** Full remote size for whole jobs; a duration-proportional estimate for trims (for the bars). Both
+     *  size and duration come from the DUML manifest; HTTP HEAD only guards a record we couldn't size. */
     private fun estimateBytes(job: Job): Long {
-        val full = http.head(job.file.urlPath()).coerceAtLeast(0L)
+        val full = (if (job.file.sizeBytes > 0) job.file.sizeBytes else http.head(job.file.urlPath())).coerceAtLeast(0L)
         val trim = job.trim ?: return full
         if (full <= 0) return 0L
-        val dur = VideoMeta.durationMs(http, job.file)
-        return if (dur > 0) (full * trim.durationMs / dur).coerceAtLeast(1L) else full
+        val durMs = job.file.durationSec * 1000L
+        return if (durMs > 0) (full * trim.durationMs / durMs).coerceAtLeast(1L) else full
     }
 
     private fun displayName(job: Job): String =

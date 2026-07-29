@@ -95,6 +95,18 @@ def all_media(send_duml, collect_manifest, open_session):
         cursor = next_cursor([f.handle for f in page], cursor)
 ```
 
+#### Burst / interval groups (expand a group's frames)
+
+A burst or interval shoot is stored as a numbered group — `DJI_…_0286_D_001.JPG`, `_002`, `_003`, … The **normal list returns only the group lead (`_001`)**; standalone photos have no `_NNN` suffix, so the filename alone tells you it's a group (→ badge, no probing). The other frames are **not** in the base manifest and there is **no burst boolean on the wire** — the decompiled SDK's `isManualGroupFile` / `subMediaFile` are its *internal* object model, assembled after this query, not fields in the record (a burst-lead record is byte-identical to a normal photo except the `_001` in its name).
+
+To pull the whole group, **re-issue `0x00/0x26` seeded with the group's handle** — a targeted variant of the paging query:
+
+- **handle = `0x40100000 + seq × 0x40`** (the *same* formula as the favorite handle, §3), placed at payload **bytes 10–13** (LE) where the paging cursor goes. For `0286`: `0x40104780`; for `0292`: `0x40104900`.
+- **byte 14** = a frame limit (the app sends the exact count; a generous value works — the camera returns only the group), **byte 16 = `0x10`** ("group mode", vs `0x0d` for the full list), byte 39 = `0x01`.
+- The camera replies with a small (~1.8 KB) manifest of **just that group** — every frame with its real path, thumb (`.thm`/`.scr`) and size. Decode it like any manifest; filter by the shared name base if it ever spills into older files.
+
+Full request (0286, 6 frames): `4a002a10 19 0000000000 80471040 06 00 10 0100 ffffffffffffffff 0001…01`. Media itself downloads over HTTP `:80` `/v2?storage=&path=` as usual.
+
 **Parsed — DJI CompositePack (TLV).** The reassembled manifest opens with a `u32-LE` file count (present on the Nano/Xtra/Pocket 3; **`0` on the Action 5/6** — count the records instead), then one record per file. Every field is **length-delimited**, so you read *tag → length → value* — there is no need to recognise what a filename looks like, and no regex. The self-identifying anchor is the **media-path** field; the filename is read only for its extension:
 
 ```
@@ -103,24 +115,26 @@ def all_media(send_duml, collect_manifest, open_session):
 1a <total:u8> 00 00 00 02 <ascii>       # thumb path,  "MISC/THM/…"
 ```
 
-Handle + size hang off a **record marker `03 ff 19 06` at `head+8`**, present on **video records only** (photos have none → no handle, no size):
+Each record carries a **marker** the header fields hang off: **videos `03 ff 19 06`** (`head = marker − 8`), **photos a shorter `[ff\|fe] 19 06`**. Size hangs off it for **both** (measured from the `19 06` pair, which is common to both marker shapes); handle/fps/resolution/duration are video-only, photos instead carry their pixel W×H:
 
 | field | where | notes |
 |-------|-------|-------|
 | media path | `1a … 00 00 00 01` value | `DCIM/<folder>/<base>`, no extension |
 | thumb path | `1a … 00 00 00 02` value | `MISC/THM/<folder>/<base>` |
 | extension  | `0d` filename field | the only field carrying `.MP4`/`.JPG`/… |
-| delete handle | `u32-LE @ head` (`head = marker − 8`) | feeds `0x00/0x28` (§2); `0` = photo, not deletable |
-| **media byte size** | **`u32-LE @ marker − 12`** | the real file size, **all cameras** — ground-truth-verified byte-exact against the SD card |
+| delete handle | `u32-LE @ head` (`head = marker − 8`) | **video only**; feeds `0x00/0x28` (§2); `0` = photo, not deletable |
+| **media byte size** | **`u32-LE`, 14 B before the `19 06` pair** (= video `marker − 12`) | real file size, **video *and* photo** — byte-exact vs the SD card (video) / HTTP (photo) |
 | proxy (`.LRF`) size | `u32-LE @ marker + 30` | the low-res sidecar's size; a per-camera *constant* on the Action family, so don't mistake it for the media size (we did, once) |
 | fps | rational `<u32 num><u32 den>` near the record | `a861 0000 e803 0000` = 25000/1000 = **25 fps** — what the parser reads |
 | frameRate | `u8 @ marker − 2` | the `VideoFrameRate` enum for the same value (table below) |
-| resolution | `u8 @ marker − 1` | video-format index → pixel size (table below) |
+| resolution *(video)* | `u8 @ marker − 1` | video-format index → pixel size (table below) |
+| **duration *(video)*** | **`u16-LE @ marker + 26`** | whole **seconds**; = `floor(moov ms / 1000)`, 16/16 exact across a varied-length clip set. Enough for the `mm:ss` label — it retired the `moov` read |
+| **width, height *(photo)*** | **`u32-LE`, `+58` / `+62` from the `19 06` pair** | photo pixel dimensions (videos have none here — they use the resolution enum) |
 | ⭐ starTag | `u8 @ [ff\|fe] 19 06 + 9` | favourite flag; the one field also present on photo records |
 
 - **Two stores = two lists.** With a card in, the reassembled manifest is **two per-storage lists back to back** — **SD first, then internal** — each opening with its own `[u32-LE count][u32-LE size][u32-LE ts]…` header. The leading count covers only the *first* list; the rest belong to the second. Proven by dumping the same camera with and without a card: the no-card manifest is **byte-identical to the mixed manifest's second list**. (Record handles corroborate it — SD `0x0004xxxx` vs internal `0x4004xxxx` on the Action family — but the split is taken from the count, which every model writes. The camera's `storage=` HTTP index is *not* a fixed SD/internal mapping: an Xtra served its SD at `0` and internal at `1`, so resolve it by probing.)
 - **Naming is irrelevant to the parse.** Because the path/name are read by length, the camera's *Naming Management* custom **Folder** and **File** prefixes decode exactly like stock — `DCIM/DJI_001/DJI_…_D.MP4` (stock), `DCIM/DJI_001/DJI_…_D_OP3.MP4` (Pocket 3), `DCIM/DJI_001_OA5/DJI_…_D_DOA5.MP4` (Action 5, custom folder + file suffix), `…_D_A01.MP4` (a user-typed `A01`) — all the same.
-- **Size (solved 2026-07-24).** The media byte size is the `u32-LE` at **`marker − 12`** — confirmed exact for 85/85 Nano files against the camera's own SD card, and varying-per-file on the Action family. The nearby `marker + 30` (our old "`head+38`") is the *proxy* `.LRF` size, which is why it looked plausible on the Nano and read as a constant elsewhere. **Resolution** is in the record too, and now mapped (`u8 @ marker − 1`, table below). **`duration` is the only field still unmapped**, so the MP4 `moov` is read for that alone.
+- **Everything now reads from DUML (solved 2026-07-29).** Size (`marker − 12`, exact 85/85 vs the SD card), fps (rational), frameRate (`marker − 2`), resolution (`marker − 1`, table below), duration (`u16-LE @ marker + 26`, whole seconds), photo size (same offset as video, off the `[ff\|fe] 19 06` marker) and **photo pixel W×H** (`+58` / `+62` from the `19 06` pair) are all mapped — pinned by shooting a controlled set of clips (varied length / fps / resolution / aspect) and photos, logging each file's ground truth (moov duration/resolution, HTTP size, JPEG bounds) beside the raw record, and correlating. **The MP4 `moov` parse and the size HTTP HEAD are retired** — the app derives 100% of the grid/preview metadata from the manifest, with HEAD kept only as a guard for a record we somehow couldn't size. (The nearby `marker + 30` — our old "`head+38`" — is the *proxy* `.LRF` size, which is why it once looked like the media size on the Nano and a constant elsewhere.)
 
 **Read it in Python** (`struct` for the little-endian ints; the buffer is the reassembled `0x00/0x27` payload):
 
@@ -195,9 +209,7 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format — a
 | `dirIndex`, `fileIndex`, `subIndex`, `segSubIndex`, `fileGroupIndex` | int | DCF indices |
 | `proxyInfo`, `hasProxy`, `EXIFInfo` (`physicalPathInfo`), `dcfInfo` | nested | proxy/exif/DCF; the `DCIM/…`,`MISC/…` strings live in these nested `physicalPath`s |
 
-So **size, duration, resolution and fps are all present in every record**. `fileSize` is pinned (`marker − 12`, above) by correlating tagged records against the **camera's own SD card** mounted over USB — 85/85 files byte-exact. fps we read from the rational, and `frameRate` (`marker − 2`), `resolution` (`marker − 1`) and `starTag` are pinned too — each mapped by shooting clips with *varied* settings and diffing the manifest against the card.
-
-**`duration` is the last field still unmapped.** It lives in the tagged `[key][type][big-endian value]` attributes we skip (`0x1c`, `0x20`–`0x22`, `0x26`, `0x28`, `0x2b`, `0x2c`, `0x31`, `0x36`, `0x37`) as an int, not literal ms, so pinning it needs clips of varied *length* cross-referenced to those keys. That is the only thing keeping the MP4 `moov` parse alive.
+So **size, duration, resolution, fps and photo dimensions are all present in every record**, and **all now mapped** (see the field table above). Each was pinned by shooting a *varied* controlled set (clip length / fps / resolution / aspect, plus photos) and diffing the manifest against ground truth (the SD card, moov, HTTP size, JPEG bounds). `fileSize` = `marker − 12` (85/85 byte-exact vs the card); `frameRate` = `marker − 2`; `resolution` = `marker − 1`; `duration` = `u16-LE @ marker + 26` (whole seconds — *not* one of the tagged `[key][type][BE value]` attributes we skip, but a fixed slot in the header); photo `width`/`height` = `+58`/`+62` from the `19 06` pair. **The MP4 `moov` parse is retired.**
 
 ##### Enum value tables (mined from the DJI app dex — for decoding the record's int fields)
 
@@ -266,6 +278,7 @@ The record's int fields are small enum codes; these are the code→meaning table
 | code | resolution |
 |------|-----------|
 | `10` | 1920×1080 (1080p 16:9) |
+| `12` | 1920×1440 (1080p 4:3) |
 | `16` | 3840×2160 (4K 16:9) |
 | `45` | 2688×1512 (2.7K 16:9) |
 | `95` | 2688×2016 (2.7K 4:3) |

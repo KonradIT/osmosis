@@ -22,9 +22,11 @@ class MetaLoader(private val http: HttpClient) {
         label.text = prefix
         label.tag = file.path
         exec.submit {
-            // Size from the manifest (no probe) when we have it; else HTTP HEAD (photos / unknown layouts).
+            // Everything from the DUML manifest — no network. Size (record marker-14) and, for videos,
+            // duration in seconds (marker+26) are both decoded up front. The HTTP HEAD only survives as a
+            // guard for the rare record the manifest didn't size (unknown layout).
             val size = if (file.sizeBytes > 0) file.sizeBytes else http.head(file.urlPath())
-            val dur = if (file.isVideo) VideoMeta.durationMs(http, file) else -1
+            val dur = if (file.isVideo && file.durationSec > 0) file.durationSec * 1000L else -1
             val meta = buildString {
                 if (dur > 0) append(fmtDur(dur))
                 if (size > 0) { if (isNotEmpty()) append(" · "); append(fmtSize(size)) }
