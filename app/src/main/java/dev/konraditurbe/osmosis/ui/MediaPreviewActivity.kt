@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
+import dev.konraditurbe.osmosis.net.Highlights
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.net.ImageLoader
 
@@ -75,6 +76,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var selectedFrame = 0
     private lateinit var burstRow: LinearLayout
     private lateinit var burstStrip: View
+    private lateinit var highlightRow: LinearLayout
+    private lateinit var highlightStrip: View
     private val imageLoader by lazy { ImageLoader(http) { Log.i("Osmosis", it) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -91,6 +94,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         groupThumbs = intent.getStringArrayListExtra(EXTRA_GROUP_THUMBS) ?: emptyList()
         file = CameraFile(path, "", intent.getIntExtra(EXTRA_STORAGE, 0),
             intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY),
+            handle = intent.getLongExtra(EXTRA_HANDLE, 0L),
             resolution = intent.getStringExtra(EXTRA_RESOLUTION))
 
         videoView = findViewById(R.id.videoView)
@@ -111,6 +115,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnFf = findViewById(R.id.btnFf)
         burstRow = findViewById(R.id.burstRow)
         burstStrip = findViewById(R.id.burstStrip)
+        highlightRow = findViewById(R.id.highlightRow)
+        highlightStrip = findViewById(R.id.highlightStrip)
 
         // Tap the media to hide/show the overlays (full-frame view).
         videoView.setOnClickListener { toggleControls() }
@@ -125,7 +131,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         }
 
         when {
-            file.isVideo -> { setupTrim(); loadVideo() }
+            file.isVideo -> { setupTrim(); loadVideo(); loadHighlights() }
             file.isImage -> {
                 resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
                 if (groupPaths.size > 1) setupBurstStrip()   // frames came from the DUML group-expand
@@ -268,6 +274,43 @@ class MediaPreviewActivity : AppCompatActivity() {
         topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
     }
 
+    /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge — inline on the
+     *  live session now) and, if any, show a row of tappable ⚑ m:ss chips that seek the player. The video
+     *  plays immediately; marks appear when the (fast) query returns. Best-effort — none / no session → nothing. */
+    private fun loadHighlights() {
+        val handle = file.handle
+        if (handle == 0L) return
+        Thread {
+            val marks = runCatching { Highlights.provider?.invoke(handle) }.getOrNull().orEmpty()
+            if (marks.isNotEmpty()) main.post { if (!isFinishing) showHighlights(marks) }
+        }.start()
+    }
+
+    private fun showHighlights(marks: List<Int>) {
+        highlightStrip.visibility = View.VISIBLE
+        val accent = ContextCompat.getColor(this, R.color.osmo_accent)
+        val d = resources.displayMetrics.density
+        for (ms in marks) {
+            val chip = TextView(this).apply {
+                text = "⚑ ${mmss(ms.toLong())}"
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 12f
+                setPadding((10 * d).toInt(), (5 * d).toInt(), (10 * d).toInt(), (5 * d).toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins((4 * d).toInt(), 0, (4 * d).toInt(), 0) }
+                setBackgroundColor(accent)
+                setOnClickListener {
+                    videoView.seekTo(ms)
+                    seekBar.progress = ms
+                    txtCur.text = mmss(ms.toLong())
+                    if (controls.visibility != View.VISIBLE) toggleControls()
+                }
+            }
+            highlightRow.addView(chip)
+        }
+    }
+
     private fun loadVideo() {
         // Resolution comes straight from the manifest (res-index enum, marker-1) — no moov. An unmapped
         // code just leaves it blank (the clip still plays); add the code to resolutionForIndex when seen.
@@ -395,6 +438,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     companion object {
         private const val EXTRA_PATH = "path"
         private const val EXTRA_STORAGE = "storage"
+        private const val EXTRA_HANDLE = "handle"    // video handle → highlight pull (0x02/0xff)
         private const val EXTRA_RES = "res"          // fps label ("25fps")
         private const val EXTRA_RESOLUTION = "resolution"  // pixel W×H ("3840x2160") from the manifest
         private const val EXTRA_PROXY = "proxy"
@@ -415,6 +459,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             Intent(ctx, MediaPreviewActivity::class.java).apply {
                 putExtra(EXTRA_PATH, file.path)
                 putExtra(EXTRA_STORAGE, file.storage)
+                putExtra(EXTRA_HANDLE, file.handle)
                 putExtra(EXTRA_RES, file.resLabel)
                 putExtra(EXTRA_RESOLUTION, file.resolution)
                 putExtra(EXTRA_PROXY, file.proxyPath)

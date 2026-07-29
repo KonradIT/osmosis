@@ -432,6 +432,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      *  can take the camera's single BLE link without contention. Safe to call when nothing is active. */
     private fun teardownOffload() {
         stopKeepalive()
+        dev.konraditurbe.osmosis.net.Highlights.provider = null
         datalink?.close(); datalink = null
         apJoiner?.release(); apJoiner = null
         gattClient?.disconnect(); gattClient?.close(); gattClient = null
@@ -678,6 +679,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         )
                     }
                     datalink = dl
+                    dev.konraditurbe.osmosis.net.Highlights.provider = { h -> dl.getHighlights(h) }
                     if (files.isNotEmpty()) dl.startKeepAlive() // hold the AP up while browsing
                     // Storage is per manifest *list*, not per manifest: a camera with a card returns an
                     // SD list and an internal list back to back, and probing only the first file stamped

@@ -196,6 +196,25 @@ class DatalinkClient(
      */
     fun fetchNextPage(): List<CameraFile> {
         if (!moreAvailable) return emptyList()
+
+        // Inline on the live session first (playback held) — the win that makes scroll instant (#12).
+        // Same frame sequence as the fresh path: query(cursor=1) → trigger → query(pageCursor). Run
+        // stepPagination (which advances the cursor) ONLY on a non-empty decode, so a failed inline query
+        // falls through to the fresh path without double-advancing.
+        if (keepAliveOn) {
+            val blob = runManifestQuery(
+                listCmd(1, 1L), hex("4a040e1001000000000001000000"), listCmd(2, pageCursor))
+            val page = blob?.let { decodeManifest(manifestBytes(it)) } ?: emptyList()
+            if (page.isNotEmpty()) {
+                val step = stepPagination(pageCursor, page, seenPaths)
+                pageCursor = step.nextCursor; moreAvailable = step.moreAvailable
+                log("datalink: next page(inline) cursor=0x${pageCursor.toString(16)} +${step.fresh.size} new (more=$moreAvailable)")
+                return step.fresh
+            }
+            log("datalink: next page(inline) empty — fresh-session fallback")
+        }
+
+        // Fallback: fresh registered session (pre-#12 path).
         val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return emptyList()
         keepAliveOn = false
         Thread.sleep(600)                 // let the keep-alive loop finish its current recv and exit
@@ -244,6 +263,19 @@ class DatalinkClient(
         // Handle namespace differs per camera AND per store, so use the manifest-fitted handle (see
         // withCmdHandles) — a hardcoded Nano formula returned 0 frames on the Xtra.
         val handle = lead.cmdHandle.takeIf { it != 0L } ?: return listOf(lead)
+
+        // Inline on the live session first (playback held): query + trigger, collect the stream (#12).
+        if (keepAliveOn) {
+            val blob = runManifestQuery(groupCmd(1, handle, GROUP_EXPAND_LIMIT), hex("4a040e1001000000000001000000"))
+            if (blob != null) {
+                val all = decodeManifest(manifestBytes(blob))
+                val group = all.filter { it.name.startsWith(base) }.sortedBy { it.subIndex }
+                log("datalink: group-expand(inline) $base → ${group.size} frames (of ${all.size})")
+                if (group.size > 1) return group
+            }
+        }
+
+        // Fallback: fresh registered session (pre-#12 path).
         keepAliveOn = false
         Thread.sleep(600)                 // let the keep-alive loop exit before we take the socket
         runCatching { sock.close() }
@@ -287,6 +319,40 @@ class DatalinkClient(
         return group
     }
 
+    /**
+     * Pull a video's highlight / moment marks (side-button presses) — DUML **0x02/0xff**, RE'd from an
+     * Xtra pcap (ROADMAP #7; the SDK's generic `camera_expansion_cmd`). Runs INLINE on the live session
+     * now (#12) — before the seq fix it needed a fresh session whose churn destabilized the Xtra, so it
+     * was pulled; the faithful session brings it back for free. Returns each mark's start time in **ms**,
+     * ascending; empty if none / no session. [handle] = the video's manifest delete-handle. Off-UI.
+     */
+    fun getHighlights(handle: Long): List<Int> {
+        if (handle == 0L) return emptyList()
+        val reply = runCommand(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0)
+            ?: return emptyList()
+        val marks = parseHighlights(reply)
+        log("datalink: highlights 0x${handle.toString(16)} → ${marks.size} $marks")
+        return marks
+    }
+
+    /** 0x02/0xff request: `40 2f 00 01 0b 00 00 00 [handle:u32-LE] 00 00`. */
+    private fun highlightCmd(handle: Long): ByteArray =
+        byteArrayOf(0x40, 0x2f, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00) + le32(handle.toInt()) + byteArrayOf(0, 0)
+
+    /** Decode the 0x02/0xff reply: `00 · 40 2f 00 01 · [len:u32] · [handle:u32] · [count:u8] · 00 ·
+     *  { 00 [startMs:u32-LE] } × count`. Count at payload byte 13, first mark at 16, stride 5. */
+    private fun parseHighlights(p: ByteArray): List<Int> {
+        if (p.size < 14 || p[0].toInt() != 0) return emptyList()
+        val count = p[13].toInt() and 0xFF
+        val marks = ArrayList<Int>(count)
+        for (k in 0 until count) {
+            val o = 16 + k * 5
+            if (o + 4 > p.size) break
+            marks.add(u32le(p, o).toInt())
+        }
+        return marks.sorted()
+    }
+
     internal data class PageStep(val fresh: List<CameraFile>, val nextCursor: Long, val moreAvailable: Boolean)
 
     /**
@@ -304,10 +370,86 @@ class DatalinkClient(
         else PageStep(fresh, cursor, false)
     }
 
+    // ---- inline commands on the live session (#12) --------------------------------------------------
+    // The keep-alive thread owns the socket, so a command that wants a reply can't just send + recv on
+    // another thread (it would race the keep-alive's recv). Instead the caller QUEUES the command and the
+    // keep-alive loop sends it, then captures its reply from the same recv loop — one long-lived, in-
+    // sequence session, no fresh re-registration. Works only because the r8-9 seq fix keeps writes in-window.
+    private class PendingCmd(
+        val set: Int, val cmd: Int, val payload: ByteArray,
+        val rType: Int, val rId: Int, val cType: Int,
+        val replySet: Int, val replyCmd: Int, val deadlineMs: Long,
+        val primeFrames: List<ByteArray> = emptyList(),  // extra frames, one per tick after the query (stream priming)
+        val stream: Boolean = false,        // true = collect the 0x00/0x27 manifest stream until it settles
+    ) {
+        val blob = java.io.ByteArrayOutputStream()   // raw datagrams for a stream query
+        @Volatile var reply: ByteArray? = null
+        @Volatile var done = false
+        var ticks = 0; var lastCount = -1; var stable = 0
+    }
+    private val cmdQueue = java.util.concurrent.ConcurrentLinkedQueue<PendingCmd>()
+    @Volatile private var awaitingCmd: PendingCmd? = null   // in flight, session-thread owned
+
+    /**
+     * Run a command INLINE on the live keep-alive session and return its reply payload (bytes after the
+     * DUML header, before the CRC), or null on timeout. Blocking; call off the UI thread. Returns null
+     * immediately if the keep-alive isn't running, so callers can fall back to a fresh session.
+     */
+    fun runCommand(
+        set: Int, cmd: Int, payload: ByteArray, receiverType: Int, receiverId: Int,
+        cmdType: Int = 2, replySet: Int = set, replyCmd: Int = cmd, timeoutMs: Long = 2500,
+    ): ByteArray? {
+        if (!keepAliveOn) return null
+        val c = PendingCmd(set, cmd, payload, receiverType, receiverId, cmdType, replySet, replyCmd,
+            System.currentTimeMillis() + timeoutMs)
+        cmdQueue.add(c)
+        while (!c.done && System.currentTimeMillis() < c.deadlineMs + 600) runCatching { Thread.sleep(30) }
+        return c.reply
+    }
+
+    /**
+     * Run a manifest-stream query (group-expand / pagination) INLINE on the live session: send [payload],
+     * then [trigger] one tick later, collect the `0x00/0x27` stream until the file count settles, and return
+     * the raw blob (feed to `manifestBytes` + `decodeManifest`). Null if the keep-alive isn't running.
+     */
+    fun runManifestQuery(payload: ByteArray, vararg primeFrames: ByteArray, timeoutMs: Long = 4000): ByteArray? {
+        if (!keepAliveOn) return null
+        val c = PendingCmd(0x00, 0x26, payload, 0x01, 0, 2, 0x00, 0x27,
+            System.currentTimeMillis() + timeoutMs, primeFrames = primeFrames.toList(), stream = true)
+        cmdQueue.add(c)
+        while (!c.done && System.currentTimeMillis() < c.deadlineMs + 600) runCatching { Thread.sleep(30) }
+        return c.reply
+    }
+
+    /**
+     * First CRC-valid DUML **reply** frame with the given cmdset/cmd across [datagrams] → its payload,
+     * else null. Skips the empty-payload transport ACK the camera sends before the real reply (that ACK
+     * is what a naive "first frame" match grabs, making a landed command look like a failure).
+     */
+    private fun findReply(datagrams: List<ByteArray>, set: Int, cmd: Int): ByteArray? {
+        for (d in datagrams) {
+            var i = 0
+            while (i + 11 <= d.size) {
+                if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
+                val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+                if (len < 13 || i + len > d.size) { i++; continue }
+                if (DjiCrc.computeCrc8(d.copyOfRange(i, i + 3)) != (d[i + 3].toInt() and 0xFF)) { i++; continue }
+                if ((d[i + 9].toInt() and 0xFF) == set && (d[i + 10].toInt() and 0xFF) == cmd) {
+                    val payload = d.copyOfRange(i + 11, i + len - 2)
+                    if (payload.isNotEmpty()) return payload   // skip the empty transport ACK
+                }
+                i += len
+            }
+        }
+        return null
+    }
+
     /**
      * Keep the datalink alive (ACK ~2×/s so the AP doesn't sleep) and, Mimo-style, poll the camera
      * for status — heartbeat 0x02/0x8E, state query 0x02/0xA0, status poll 0x02/0x61 — decoding the
-     * pushed status frames (battery/storage/firmware) as they arrive.
+     * pushed status frames (battery/storage/firmware) as they arrive. Also holds **playback mode** the
+     * whole browse session (so inline commands needing it — favorite/group-expand/pagination — work) and
+     * services the inline command queue ([runCommand]).
      */
     fun startKeepAlive() {
         if (keepAliveOn) return
@@ -317,13 +459,39 @@ class DatalinkClient(
         lastBattSig = ""
         Thread {
             var tick = 0
+            sendDuml(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0)   // enter + hold playback
             while (keepAliveOn) {
                 runCatching {
-                    parseStatus(recvAll(200))
+                    val dg = recvAll(200)
+                    parseStatus(dg)
+                    awaitingCmd?.let { c ->
+                        if (c.stream) {
+                            for (r in dg) c.blob.write(r)
+                            c.ticks++
+                            if (c.ticks in 1..c.primeFrames.size)       // send each prime frame one tick apart
+                                sendDuml(c.set, c.cmd, c.primeFrames[c.ticks - 1], receiverType = c.rType, receiverId = c.rId, cmdType = c.cType)
+                            val cnt = distinctPaths(c.blob)
+                            if (c.ticks >= c.primeFrames.size + 2 && cnt > 0 && cnt == c.lastCount) {
+                                if (++c.stable >= 2) { c.reply = c.blob.toByteArray(); c.done = true; awaitingCmd = null }
+                            } else c.stable = 0
+                            c.lastCount = cnt
+                            if (!c.done && System.currentTimeMillis() > c.deadlineMs) {
+                                c.reply = c.blob.toByteArray(); c.done = true; awaitingCmd = null
+                            }
+                        } else {
+                            val r = findReply(dg, c.replySet, c.replyCmd)
+                            if (r != null) { c.reply = r; c.done = true; awaitingCmd = null }
+                            else if (System.currentTimeMillis() > c.deadlineMs) { c.done = true; awaitingCmd = null }
+                        }
+                    }
                     sendAck()
                     sendDuml(0x02, 0x8E, hex("00011400"), receiverType = 0x01, receiverId = 0)
                     if (tick % 3 == 0) sendDuml(0x02, 0xA0, ByteArray(0), receiverType = 0x01, receiverId = 0)
                     if (tick % 6 == 0) sendDuml(0x02, 0x61, ByteArray(0), receiverType = 0x01, receiverId = 0)
+                    if (awaitingCmd == null) cmdQueue.poll()?.let { c ->
+                        awaitingCmd = c
+                        sendDuml(c.set, c.cmd, c.payload, receiverType = c.rType, receiverId = c.rId, cmdType = c.cType)
+                    }
                 }
                 runCatching { Thread.sleep(300) }
                 tick++
@@ -440,31 +608,45 @@ class DatalinkClient(
      */
     fun deleteFiles(handles: List<Long>): Int? {
         if (handles.isEmpty()) return null
+        val payload = deletePayload(handles)
+
+        // Inline on the live session first (#12). For a DESTRUCTIVE op a landed reply is authoritative —
+        // we return it as-is and never re-issue via the fallback (which could delete twice / report a stale
+        // "no such handle" on an already-deleted file). Only a genuine no-reply falls through.
+        if (keepAliveOn) {
+            log("datalink: DELETE(inline) 0x00/0x28 n=${handles.size}")
+            val reply = runCommand(0x00, 0x28, payload, receiverType = 0x01, receiverId = 0)
+            if (reply != null) {
+                val status = if (reply.size >= 2) (reply[0].toInt() and 0xFF) or ((reply[1].toInt() and 0xFF) shl 8) else reply[0].toInt() and 0xFF
+                log("datalink: DELETE(inline) status=0x%04x".format(status))
+                return status
+            }
+            log("datalink: DELETE(inline) no reply — fresh-session fallback")
+        }
+
+        // Fallback: fresh registered session (pre-#12 path).
         val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return null
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its current recv and exit
         runCatching { sock.close() }     // free udp/$port for the fresh session
-        val status = runCatching { freshSessionDelete(ip, handles) }
+        val status = runCatching { freshSessionDelete(ip, payload) }
             .getOrElse { log("datalink: delete session error: ${it.message}"); null }
-        // Reuse the (already open + registered) delete session for browse — no second re-open. It has
-        // no status subscriptions, so the pill freezes at its last values until the next reconnect.
         if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
         return status
     }
 
-    private fun freshSessionDelete(ip: String, handles: List<Long>): Int? {
+    /** Delete request payload: `[count:u8][handle:u32-LE …][count:u32] 00 [count:u32] 01 01 00 00`.
+     *  The trailing `00` / `01 01 00 00` (storage selector) are verbatim from the Mimo capture. */
+    private fun deletePayload(handles: List<Long>): ByteArray = java.io.ByteArrayOutputStream().apply {
+        write(handles.size and 0xFF)
+        for (h in handles) write(le32(h.toInt()))
+        write(le32(handles.size)); write(0x00); write(le32(handles.size)); write(byteArrayOf(0x01, 0x01, 0x00, 0x00))
+    }.toByteArray()
+
+    private fun freshSessionDelete(ip: String, payload: ByteArray): Int? {
         if (!openAndRegister(ip, subscribe = false)) { log("datalink: delete — fresh session open FAILED"); return null }
-        // Payload mirrors the captured frame: [count:u8][handle:u32-LE …][count:u32] 00 [count:u32]
-        // 01 01 00 00. The trailing 00 / 01 01 00 00 (storage selector) are verbatim from the capture.
-        val b = java.io.ByteArrayOutputStream()
-        b.write(handles.size and 0xFF)
-        for (h in handles) b.write(le32(h.toInt()))
-        b.write(le32(handles.size))
-        b.write(0x00)
-        b.write(le32(handles.size))
-        b.write(byteArrayOf(0x01, 0x01, 0x00, 0x00))
-        log("datalink: DELETE 0x00/0x28 n=${handles.size}")
-        sendDuml(0x00, 0x28, b.toByteArray(), receiverType = 0x01, receiverId = 0)
+        log("datalink: DELETE 0x00/0x28 (fresh)")
+        sendDuml(0x00, 0x28, payload, receiverType = 0x01, receiverId = 0)
         val deadline = System.nanoTime() + 3_000_000_000L
         while (System.nanoTime() < deadline) {
             for (d in recvAll(200)) findRespStatus(d, 0x00, 0x28)?.let {
@@ -488,6 +670,24 @@ class DatalinkClient(
      * call on a background thread, serialized so rapid toggles don't overlap sessions.
      */
     fun setFavorite(handle: Long, on: Boolean): Boolean {
+        val payload = java.io.ByteArrayOutputStream().apply {
+            write(byteArrayOf(0x01, 0x01)); write(le32(handle.toInt())); write(le32(favCounter++))
+            write(0x00); write(if (on) 0x01 else 0x00); write(byteArrayOf(0x00, 0x00, 0x00))
+        }.toByteArray()
+
+        // Try INLINE on the live session first (it holds playback + a faithful seq now — #12). No pause,
+        // no re-registration. Fall back to a fresh session only if the camera doesn't answer.
+        if (keepAliveOn) {
+            log("datalink: FAVORITE(inline) 0x02/0xbf handle=0x%08x on=%b".format(handle, on))
+            val reply = runCommand(0x02, 0xbf, payload, receiverType = 0x01, receiverId = 0)
+            val status = reply?.let {
+                if (it.size >= 2) (it[0].toInt() and 0xFF) or ((it[1].toInt() and 0xFF) shl 8) else it[0].toInt() and 0xFF
+            }
+            log("datalink: FAVORITE(inline) status=${status?.let { "0x%04x".format(it) } ?: "no reply"}")
+            if (status == 0) return true
+        }
+
+        // Fallback: fresh registered session (the pre-#12 path), kept until inline is proven everywhere.
         val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return false
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its recv and exit
@@ -1049,11 +1249,23 @@ class DatalinkClient(
         return b + xor.toByte()
     }
 
-    private fun routingHeader(): ByteArray = byteArrayOf(
-        (lastCamSeq and 0xFF).toByte(), ((lastCamSeq shr 8) and 0xFF).toByte(),
-        (udpSeq and 0xFF).toByte(), ((udpSeq shr 8) and 0xFF).toByte(),
-        0, 0, 0, 0, (cmdCounter and 0xFF).toByte(), 0x01, 0x00, 0x00,
-    )
+    // Command routing header (pkt 0x05). The datalink is a sliding-window transport: every packet carries
+    // `[r8-9 = ack of the peer's seq][r10-11 = my own seq]`, uhSeq = my own seq. Both fields for a COMMAND
+    // live in OUR OWN command-seq space — r10-11 is this command's seq, r8-9 is the previous one (the last
+    // seq the camera has echoed back, since we recvAll between sends). Ground-truthed from Mimo/Xtra pcaps.
+    //
+    // The old code put `lastCamSeq` in r8-9 — the camera's TELEMETRY seq, which recvAll refreshes from every
+    // received packet. Telemetry runs ~10× faster than our commands and wraps to a different phase, so r8-9
+    // drifted far from r10-11 and the receiver window silently dropped our WRITES (reads were lenient).
+    // That single divergence is what forced a fresh registered session for every delete/favorite/page/burst.
+    private fun routingHeader(): ByteArray {
+        val ack = (udpSeq - 8) and 0xFFFF          // previous command's seq (our own space), not the camera's
+        return byteArrayOf(
+            (ack and 0xFF).toByte(), ((ack shr 8) and 0xFF).toByte(),
+            (udpSeq and 0xFF).toByte(), ((udpSeq shr 8) and 0xFF).toByte(),
+            0, 0, 0, 0, (cmdCounter and 0xFF).toByte(), 0x01, 0x00, 0x00,
+        )
+    }
 
     private fun advance() { udpSeq = (udpSeq + 8) and 0xFFFF }
 

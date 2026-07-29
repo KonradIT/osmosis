@@ -324,6 +324,35 @@ The record's int fields are small enum codes; these are the code→meaning table
 
 ## Datalink session (sent before the list, over UDP)
 
+### Datalink transport / sequencing — the one that makes commands land inline
+
+Each UDP packet is `[8B udp hdr][12B routing hdr][DUML frame]`. It's a **sliding-window sequenced
+transport**, and getting the sequencing right is what lets *every* command (delete, favorite, group-expand,
+pagination, highlights) run on **one long-lived session** instead of a fresh registered session per op.
+
+- **udp hdr** `[8]`: `[len|0x8000 :u16][sessionId:u16][seq:u16-LE][pktType:u8][xor:u8]`.
+- **routing hdr** `[12]`: **`[ackSeq:u16-LE][ownSeq:u16-LE]` 00 00 00 00 `[counter:u8]` 01 00 00**.
+- **pktType**: `0x00` handshake · `0x01` camera data/telemetry · `0x04` **ACK** (of the camera's stream) ·
+  `0x05` **command** (carries a DUML frame).
+
+**The rule (ground-truthed from Mimo/Xtra pcaps).** For a **command** packet, `ownSeq` (= the udp-hdr seq)
+is the app's **own monotonic `+8` counter**, started at `camera_channel + 8` at registration; it wraps at
+`0xFFFF` and is *independent* of the camera. `ackSeq` is the **last of our own seqs the camera echoed back**
+— it lags `ownSeq` by 8–150, and **stays in our own seq space**. Separately, an ACK packet (`0x04`, seq 0)
+carries `[camSeq][camSeq]` to acknowledge the camera's telemetry stream.
+
+**The trap:** do **not** put the camera's telemetry seq in a command's `ackSeq`. The camera floods
+telemetry ~10× faster than our commands and its seq wraps to a different phase, so an `ackSeq` that tracks
+it diverges from `ownSeq` and the receiver window **silently drops writes** (reads are lenient). We hit
+this exactly — `ackSeq = lastCamSeq` (refreshed from every received packet) — and it forced a fresh session
+per write. Fix: `ackSeq = ownSeq − 8` (our previous command seq). See ROADMAP #12.
+
+**Inline commands:** the keep-alive thread owns the socket, so a command that needs a reply is **queued**
+for that thread, which sends it and captures the reply from the same recv loop (`DatalinkClient.runCommand`
+/ `runManifestQuery`). Skip the empty-payload transport ACK the camera sends *before* the real reply.
+Playback mode (`0x02/0x0c 01 01 00 01`) is held for the whole browse session (some inline reads/writes need
+it), not entered per-fetch.
+
 ### 4. Handshake  *(not DUML — routing payload)*
 - UDP packet type `0x00`, payload `b88764006400c005140000640000019001c005140000640014006400c00514000064000101040102`
 - Response: type `0x00` echo. Then drain heartbeats, learn `camera_channel` (heartbeat routing `[8:10]`); app UDP seq starts at `camera_channel + 8`.

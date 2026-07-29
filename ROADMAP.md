@@ -301,7 +301,7 @@ resume. Diagnosis came from an app log + a decrypted **RTOS** log. Below, findin
 
 **Resume artifacts:** `reference/osmo-action/` (raw list blob + RTOS log).
 
-## 7. Retrieve highlight / moment markers — ✅ PROTOCOL SOLVED, ⏸️ UI blocked on #12 (2026-07-29)
+## 7. Retrieve highlight / moment markers — ✅ DONE, inline (2026-07-30)
 
 DJI "highlight" marks (side-button presses during recording) are **NOT stored in the MP4** — proven
 by an exhaustive teardown of an Action 4 + Xtra clip: not in chapters/tags, not in the `dvtm` protobuf
@@ -312,8 +312,8 @@ demand — the Xtra app shows them in its *trim/editor* view.
 **The command is `0x02/0xff`** (the SDK's generic `camera_expansion_cmd`; `PullHighLightAction`).
 RE'd empirically from a PCAPdroid capture of the Xtra app opening two marked clips' trim views —
 which matched hardware ground truth byte-for-byte (a 2-mark clip → 4000/7000 ms; a 3-mark clip →
-1000/3000/5000 ms). Read-only, so we run it inline on the live datalink (pause the keep-alive, query,
-resume — `DatalinkClient.getHighlights`).
+1000/3000/5000 ms). Runs **inline on the live session** (`DatalinkClient.getHighlights` via `runCommand`,
+no fresh session) now that #12 landed the faithful session.
 
 ```
 request  0x02/0xff → Camera(0x01):  40 2f 00 01 0b 00 00 00 [handle:u32-LE] 00 00
@@ -323,14 +323,11 @@ reply    0x02/0xff:  00 · 40 2f 00 01 · [len:u32-LE] · [handle:u32-LE] · [co
 - `handle` = the video's manifest delete-handle (§2). `startTimeMs` = mark start in ms (we show whole
   marks; a `duration` field wasn't distinguishable in the reply — the marks read as points).
 
-**Why there's no UI yet.** The camera only answers `0x02/0xff` on a **freshly registered session** — on the
-live browse session it silently ignores it (proven: the request goes out byte-identical to the app's, and
-status polls on the same sequence *are* answered). Doing a teardown+re-register per video open worked but
-the churn **destabilized the Xtra**: the manifest's two-storage split collapsed (every file stamped
-`storage=0` → internal-storage thumbnails and previews 404'd), and it persisted across reconnects. So the
-implementation was **removed rather than left dormant** — the byte spec above (and MEDIA_PROTOCOL §3a) is
-the deliverable. Re-add it (~30 lines: query + parse + a row of tappable ⚑ m:ss chips that seek) once **#10**
-lands a faithful session, where it runs inline with no re-registration.
+**Shipped:** the video preview pulls marks off-UI via the `net/Highlights` bridge and shows a row of
+tappable **⚑ m:ss** chips that seek the player. Verified on the Xtra (`0023` → 4s/7s, `0022` →
+1s/3s/5s) with the two-storage split staying intact afterward — the churn that forced this off before is
+gone (see #12). Originally the camera only answered `0x02/0xff` on a fresh session, whose teardown churn
+collapsed the Xtra's storage split; the #12 faithful session removed both problems.
 
 ## 8. Camera control + live settings (mode / resolution / fps, shutter) — 🔬 R-SDK read done via #9; media-path read + all control unimplemented
 
@@ -463,30 +460,41 @@ attractive for bulk transfers and for cameras/phones where the AP hop is flaky.
   phone.
 - **Why it's worth it:** no AP, no pairing, no password — just plug in and pull, at USB speed.
 
-## 12. Faithful long-lived session (persistent playback + in-window `udpSeq`) — 🔬 NEXT UP, unblocks #7 & more
+## 12. Faithful long-lived session (one session, all commands inline) — ✅ DONE (2026-07-30)
 
-> **This is the keystone item.** Every "fresh registered session" workaround in the app — paging, delete,
-> favorite, and the highlight pull (#7) — exists because our session drifts out of the camera's accept
-> window. Worse, the churn is actively harmful: repeated teardown/re-register **destabilized an Xtra** so
-> its manifest's two-storage split collapsed (all files stamped `storage=0` → half the thumbnails/previews
-> 404'd), persisting across reconnects. Fixing the session removes the workarounds *and* the fragility.
->
-> **The diagnosis.** We set `udpSeq = lastCamSeq + 8` at registration, then advance it only when *we*
-> send. The camera meanwhile floods telemetry (`0x00/0x99`, `0x02/0x80`) and races its own sequence ahead,
-> so ours falls behind the write-accept window: reads still answer, writes and expansion commands are
-> silently dropped. Mimo/Xtra keep the two locked with a constant heartbeat, which is why *their* delete,
-> favorite, highlight and pagination all work inline on one session with no pauses.
->
-> **The fix:** re-derive `udpSeq` from the camera's current `lastCamSeq` on every keep-alive tick (track
-> the camera instead of drifting), hold playback mode for the whole browse session, and mirror Mimo's
-> fuller heartbeat set (`0x02/0x8e` for each subsystem id it polls: 06,08,09,0f,14,15,18,1f,20,28,29 —
-> we only send `14`). Then convert each command back to inline and re-verify on-device one at a time.
-> Ground truth for all of it is in the `reference/` pcaps (Nano + Xtra).
+**The keystone.** Every "fresh registered session" workaround — paging (~15 s/page), delete (~9 s),
+favorite, burst group-expand, the highlight pull (#7) — existed because our session drifted out of the
+camera's write-accept window. The churn was also *harmful*: repeated teardown/re-register destabilized an
+Xtra so its two-storage manifest split collapsed (all files `storage=0` → half the thumbnails 404'd).
+Fixing the session removed every workaround **and** the fragility. All commands now run **inline on one
+long-lived session — instant, no pause, no playback flash**, verified on Nano + Xtra.
 
-The media list only paginates while the camera is in **playback mode** (`0x02/0x0c` `01 01 00 01`;
-`01 01 00 00` leaves). We enter it **only for the duration of a fetch** — once on the initial
-newest-45 load, and again inside every `fetchNextPage()` — and each older page spins up a **fresh
-registered session** (~15 s/page). We have to, because the camera drops the datalink after ~2 pages and
+**The real bug (one field).** The datalink is a **sliding-window transport**: every packet carries
+`[r8-9 = ack of the peer's seq][r10-11 = my own seq]`, `uhSeq = my own seq`. A command's `r8-9` and
+`r10-11` are **both in the app's own command-seq space** (`r8-9` lags `r10-11` — the last of our seqs the
+camera echoed). We instead put **`lastCamSeq`** in `r8-9`, and `recvAll` refreshes `lastCamSeq` from every
+received packet — i.e. the camera's *telemetry* seq, which floods ~10× faster and wraps to a different
+phase. So our `r8-9` chased the telemetry stream and diverged from our own `r10-11` → the receiver window
+silently dropped **writes** (reads were lenient). A fresh session only "fixed" it by momentarily
+re-aligning the two streams. (My first guess — re-derive `udpSeq` from `lastCamSeq` — was backwards; the
+fix is the opposite: keep `udpSeq` a clean `+8` counter and stop leaking the camera's seq into `r8-9`.)
+
+**The fix (shipped, in order, each on-device-verified):**
+1. **`routingHeader` `r8-9` = our own previous command seq** (`udpSeq − 8`), not `lastCamSeq`. This alone
+   makes writes land on the live session. `udpSeq` stays a `+8` monotonic counter from registration.
+2. **Hold playback** (`0x02/0x0c 01 01 00 01`) for the whole browse session (was entered per-fetch).
+3. **Session-thread command queue** (`runCommand` / `runManifestQuery`): the keep-alive thread owns the
+   socket, so callers queue a command and it's sent + its reply captured from the same recv loop — one
+   in-sequence session. `findReply` skips the empty transport ACK to read the real status reply.
+4. Converted **favorite → burst → delete → pagination → highlights** to inline, fresh-session paths kept
+   as fallbacks (they now rarely fire). Mirroring Mimo's fuller `0x02/0x8e` heartbeat set turned out
+   **not** to be needed — steps 1–2 were enough. See MEDIA_PROTOCOL "Datalink transport / sequencing".
+
+---
+
+**Historical note (the problem this solved).** The media list only paginates in **playback mode**
+(`0x02/0x0c` `01 01 00 01`), and older pages used to spin up a **fresh registered session** (~15 s/page)
+because the camera dropped the datalink after ~2 pages and
 any keepalive we insert just drifts our `udpSeq` out of the accept window (see `freshSessionPage`).
 
 DJI Mimo instead **stays in playback mode the entire time the gallery is open**, keeping one long-lived
