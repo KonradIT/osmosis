@@ -13,7 +13,13 @@ data class CameraFile(
     val starred: Boolean = false, // ⭐ favourite flag from the manifest (marker+10, video records)
     val resolution: String? = null, // "3840x2160": video from the res-index enum (marker-1); photo from
                                     // its direct pixel W×H (marker+58/+62); null = unknown
-    val durationSec: Int = 0, // video length in whole seconds, from the DUML manifest (marker+26); 0 = unknown
+    val durationSec: Int = 0, // video length in whole seconds, from the DUML manifest (marker-4); 0 = unknown
+    // Handle for the *non-destructive* per-file commands — favorite (0x02/0xbf) and burst group-expand
+    // (0x00/0x26 group mode) — which photos need too, but photo records carry no [handle]. Derived by
+    // fitting `base + seq*step` to the handles the manifest DOES expose, per storage list, so it works on
+    // any camera (Nano `0x40100000`/`0x40` vs Xtra `0x00040000`/`0x10`) with nothing hardcoded. Deliberately
+    // separate from [handle]: delete stays manifest-only, never a fitted guess. 0 = couldn't derive.
+    val cmdHandle: Long = 0L,
     // Which per-storage list of the manifest this record came from (0 = first, 1 = second). A camera
     // with a card returns TWO lists back to back — SD first, then internal — and every file in a list
     // lives on the same store, so the caller resolves [storage] once per group instead of once per

@@ -241,7 +241,9 @@ class DatalinkClient(
     fun expandBurstGroup(lead: CameraFile): List<CameraFile> {
         val base = lead.groupKey ?: return listOf(lead)
         val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return listOf(lead)
-        val handle = 0x40100000L + lead.seq.toLong() * 0x40L
+        // Handle namespace differs per camera AND per store, so use the manifest-fitted handle (see
+        // withCmdHandles) — a hardcoded Nano formula returned 0 frames on the Xtra.
+        val handle = lead.cmdHandle.takeIf { it != 0L } ?: return listOf(lead)
         keepAliveOn = false
         Thread.sleep(600)                 // let the keep-alive loop exit before we take the socket
         runCatching { sock.close() }
@@ -703,7 +705,39 @@ class DatalinkClient(
             val group = if (boundary > 0 && k >= boundary) 1 else 0
             byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi).copy(group = group))
         }
-        return byPath.values.toList()
+        return withCmdHandles(byPath.values.toList())
+    }
+
+    /**
+     * Fill [CameraFile.cmdHandle] by fitting `handle = base + seq*step` **per storage list** to the video
+     * records that expose a handle, then applying it to every record in that list (photos included, which
+     * is the point — they carry no handle of their own but favorite/group-expand need one).
+     *
+     * Data-driven on purpose: the namespace differs per camera *and* per store — Nano `0x40100000` step
+     * `0x40`, Xtra SD `0x00040000` step `0x10`, Xtra internal `0x40040000` — so hardcoding one formula
+     * silently produced garbage handles on the Xtra (group-expand returned 0 frames, photo favorite
+     * failed). [step] is the most common positive delta over seq-adjacent pairs and [base] the most common
+     * `handle - seq*step`, so a stray record can't skew the fit; an unfittable list just leaves 0.
+     */
+    private fun withCmdHandles(files: List<CameraFile>): List<CameraFile> {
+        val fits = HashMap<Int, Pair<Long, Long>>()          // storage list -> (base, step)
+        for ((group, list) in files.groupBy { it.group }) {
+            val pts = list.filter { it.handle != 0L && it.seq > 0 }
+                .map { it.seq to it.handle }.distinctBy { it.first }.sortedBy { it.first }
+            if (pts.size < 2) continue
+            val steps = pts.zipWithNext()
+                .mapNotNull { (a, b) -> ((b.second - a.second) / (b.first - a.first)).takeIf { it > 0 } }
+            val step = steps.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key ?: continue
+            val base = pts.map { it.second - it.first * step }
+                .groupingBy { it }.eachCount().maxByOrNull { it.value }?.key ?: continue
+            fits[group] = base to step
+            log("datalink: handle fit (list $group): base=0x${base.toString(16)} step=0x${step.toString(16)}")
+        }
+        if (fits.isEmpty()) return files
+        return files.map { f ->
+            val fit = fits[f.group]
+            if (fit == null || f.seq <= 0) f else f.copy(cmdHandle = fit.first + f.seq * fit.second)
+        }
     }
 
     /**

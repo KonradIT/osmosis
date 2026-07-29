@@ -924,7 +924,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      *  the serialized favorite worker and reverts the badge on failure. */
     private fun toggleFavorite(position: Int, f: CameraFile, dl: DatalinkClient) {
         val on = !f.starred
-        val favHandle = if (f.handle != 0L) f.handle else 0x40100000L + f.seq.toLong() * 0x40L
+        // Videos carry their own handle; photos don't, so fall back to the manifest-fitted one (a
+        // hardcoded Nano formula is why photo favorites failed on the Xtra). See withCmdHandles.
+        val favHandle = if (f.handle != 0L) f.handle else f.cmdHandle
+        if (favHandle == 0L) { toast("Can't favorite ${f.name} — no handle"); return }
         // Optimistic badge only — the camera's manifest is the single source of truth for star state, so a
         // reload shows whatever the camera reports (the Xtra reports none; that's fine, we don't fake it).
         adapter?.setStarred(position, on)
