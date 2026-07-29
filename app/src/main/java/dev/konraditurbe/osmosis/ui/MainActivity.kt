@@ -680,7 +680,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     }
                     datalink = dl
                     dev.konraditurbe.osmosis.net.Highlights.provider = { h -> dl.getHighlights(h) }
-                    if (files.isNotEmpty()) dl.startKeepAlive() // hold the AP up while browsing
+                    // Always: it holds the AP up, polls status for the pill, and holds playback (#12).
+                    // Gating on files.isNotEmpty() left an empty camera (e.g. an Action 6 with no media)
+                    // with a dead pill — status is only parsed in this loop.
+                    dl.startKeepAlive()
                     // Storage is per manifest *list*, not per manifest: a camera with a card returns an
                     // SD list and an internal list back to back, and probing only the first file stamped
                     // that one store on every file — so whichever half didn't match 404'd (blank
