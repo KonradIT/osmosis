@@ -401,6 +401,12 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 - Reply `00`; the recording bit clears ~2.4 s later. **Not a toggle** — re-sending `[01]` while recording answers `df`, so drive start/stop off the decoded recording bit (§18), never by toggling blind.
 - DUML example: <https://b3yond.d3vl.com/duml/#550e04660201020440020200c770>
 
+### 12a. Shoot photo — `0x02/0x01` ✅
+- Cmd Set / ID: `0x02` / `0x01`  ·  `cmd_type 0x40`  ·  receiver `0x01` (datalink)  ·  payload `[01]`
+- Reply `0x02/0x01` (ack, `cmd_type 0xc0`) with payload `00` = success.
+- **Fire-and-forget, one press = one capture in the camera's *current* photo mode.** Ground-truthed from a Mimo↔Nano pcap: two presses (`[01]` each, ~40 ms round-trip) produced the two new files that followed — one a single JPEG, one a 6-frame burst — so `[01]` is a generic shutter *trigger*, **not** the photo type. The mode (single / burst / interval / HDR / …) is set separately; the camera completes a burst/interval on its own (no stop press, unlike record §11/§12).
+- Symmetric with record: photo = `0x02/0x01 [01]` (shoot); record = `0x02/0x02 [01]`/`[00]` (start/stop).
+
 ### 13. Set mode — ⚠️ *this is the **work** mode, not the shooting mode (see §13a)*
 - Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[mode:u8]`
 - Nominally `0` Photo · `1` Video · `2` Playback · `3` SlowMo · `4` Timelapse · `5` Panorama — but `0x02/0x02` **is** the record control above, so on the Nano `0`/`1` **stop/start a recording** rather than switch a mode. ⚠ A "Video" button mapped to `[01]` starts a recording behind the user's back — exclude `0`/`1` from any mode switcher.
