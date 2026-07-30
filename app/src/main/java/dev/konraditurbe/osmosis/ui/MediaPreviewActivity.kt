@@ -84,6 +84,15 @@ class MediaPreviewActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_preview)
 
+        // Full-screen media viewer: black system bars with light icons (the app's cream theme sets the
+        // opposite), so the status/nav bars blend into the dark preview instead of the cream chrome.
+        window.statusBarColor = android.graphics.Color.BLACK
+        window.navigationBarColor = android.graphics.Color.BLACK
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+
         val path = intent.getStringExtra(EXTRA_PATH) ?: run { finish(); return }
         ip = intent.getStringExtra(EXTRA_IP) ?: "192.168.2.1"
         position = intent.getIntExtra(EXTRA_POSITION, -1)
@@ -95,6 +104,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         file = CameraFile(path, "", intent.getIntExtra(EXTRA_STORAGE, 0),
             intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY),
             handle = intent.getLongExtra(EXTRA_HANDLE, 0L),
+            sizeBytes = intent.getLongExtra(EXTRA_SIZE, 0L),
             resolution = intent.getStringExtra(EXTRA_RESOLUTION))
 
         videoView = findViewById(R.id.videoView)
@@ -123,10 +133,10 @@ class MediaPreviewActivity : AppCompatActivity() {
         photoView.setOnClickListener { toggleControls() }
 
         renderTop()
-        btnQueue.text = queueLabel()
+        refreshQueueButton()
         btnQueue.setOnClickListener {
             queued = !queued
-            btnQueue.text = queueLabel()
+            refreshQueueButton()
             publishResult()
         }
 
@@ -165,6 +175,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         selectedFrame = i
         updateBurstSelection()
         loadPhoto()          // re-fetch the chosen frame (spinner shows while it loads)
+        refreshQueueButton() // a different frame may already be saved (or not)
         publishResult()      // the "currently viewed" frame changed — keep the pending result current
     }
 
@@ -185,6 +196,35 @@ class MediaPreviewActivity : AppCompatActivity() {
         queued -> "Remove from Queue"
         hasTrim() -> "Add to Queue (trimmed)"
         else -> "Add to Queue"
+    }
+
+    // Name -> "already fully saved" — checked off the UI thread, cached (per burst frame / the single file).
+    private val downloadedCache = HashMap<String, Boolean>()
+
+    /** The item the download button acts on: the selected burst frame, or the single file. Per-frame size
+     *  is only known for the lead (frame 0), so other frames fall back to a name-only match. */
+    private fun currentCheckFile(): CameraFile =
+        if (groupPaths.isNotEmpty())
+            file.copy(path = groupPaths[selectedFrame], sizeBytes = if (selectedFrame == 0) file.sizeBytes else 0L)
+        else file
+
+    /**
+     * Gray out the download button when this exact file is already fully saved in its Osmosis collection —
+     * but only for a **whole** download (no trim): a trimmed export is a new output, so it stays enabled.
+     */
+    private fun refreshQueueButton() {
+        val f = currentCheckFile()
+        val name = f.name
+        if (!hasTrim() && !downloadedCache.containsKey(name)) {
+            Thread {
+                val done = dev.konraditurbe.osmosis.net.MediaDownloader.isDownloaded(this, f)
+                main.post { downloadedCache[name] = done; refreshQueueButton() }
+            }.start()
+        }
+        val alreadySaved = !hasTrim() && downloadedCache[name] == true
+        btnQueue.isEnabled = !alreadySaved
+        btnQueue.alpha = if (alreadySaved) 0.5f else 1f
+        btnQueue.text = if (alreadySaved) "Already downloaded" else queueLabel()
     }
 
     /** Wire the custom player (transport + scrubber) and trim. Trim points come from the paused scrubber. */
@@ -222,7 +262,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private fun updateTrimUi() {
         btnMarkIn.text = if (trimStartMs >= 0) "[ ${mmss(trimStartMs)}" else "["
         btnMarkOut.text = if (trimEndMs >= 0) "] ${mmss(trimEndMs)}" else "]"
-        btnQueue.text = queueLabel()
+        refreshQueueButton()   // adding a trim re-enables the button even if the whole file is saved
     }
 
     private fun mmss(ms: Long): String { val s = ms / 1000; return "%d:%02d".format(s / 60, s % 60) }
@@ -265,12 +305,11 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 
-    /** filename · date · <resolution>·<fps> */
+    /** id · date · <resolution>·<fps> — the 4-digit media ID (seq), not the raw filename. */
     private fun renderTop() {
         val resFps = listOfNotNull(resTag, file.resLabel).joinToString("·").ifBlank { "—" }
-        val name = if (groupPaths.isNotEmpty())
-            groupPaths[selectedFrame].substringAfterLast('/') + "  (${selectedFrame + 1}/${groupPaths.size})"
-        else file.name
+        val id = "%04d".format(file.seq)
+        val name = if (groupPaths.isNotEmpty()) "$id  (${selectedFrame + 1}/${groupPaths.size})" else id
         topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
     }
 
@@ -414,6 +453,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         // grid never probed the group, so it can't resolve an index. Frame 0 (or non-burst) → no override.
         val selPath = groupPaths.getOrNull(selectedFrame).takeIf { selectedFrame > 0 }
         setResult(RESULT_OK, Intent().apply {
+            putExtra(EXTRA_PATH, intent.getStringExtra(EXTRA_PATH))   // lead path = the grid cell's identity
             putExtra(EXTRA_POSITION, position)
             putExtra(EXTRA_QUEUED, queued)
             putExtra(EXTRA_GROUP_SEL_PATH, selPath)
@@ -436,8 +476,9 @@ class MediaPreviewActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val EXTRA_PATH = "path"
+        const val EXTRA_PATH = "path"
         private const val EXTRA_STORAGE = "storage"
+        private const val EXTRA_SIZE = "size"    // full manifest byte size → already-downloaded check
         private const val EXTRA_HANDLE = "handle"    // video handle → highlight pull (0x02/0xff)
         private const val EXTRA_RES = "res"          // fps label ("25fps")
         private const val EXTRA_RESOLUTION = "resolution"  // pixel W×H ("3840x2160") from the manifest
@@ -459,6 +500,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             Intent(ctx, MediaPreviewActivity::class.java).apply {
                 putExtra(EXTRA_PATH, file.path)
                 putExtra(EXTRA_STORAGE, file.storage)
+                putExtra(EXTRA_SIZE, file.sizeBytes)
                 putExtra(EXTRA_HANDLE, file.handle)
                 putExtra(EXTRA_RES, file.resLabel)
                 putExtra(EXTRA_RESOLUTION, file.resolution)
