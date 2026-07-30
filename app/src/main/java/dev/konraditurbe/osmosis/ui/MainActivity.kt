@@ -1097,39 +1097,38 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * reason), so we require a reconnect to refresh handles before another delete — rather than risk
      * acting on a stale one. Size labels and preview keep working.
      */
-    private fun removeFromGrid(position: Int) {
+    private fun removeFromGrid(path: String) {
         val ad = adapter ?: return
-        val remaining = (0 until ad.count).filter { it != position }.map { ad.getItem(it).copy(handle = 0L) }
-        showGrid(remaining)
+        val remaining = ad.allFilesSnapshot().filter { it.path != path }.map { it.copy(handle = 0L) }
+        showGrid(remaining, preserveFilters = true)
     }
 
     private fun toast(s: String) =
         main.post { android.widget.Toast.makeText(this, s, android.widget.Toast.LENGTH_SHORT).show() }
 
-    /** Returns the camera mount index (0 or 1) that serves this file's path — by asking, since the
-     *  index is not a fixed SD/internal mapping (an Xtra served SD at 0, internal at 1). */
-    private fun detectStorage(f: CameraFile): Int {
-        for (s in intArrayOf(1, 0)) {
-            if (http.headCode("/v2?storage=$s&path=${f.path}") == 200) return s
-        }
-        return 0
-    }
-
     private fun onDownloadClicked() {
         val ad = adapter ?: run { logLine("Nothing listed yet — tap Offload first."); return }
         val jobs = ad.selectedEntries().map { MediaDownloader.Job(it.first, it.second) }
+        // Queue keys parallel to [jobs] — used to drop each cell from the queue once it lands. Bursts queue
+        // under the lead's path (the map key), which is NOT job.file.path, so we map by index, not by file.
+        val keys = ad.selectedKeys()
         if (jobs.isEmpty()) {
             logLine("No files queued (tap a cell to preview + queue).")
             return
         }
         val trimmed = jobs.count { it.trim != null }
         logLine("Downloading ${jobs.size} item(s)${if (trimmed > 0) " ($trimmed trimmed)" else ""} to gallery...")
+        val doneKeys = java.util.Collections.synchronizedList(mutableListOf<String>())
         val listener = object : MediaDownloader.Progress {
             private var totalBytes = 0L
             private var fileTotal = 0L
             private var count = 0
             private var lastO = -1
             private var lastF = -1
+
+            override fun onFileDone(index: Int, done: Boolean) {
+                if (done) keys.getOrNull(index)?.let { doneKeys.add(it) }
+            }
 
             override fun onStart(totalFiles: Int, tb: Long) {
                 totalBytes = tb; count = totalFiles
@@ -1162,6 +1161,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
             override fun onComplete(saved: Int, skipped: Int, failed: Int) {
                 main.post {
+                    // Everything now on the device leaves the queue (saved + already-present); only
+                    // failed/paused items stay so a later Download resumes them.
+                    adapter?.dequeuePaths(doneKeys.toList())
+                    updateDownloadFab()
                     overallBar.progress = 100
                     overallText.text = "Done: $saved saved, $skipped skipped, $failed failed"
                     fileText.text = ""

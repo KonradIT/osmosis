@@ -33,6 +33,9 @@ class MediaDownloader(
         fun onStart(totalFiles: Int, totalBytes: Long)
         fun onFileStart(index: Int, name: String, fileBytes: Long)
         fun onTick(fileDone: Long, overallDone: Long)
+        /** One job finished. [done] is true when it's now on the device (saved OR already-present/skipped) —
+         *  i.e. safe to drop from the queue; false only when it failed/paused and should be retried. */
+        fun onFileDone(index: Int, done: Boolean)
         fun onComplete(saved: Int, skipped: Int, failed: Int)
     }
 
@@ -56,6 +59,7 @@ class MediaDownloader(
                 Result.SKIPPED -> skipped++
                 Result.FAILED -> failed++
             }
+            p.onFileDone(i, r != Result.FAILED)
             overallBase += sz
         }
         p.onComplete(saved, skipped, failed)
@@ -87,7 +91,7 @@ class MediaDownloader(
         val tracked = u
         if (tracked != null && runCatching { resolver.openFileDescriptor(tracked, "rw")?.close() }.isFailure) u = null
         if (u == null) {
-            if (isAlreadyDownloaded(f, remote)) { log("skip ${f.name} (already saved)"); return Result.SKIPPED }
+            if (isAlreadyDownloaded(f)) { log("skip ${f.name} (already saved)"); return Result.SKIPPED }
             u = createPending(f, f.name) ?: run { log("insert failed: ${f.name}"); return Result.FAILED }
             prefs.edit().putString(key, u.toString()).apply()
         }
@@ -212,18 +216,30 @@ class MediaDownloader(
         )
     }
 
-    private fun isAlreadyDownloaded(f: CameraFile, remote: Long): Boolean {
-        val (collection, _, _) = collectionFor(f)
-        val proj = arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.SIZE)
-        val sel = "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.IS_PENDING}=0"
-        return runCatching {
-            context.contentResolver.query(collection, proj, sel, arrayOf(f.name), null)?.use { c ->
-                while (c.moveToNext()) {
-                    val sz = c.getLong(1)
-                    if (remote <= 0 || sz == remote) return true
-                }
+    companion object {
+        /**
+         * True if [file] is already fully saved in its Osmosis collection. Matched by display name and
+         * **completed** state (`IS_PENDING=0`) only — NOT by exact byte size. Camera capture names carry a
+         * timestamp+seq so they're unique per file, and a completed row is only ever written after a full
+         * transfer, so the name is sufficient proof. (The old exact-size match false-negatived a few files
+         * whose manifest/HEAD size disagreed slightly with the stored bytes, re-saving them as duplicates
+         * every run.) Used by the preview to gray out the download button for a *whole* (untrimmed) file.
+         */
+        fun isDownloaded(context: Context, file: CameraFile): Boolean {
+            val collection = when {
+                file.isVideo -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                file.isImage -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                else -> MediaStore.Downloads.EXTERNAL_CONTENT_URI
             }
-            false
-        }.getOrDefault(false)
+            val proj = arrayOf(MediaStore.MediaColumns._ID)
+            val sel = "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.IS_PENDING}=0"
+            return runCatching {
+                context.contentResolver.query(collection, proj, sel, arrayOf(file.name), null)?.use { it.count > 0 }
+                    ?: false
+            }.getOrDefault(false)
+        }
     }
+
+    /** See [isDownloaded]: a completed row with our unique capture-name = already saved (no size match). */
+    private fun isAlreadyDownloaded(f: CameraFile): Boolean = isDownloaded(context, f)
 }
