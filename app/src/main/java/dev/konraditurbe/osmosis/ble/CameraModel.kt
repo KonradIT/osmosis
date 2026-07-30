@@ -17,6 +17,10 @@ data class CameraModel(
     val tcpPoke: Boolean = true,
     val wpa3: Boolean = false,
     val verified: Boolean = false,
+    // The Pocket 3 has exactly one store — its microSD, always served at `/v2?storage=0`. Pin it there
+    // instead of running the handle/HEAD storage resolution (tester-confirmed storage=0 across every
+    // session). Other models can carry SD + internal, so they still resolve per file.
+    val singleSdStorage: Boolean = false,
 ) {
     /**
      * The other datalink config to try when [datalinkPort] never answers: the whole line is either
@@ -45,7 +49,7 @@ data class CameraModel(
             // Broadcasts no BLE mfr data — name fallback. Tester-confirmed on 9004; its _OP3-suffixed
             // naming decodes in full (path + ext + delete handle). Note: rejects 0x53/0x10 (e0) but its
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
-            0x0020 to CameraModel("Osmo Pocket 3", verified = true),
+            0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
             0x0021 to CameraModel("Osmo Pocket 4"),
         )
 

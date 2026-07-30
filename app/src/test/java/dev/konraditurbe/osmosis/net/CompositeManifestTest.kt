@@ -1,7 +1,9 @@
 package dev.konraditurbe.osmosis.net
 
+import dev.konraditurbe.osmosis.core.StorageRules
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -288,4 +290,33 @@ class CompositeManifestTest {
         assertTrue("no card in -> one list -> one group", files.all { it.group == 0 })
     }
 
+    /**
+     * The `/v2` storage mount guessed from each camera's **real captured handle** must match the store
+     * the camera actually serves that file from (the `0x40000000` = internal → storage 1 rule that
+     * replaced the HTTP-probe search). Decodes the same per-camera fixtures used above, so a wire-format
+     * or rule change that would blank thumbnails on any model breaks this test.
+     */
+    @Test
+    fun `storage mount guess matches each camera's real store from its handle`() {
+        fun guess(bytes: ByteArray): Int? {
+            val f = DatalinkClient({}, 9004, true).decodeCompositeForTest(bytes).first { it.ext == "MP4" }
+            return StorageRules.mountGuess(singleSdStorage = false, handle = f.handle, cmdHandle = f.cmdHandle)
+        }
+        assertEquals("Nano internal -> storage 1", 1, guess(threeRecords))        // 0x40104200
+        assertEquals("Action 5 Pro internal -> storage 1", 1, guess(oa5Rec))      // 0x40040020
+        assertEquals("Action 6 internal -> storage 1", 1, guess(oa6Rec))          // 0x40100080
+        assertEquals("Xtra (no card) internal -> storage 1", 1, guess(xtraTwoRecords)) // 0x40040100
+        assertEquals("Pocket 3 microSD -> storage 0", 0, guess(pocket3Rec))       // 0x000400f0 (bit clear)
+    }
+
+    @Test
+    fun `mountGuess handles the single-SD pin, missing handles and photo cmdHandle fallback`() {
+        // Pocket 3 is pinned to its microSD regardless of what the handle bit says.
+        assertEquals(0, StorageRules.mountGuess(singleSdStorage = true, handle = 0x40100000L, cmdHandle = 0L))
+        // No handle at all (a photos-only list) -> null, so the caller falls back to a probe.
+        assertNull(StorageRules.mountGuess(singleSdStorage = false, handle = 0L, cmdHandle = 0L))
+        // A photo carries no delete handle, so the group-fitted cmdHandle (same store namespace) decides.
+        assertEquals(1, StorageRules.mountGuess(singleSdStorage = false, handle = 0L, cmdHandle = 0x40040020L))
+        assertEquals(0, StorageRules.mountGuess(singleSdStorage = false, handle = 0L, cmdHandle = 0x000400f0L))
+    }
 }
