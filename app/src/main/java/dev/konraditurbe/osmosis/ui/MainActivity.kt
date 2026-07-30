@@ -444,6 +444,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         apJoiner?.release(); apJoiner = null
         gattClient?.disconnect(); gattClient?.close(); gattClient = null
         offloadMode = false; offloadTriggered = false; connecting = false
+        // close() above cancels the gatt callback, so onDisconnected won't fire to reset these — do it
+        // here, or the next camera's pairing/REQ replies get mis-deduped against the last camera's state.
+        lastPairStatus = -99; credsRequested = false; reqSeen.clear()
         setConnectProgress(0)
     }
 
@@ -469,6 +472,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun switchToGrid() { selectorGroup.visibility = View.GONE; gridGroup.visibility = View.VISIBLE }
 
     private fun switchToSelector() {
+        // Returning to the overview must fully release the current camera — GATT, datalink, WiFi binding,
+        // AND the 1 Hz BLE keepalive. Leaving the old GATT connected (+ keepalive pinging it) kept the
+        // camera from re-advertising ("not available" on rescan) and wedged the next camera's connect on
+        // its first GATT step. teardownOffload is null-safe/idempotent, so redundant callers are fine.
+        teardownOffload()
         gridGroup.visibility = View.GONE
         selectorGroup.visibility = View.VISIBLE
         startCameraScan(select = true)
@@ -497,8 +505,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     private fun connectAndOffload(device: BluetoothDevice) {
-        datalink?.close()   // end any prior camera's datalink session
-        apJoiner?.release() // drop any prior camera's WiFi request + process binding
+        teardownOffload()   // fully release any prior camera (GATT, datalink, WiFi, keepalive) first —
+                            // a leaked GATT/keepalive from the last camera otherwise stalls this connect
         offloadPass = savedPassFor(device.address)
         offloadMode = true
         offloadTriggered = false
@@ -1268,8 +1276,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                             else -> "status=0x%02x".format(status)
                         }
                         logLine("PAIRING <- 0x07/45 $meaning  [${p.toHex()}]")
-                        if (status == 0x01) onPaired()
                     }
+                    // onPaired() is load-bearing and idempotent (guarded by credsRequested) — call it on
+                    // EVERY already-paired reply, not only when the status *changes*. Gating it on the
+                    // log-dedup above wedged the next camera: lastPairStatus lingered at 0x01 from the
+                    // previous session (teardown's disconnect+close cancels onDisconnected, so it never
+                    // reset), so the new camera's identical 0x01 was skipped and offload never started.
+                    if (status == 0x01) onPaired()
                 }
                 0x46 -> {
                     logLine("PAIRING <- 0x07/46 APPROVED  [${p.toHex()}]")

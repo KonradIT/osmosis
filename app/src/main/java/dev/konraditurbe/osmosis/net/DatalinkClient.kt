@@ -326,12 +326,50 @@ class DatalinkClient(
      * was pulled; the faithful session brings it back for free. Returns each mark's start time in **ms**,
      * ascending; empty if none / no session. [handle] = the video's manifest delete-handle. Off-UI.
      */
+    /**
+     * Pull a video's highlight marks (0x02/0xff). Inline on the live session first; if the camera doesn't
+     * answer — the Xtra's inline command *writes* drift out of the sliding-window accept range after the
+     * keep-alive has run a while (reads stay lenient) — fall back to a **fresh registered session**, like
+     * delete/favorite. That both lands this query and **re-registers → resets the seq window**, so inline
+     * works again for the next stretch. Read-only, so it's safe to retry.
+     */
+    @Synchronized
     fun getHighlights(handle: Long): List<Int> {
         if (handle == 0L) return emptyList()
-        val reply = runCommand(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0)
-            ?: return emptyList()
-        val marks = parseHighlights(reply)
-        log("datalink: highlights 0x${handle.toString(16)} → ${marks.size} $marks")
+        if (keepAliveOn) {
+            val reply = runCommand(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0)
+            if (reply != null) {
+                val marks = parseHighlights(reply)
+                log("datalink: highlights(inline) 0x${handle.toString(16)} → ${marks.size} $marks")
+                return marks
+            }
+            log("datalink: highlights(inline) 0x${handle.toString(16)} — no reply, retrying in a fresh session")
+        }
+        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return emptyList()
+        keepAliveOn = false
+        Thread.sleep(600)                // let the keep-alive loop finish its recv and exit
+        runCatching { sock.close() }     // free udp/$port for the fresh session
+        val marks = runCatching { freshSessionHighlights(ip, handle) }
+            .getOrElse { log("datalink: highlights session error: ${it.message}"); emptyList() }
+        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        return marks
+    }
+
+    private fun freshSessionHighlights(ip: String, handle: Long): List<Int> {
+        if (!openAndRegister(ip, subscribe = false)) { log("datalink: highlights — fresh session open FAILED"); return emptyList() }
+        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)   // enter playback mode
+        recvAll(200)
+        sendDuml(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0)
+        var reply: ByteArray? = null
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (reply == null && System.nanoTime() < deadline) {
+            reply = findReply(recvAll(200), 0x02, 0xFF)
+            if (reply == null) sendAck()
+        }
+        sendDuml(0x02, 0x0c, hex("01010000"), receiverType = 0x01, receiverId = 0)   // leave playback mode
+        recvAll(150)
+        val marks = reply?.let { parseHighlights(it) } ?: emptyList()
+        log("datalink: highlights(fresh) 0x${handle.toString(16)} → ${marks.size} $marks")
         return marks
     }
 
