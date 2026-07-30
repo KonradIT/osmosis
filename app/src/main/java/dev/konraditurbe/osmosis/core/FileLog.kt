@@ -29,11 +29,15 @@ object FileLog {
 
     private val lock = Any()
     private var writer: Writer? = null
+    private var file: File? = null
 
     fun logsDir(ctx: Context): File = File(ctx.getExternalFilesDir(null), "logs").apply { mkdirs() }
 
     /** True while a log file is open. */
     fun isOn(): Boolean = synchronized(lock) { writer != null }
+
+    /** The file currently (or most recently) being written, or null if none this process. */
+    fun currentFile(): File? = synchronized(lock) { file }
 
     /** Open a session log if the user's "Save logs" toggle is on. Idempotent + safe from any thread. */
     fun startIfEnabled(ctx: Context) {
@@ -50,9 +54,10 @@ object FileLog {
                 dir.listFiles { f -> f.isFile && f.name.endsWith(".log") }
                     ?.sortedByDescending { it.lastModified() }?.drop(KEEP - 1)?.forEach { it.delete() }
                 val name = "osmosis_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.log"
-                val file = File(dir, name)
-                writer = BufferedWriter(FileWriter(file, true))
-                writeLocked("=== saving logs to ${file.absolutePath} ===")
+                val f = File(dir, name)
+                file = f
+                writer = BufferedWriter(FileWriter(f, true))
+                writeLocked("=== saving logs to ${f.absolutePath} ===")
             }.onFailure { android.util.Log.e("Osmosis", "FileLog.start failed", it) }
         }
     }

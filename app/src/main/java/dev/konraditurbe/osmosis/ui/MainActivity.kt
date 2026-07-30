@@ -222,7 +222,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         if (saveLogs.isChecked) startFileLogging() // set state before the listener so this isn't double-fired
         saveLogs.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean("save_logs", checked).apply()
-            if (checked) startFileLogging() else stopFileLogging()
+            if (checked) {
+                startFileLogging()
+            } else {
+                val saved = FileLog.currentFile()      // grab it before stop() nulls nothing, just to be safe
+                stopFileLogging()
+                if (saved != null && saved.exists() && saved.length() > 0) offerToShareLogs(saved)
+            }
         }
 
         // 🛰️ GPS-sync mode (R-SDK): when on, picking a camera starts the GPS foreground service
@@ -1359,6 +1365,39 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun startFileLogging() = FileLog.start(this)
 
     private fun stopFileLogging() = FileLog.stop()
+
+    /** After the user turns "Save logs" off, ask whether to send the just-closed log to Konrad. */
+    private fun offerToShareLogs(log: java.io.File) {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Share logs with Konrad?")
+            .setMessage(log.name)
+            .setPositiveButton("Share") { _, _ -> shareLogGzipped(log) }
+            .setNegativeButton("No", null)
+            .show()
+    }
+
+    /** gzip the log into external cache and hand a content:// URI to the system share sheet. */
+    private fun shareLogGzipped(log: java.io.File) {
+        runCatching {
+            val dir = java.io.File(externalCacheDir, "shared_logs").apply { mkdirs() }
+            val gz = java.io.File(dir, log.name + ".gz")
+            java.util.zip.GZIPOutputStream(gz.outputStream().buffered()).use { out ->
+                log.inputStream().buffered().use { it.copyTo(out) }
+            }
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this, "$packageName.fileprovider", gz)
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "application/gzip"
+                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                putExtra(android.content.Intent.EXTRA_SUBJECT, "Osmosis logs — ${log.name}")
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(android.content.Intent.createChooser(send, "Share logs with Konrad"))
+        }.onFailure {
+            android.util.Log.e("Osmosis", "shareLogGzipped failed", it)
+            android.widget.Toast.makeText(this, "Couldn't share logs: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
 
     private fun short(u: java.util.UUID) = u.toString().substring(4, 8)
 
