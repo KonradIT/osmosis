@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Date section header — spans the full grid width (GridLayoutManager span lookup). -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/headerLabel"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingHorizontal="8dp"
+    android:paddingTop="14dp"
+    android:paddingBottom="6dp"
+    android:textAllCaps="true"
+    android:textColor="@color/osmo_muted"
+    android:textSize="12sp"
+    android:textStyle="bold"
+    android:letterSpacing="0.06"
+    tools:text="30 JUL 2026"
+    xmlns:tools="http://schemas.android.com/tools" />

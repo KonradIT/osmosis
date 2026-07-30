@@ -129,20 +129,51 @@
                 android:layout_height="wrap_content"
                 android:layout_margin="12dp" />
 
-            <LinearLayout
+            <!-- Gallery toolbar: type/faved filter chips + a Select-mode toggle (long-press = all/none). -->
+            <HorizontalScrollView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingHorizontal="8dp">
+                android:paddingHorizontal="8dp"
+                android:scrollbars="none">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnAll"
-                    style="@style/Widget.Material3.Button.TextButton"
+                <LinearLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Select all / none" />
-            </LinearLayout>
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnFilterPhotos"
+                        style="@style/FilterChip"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:text="Photos" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnFilterVideos"
+                        style="@style/FilterChip"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:text="Videos" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnFilterFaved"
+                        style="@style/FilterChip"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:text="Faved" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSelect"
+                        style="@style/FilterChip"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Select" />
+                </LinearLayout>
+            </HorizontalScrollView>
 
             <!-- Progress: invisible by default, space reserved so the grid doesn't jump. -->
             <LinearLayout
@@ -190,18 +221,15 @@
                     app:trackThickness="6dp" />
             </LinearLayout>
 
-            <GridView
+            <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/grid"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1"
                 android:clipToPadding="false"
-                android:horizontalSpacing="2dp"
-                android:numColumns="3"
-                android:paddingHorizontal="6dp"
+                android:paddingHorizontal="5dp"
                 android:paddingBottom="92dp"
-                android:stretchMode="columnWidth"
-                android:verticalSpacing="2dp" />
+                android:scrollbars="vertical" />
         </LinearLayout>
 
         <!-- Pull-up-to-load-more spinner: rises from below as the user overscrolls past the last row,

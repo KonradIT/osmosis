@@ -11,7 +11,8 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.widget.EditText
-import android.widget.GridView
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import android.widget.ListView
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -56,7 +57,13 @@ import java.util.Locale
  */
 class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Listener {
 
-    private lateinit var grid: GridView
+    private lateinit var grid: RecyclerView
+    private var gridCols = 3   // current grid column count (3 portrait / 6 landscape); updated on rotation
+    // Gallery toolbar chips (Photos/Videos are a mutually-exclusive type filter; Faved + Select combine).
+    private lateinit var chipPhotos: MaterialButton
+    private lateinit var chipVideos: MaterialButton
+    private lateinit var chipFaved: MaterialButton
+    private lateinit var chipSelect: MaterialButton
     private lateinit var overallBar: ProgressBar
     private lateinit var fileBar: ProgressBar
     private lateinit var overallText: TextView
@@ -99,20 +106,20 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val data = result.data ?: return@registerForActivityResult
-        val pos = data.getIntExtra(MediaPreviewActivity.EXTRA_POSITION, -1)
-        if (pos < 0) return@registerForActivityResult
         val ad = adapter ?: return@registerForActivityResult
+        // Cells are identified by their (lead) path — stable across filtering/pagination.
+        val leadPath = data.getStringExtra(MediaPreviewActivity.EXTRA_PATH) ?: return@registerForActivityResult
+        val f = ad.fileForPath(leadPath) ?: return@registerForActivityResult
         val queued = data.getBooleanExtra(MediaPreviewActivity.EXTRA_QUEUED, false)
         val s = data.getLongExtra(MediaPreviewActivity.EXTRA_TRIM_START, -1L)
         val e = data.getLongExtra(MediaPreviewActivity.EXTRA_TRIM_END, -1L)
-        val f = ad.getItem(pos)
         // A burst preview queues the exact frame the user was viewing: the viewer hands back that frame's
         // own path/thumb (the grid never probed the group), so we rebuild it off the lead. Null → the lead.
         val selPath = data.getStringExtra(MediaPreviewActivity.EXTRA_GROUP_SEL_PATH)
         val member = selPath?.let {
             f.copy(path = it, thumbPath = data.getStringExtra(MediaPreviewActivity.EXTRA_GROUP_SEL_THUMB) ?: f.thumbPath)
         }
-        ad.setQueued(pos, queued, if (s >= 0 && e > s) TrimRange(s, e) else null, member)
+        ad.setQueuedByPath(leadPath, queued, if (s >= 0 && e > s) TrimRange(s, e) else null, member)
         // Favorite lives on the grid long-press now (see onGridLongPress), not the preview — the preview
         // no longer touches the datalink, so it can't perturb the browse keep-alive.
     }
@@ -207,7 +214,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         cameraList.setOnItemClickListener { _, _, pos, _ -> onCamRowClick(pos) }
         cameraList.setOnItemLongClickListener { _, _, pos, _ -> onCamRowLongClick(pos) }
         findViewById<View>(R.id.fabDownload).setOnClickListener { onDownloadClicked() }
-        findViewById<View>(R.id.btnAll).setOnClickListener { adapter?.toggleAll() }
+        wireGalleryChips()
         // "Save logs" toggle → persist all log lines to a rotating .log file in external files dir.
         val prefs = getSharedPreferences("osmosis", MODE_PRIVATE)
         val saveLogs = findViewById<MaterialSwitch>(R.id.switchSaveLogs)
@@ -684,16 +691,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     // Gating on files.isNotEmpty() left an empty camera (e.g. an Action 6 with no media)
                     // with a dead pill — status is only parsed in this loop.
                     dl.startKeepAlive()
-                    // Storage is per manifest *list*, not per manifest: a camera with a card returns an
-                    // SD list and an internal list back to back, and probing only the first file stamped
-                    // that one store on every file — so whichever half didn't match 404'd (blank
-                    // thumbnails, failed downloads). Probe once per list instead: 1-2 HEADs per group.
-                    storageByGroup = emptyMap()                 // fresh list → reset the group→store cache
+                    // Storage (/v2 mount) is resolved per file from its handle's store bit (internal
+                    // 0x40000000 → storage 1, else 0), confirmed by one HEAD per store. See resolveStorage.
+                    storageForBit.clear()
                     val fixed = applyStorageAndSort(files)
                     logLine("MANIFEST: ${fixed.size} files — " +
-                        storageByGroup.entries.joinToString(", ") { (g, s) ->
-                            "list $g on storage=$s (${files.count { it.group == g }} files)"
-                        } + (if (dl.moreAvailable) " · more on scroll" else ""))
+                        fixed.groupBy { it.storage }.entries.sortedBy { it.key }
+                            .joinToString(", ") { (s, list) -> "storage=$s (${list.size} files)" } +
+                        (if (dl.moreAvailable) " · more on scroll" else ""))
                     main.post { showGrid(fixed) }
                 }.start()
             }
@@ -754,12 +759,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     // ---- media grid + download ---------------------------------------------
 
-    private fun showGrid(files: List<CameraFile>) {
+    private fun showGrid(files: List<CameraFile>, preserveFilters: Boolean = false) {
         // Reaching here = pairing + WiFi + datalink all worked → remember this camera, show the grid.
         setConnectProgress(100) // first media in — connection complete
         currentAddress?.let { savedCameras.save(it, offloadSsid, currentModelId) }
         switchToGrid()
         statusPill.render(pillName(), "Connected · WiFi", currentStatus, showPower = isNano())
+        if (!preserveFilters) resetGalleryChips()      // a fresh camera list starts unfiltered
         if (files.isEmpty()) {
             logLine("No media found on camera.")
             return
@@ -770,25 +776,140 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val ml = MetaLoader(http)
         imageLoader = loader
         metaLoader = ml
-        val ad = MediaGridAdapter(files, loader, ml, onOpen = { openPreview(it) }, onLongPress = { onGridLongPress(it) })
+        gridCols = gridColumns()
+        val ad = MediaGridAdapter(files, loader, ml, gridCols,
+            onOpen = { openPreview(it) }, onLongPress = { onGridLongPress(it) })
         adapter = ad
+        ad.onQueueChanged = { updateDownloadFab() }
+        val lm = GridLayoutManager(this, gridCols)
+        // Reads the mutable gridCols so rotation can re-span without rebuilding the adapter (see
+        // onConfigurationChanged) — headers span the full row at whatever the current column count is.
+        lm.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+            override fun getSpanSize(position: Int) = if (ad.isHeader(position)) gridCols else 1
+        }
+        grid.layoutManager = lm
+        installGridSpacing()
         grid.adapter = ad
+        applyChipsToAdapter()                          // re-apply any active filter to the fresh adapter
+        updateDownloadFab()                            // queue survives rebuilds (path-keyed) → reflect it
         loadingMore = false
         installPullToLoadMore()
         logLine("Grid ready: ${files.size} files. Tap a cell to preview + queue, then Download. Long-press a cell to delete.")
     }
 
-    // ---- lazy grid pagination (pull up past the last row to load older pages) --------------------
-    private var storageByGroup: Map<Int, Int> = emptyMap()
-    private var loadingMore = false
+    /** 3 columns portrait, 6 landscape — matches the old GridView numColumns. */
+    private fun gridColumns() =
+        if (resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) 6 else 3
 
-    /** Stamp each file's storage from its manifest group (probing a group the first time it's seen) and
-     *  sort newest-first — shared by the initial fetch and every lazily-loaded older page. */
+    // Only one spacing decoration is ever attached; re-created if the column count changes.
+    private var gridSpacer: RecyclerView.ItemDecoration? = null
+
+    /** Even ~6dp gaps between cells (a touch more than the old 2dp), full-bleed date headers. */
+    private fun installGridSpacing() {
+        gridSpacer?.let { grid.removeItemDecoration(it) }
+        val gap = (resources.displayMetrics.density * 3f).toInt()   // 3dp per edge → ~6dp between cells
+        val dec = object : RecyclerView.ItemDecoration() {
+            override fun getItemOffsets(outRect: android.graphics.Rect, view: View,
+                                        parent: RecyclerView, state: RecyclerView.State) {
+                val pos = parent.getChildAdapterPosition(view)
+                if (pos != RecyclerView.NO_POSITION && adapter?.isHeader(pos) == true) {
+                    outRect.set(0, gap, 0, 0)          // headers span full width; just breathe above
+                } else {
+                    outRect.set(gap, gap, gap, gap)
+                }
+            }
+        }
+        gridSpacer = dec
+        grid.addItemDecoration(dec)
+    }
+
+    /** Wire the Photos/Videos/Faved/Select chips. Called once in onCreate; the chips act on whatever
+     *  adapter is current (null before the first grid, which can't be reached without one). */
+    private fun wireGalleryChips() {
+        chipPhotos = findViewById(R.id.btnFilterPhotos)
+        chipVideos = findViewById(R.id.btnFilterVideos)
+        chipFaved = findViewById(R.id.btnFilterFaved)
+        chipSelect = findViewById(R.id.btnSelect)
+        chipPhotos.setOnClickListener { if (chipPhotos.isChecked) chipVideos.isChecked = false; applyChipsToAdapter() }
+        chipVideos.setOnClickListener { if (chipVideos.isChecked) chipPhotos.isChecked = false; applyChipsToAdapter() }
+        chipFaved.setOnClickListener { adapter?.setFavedOnly(chipFaved.isChecked) }
+        chipSelect.setOnClickListener { adapter?.setSelectMode(chipSelect.isChecked) }
+        chipSelect.setOnLongClickListener {
+            val ad = adapter ?: return@setOnLongClickListener true
+            if (!chipSelect.isChecked) { chipSelect.isChecked = true; ad.setSelectMode(true) }
+            ad.selectAllVisible(ad.selectedCount() == 0)   // nothing queued → select all visible, else clear
+            true
+        }
+    }
+
+    /** Reflect the queued count on the Download FAB: "Download", "Download (1)", "Download (2)", … */
+    private fun updateDownloadFab() {
+        val n = adapter?.selectedCount() ?: 0
+        findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabDownload)
+            ?.text = if (n > 0) "Download ($n)" else "Download"
+    }
+
+    private fun resetGalleryChips() {
+        chipPhotos.isChecked = false; chipVideos.isChecked = false
+        chipFaved.isChecked = false; chipSelect.isChecked = false
+    }
+
+    /** Push the chips' current state onto the active adapter. */
+    private fun applyChipsToAdapter() {
+        val ad = adapter ?: return
+        ad.setTypeFilter(when {
+            chipPhotos.isChecked -> MediaGridAdapter.TypeFilter.PHOTOS
+            chipVideos.isChecked -> MediaGridAdapter.TypeFilter.VIDEOS
+            else -> MediaGridAdapter.TypeFilter.ALL
+        })
+        ad.setFavedOnly(chipFaved.isChecked)
+        ad.setSelectMode(chipSelect.isChecked)
+    }
+
+    // ---- lazy grid pagination (pull up past the last row to load older pages) --------------------
+    private var loadingMore = false
+    private var storageForBit = HashMap<Int, Int>()   // handle store-bit (0/1) -> resolved /v2 mount (cached)
+
+    /** Stamp each file's HTTP storage index (per-file, by its handle's store bit) and sort newest-first —
+     *  shared by the initial fetch and every lazily-loaded older page. See [resolveStorage]. */
     private fun applyStorageAndSort(files: List<CameraFile>): List<CameraFile> {
-        val map = storageByGroup.toMutableMap()
-        val out = files.map { f -> f.copy(storage = map.getOrPut(f.group) { detectStorage(f) }) }
-        storageByGroup = map
+        val out = files.map { f -> f.copy(storage = resolveStorage(f)) }
         return out.sortedWith(compareByDescending<CameraFile> { it.timestamp }.thenByDescending { it.seq })
+    }
+
+    /**
+     * The `/v2?storage=N` mount for [f], resolved **per file** from its handle's store bit — so even a
+     * manifest that fails to split its SD+internal lists into separate groups (the Action 6 has a history
+     * of that) still stamps each file's own store correctly, rather than lumping one mount onto both.
+     *
+     * The handle encodes the physical store: internal sets bit `0x40000000` (Nano `0x4010xxxx`, Xtra/
+     * Action 5 internal `0x4004xxxx` → `storage=1`), SD clears it (Xtra SD `0x0004xxxx` → `storage=0`).
+     * That's only a **guess** (held 26/26 in the Xtra pcap + on the Nano, but single-store models aren't
+     * uniform — Nano/Action 6 serve at storage=1, the Pocket 3 at storage=0), so one HEAD per distinct
+     * store confirms it, correcting on a miss. The (bit → mount) result is cached, so a whole manifest
+     * costs at most two probes. Photos carry no delete handle → use the group-fitted [CameraFile.cmdHandle];
+     * a file with no handle at all (a photos-only list) → direct probe, uncached.
+     */
+    private fun resolveStorage(f: CameraFile): Int {
+        // Pocket 3 (single microSD) is pinned to 0 — no handle math, no probe. See StorageRules.
+        if (currentModel.singleSdStorage) return 0
+        // Guess the mount from the record handle's store bit, then confirm with one HEAD (cached per bit).
+        val bit = dev.konraditurbe.osmosis.core.StorageRules.mountGuess(false, f.handle, f.cmdHandle)
+            ?: return probeStorage(f)
+        return storageForBit.getOrPut(bit) {
+            val other = 1 - bit
+            when {
+                http.headCode("/v2?storage=$bit&path=${f.path}") == 200 -> bit
+                http.headCode("/v2?storage=$other&path=${f.path}") == 200 -> other
+                else -> bit
+            }
+        }
+    }
+
+    /** Blind mount probe for a file with no handle at all (e.g. a photos-only list, no fittable handle). */
+    private fun probeStorage(f: CameraFile): Int {
+        for (s in intArrayOf(1, 0)) if (http.headCode("/v2?storage=$s&path=${f.path}") == 200) return s
+        return 0
     }
 
     /**
@@ -849,7 +970,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 adapter?.append(more)
                 findViewById<View>(R.id.loadMoreSpinner)?.animate()?.alpha(0f)?.setDuration(180)
                     ?.withEndAction { findViewById<View>(R.id.loadMoreSpinner)?.visibility = View.GONE }?.start()
-                if (more.isNotEmpty()) logLine("Loaded ${more.size} older (${adapter?.count ?: 0} total)")
+                if (more.isNotEmpty()) logLine("Loaded ${more.size} older (${adapter?.totalFiles() ?: 0} total)")
                 else logLine("No more media to load.")
                 loadingMore = false
             }
@@ -887,23 +1008,21 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** Open the full-screen preview for the tapped cell; queue changes flow back via the launcher. For a
      *  burst/interval group, first enumerate its frames off-UI (DUML group-expand, no probing) so the
      *  viewer opens with the thumbnail strip ready. */
-    private fun openPreview(position: Int) {
-        val ad = adapter ?: return
-        val f = ad.getItem(position)
+    private fun openPreview(f: CameraFile) {
         val dl = datalink
         if (f.isBurst && dl != null) {
             toast("Loading burst…")
             Thread {
                 val frames = runCatching { dl.expandBurstGroup(f) }.getOrElse { listOf(f) }
-                main.post { launchPreview(position, f, frames) }
+                main.post { launchPreview(f, frames) }
             }.start()
-        } else launchPreview(position, f, emptyList())
+        } else launchPreview(f, emptyList())
     }
 
-    private fun launchPreview(position: Int, f: CameraFile, group: List<CameraFile>) {
+    private fun launchPreview(f: CameraFile, group: List<CameraFile>) {
         val ad = adapter ?: return
         previewLauncher.launch(MediaPreviewActivity.intent(
-            this, "192.168.2.1", f, position, ad.isQueued(position), ad.trimFor(position), group))
+            this, "192.168.2.1", f, 0, ad.isQueuedPath(f.path), ad.trimForPath(f.path), group))
     }
 
     /**
@@ -911,23 +1030,21 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * has a delete handle, **Delete** (0x00/0x28). Both are camera writes run off the UI thread. Keeping
      * these on the grid (not the preview) means the preview never touches the datalink.
      */
-    private fun onGridLongPress(position: Int) {
-        val ad = adapter ?: return
-        val f = ad.getItem(position)
+    private fun onGridLongPress(f: CameraFile) {
         val dl = datalink ?: run { logLine("Long-press: no live datalink session."); toast("Not connected"); return }
         val fav = if (f.starred) "Unfavorite" else "Favorite"
         val actions = if (f.deletable) arrayOf(fav, "Delete") else arrayOf(fav)
         AlertDialog.Builder(this)
             .setTitle(f.name)
             .setItems(actions) { _, which ->
-                if (actions[which] == "Delete") confirmDelete(position, f, dl) else toggleFavorite(position, f, dl)
+                if (actions[which] == "Delete") confirmDelete(f, dl) else toggleFavorite(f, dl)
             }
             .show()
     }
 
     /** Toggle the camera's ⭐ favorite for [f] (DUML 0x02/0xbf). Optimistic grid badge; the write runs on
      *  the serialized favorite worker and reverts the badge on failure. */
-    private fun toggleFavorite(position: Int, f: CameraFile, dl: DatalinkClient) {
+    private fun toggleFavorite(f: CameraFile, dl: DatalinkClient) {
         val on = !f.starred
         // Videos carry their own handle; photos don't, so fall back to the manifest-fitted one (a
         // hardcoded Nano formula is why photo favorites failed on the Xtra). See withCmdHandles.
@@ -935,16 +1052,16 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         if (favHandle == 0L) { toast("Can't favorite ${f.name} — no handle"); return }
         // Optimistic badge only — the camera's manifest is the single source of truth for star state, so a
         // reload shows whatever the camera reports (the Xtra reports none; that's fine, we don't fake it).
-        adapter?.setStarred(position, on)
+        adapter?.setStarredByPath(f.path, on)
         toast(if (on) "Favoriting ${f.name}…" else "Unfavoriting ${f.name}…")
         favExec.execute {
             val ok = runCatching { dl.setFavorite(favHandle, on) }.getOrDefault(false)
-            if (!ok) main.post { adapter?.setStarred(position, !on); toast("Favorite failed") }
+            if (!ok) main.post { adapter?.setStarredByPath(f.path, !on); toast("Favorite failed") }
         }
     }
 
     /** Confirm + delete [f] from the camera (DUML 0x00/0x28) — irreversible, so it's gated by a dialog. */
-    private fun confirmDelete(position: Int, f: CameraFile, dl: DatalinkClient) {
+    private fun confirmDelete(f: CameraFile, dl: DatalinkClient) {
         val hx = "0x%08x".format(f.handle)
         AlertDialog.Builder(this)
             .setTitle("Delete from camera?")
@@ -960,7 +1077,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                             0 -> {
                                 logLine("DELETE OK (status 0x0000): ${f.name}")
                                 toast("Deleted ${f.name}")
-                                removeFromGrid(position)
+                                removeFromGrid(f.path)
                             }
                             null -> { logLine("DELETE: no response (timeout / no session)."); toast("Delete: no response") }
                             else -> {
