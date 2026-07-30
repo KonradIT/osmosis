@@ -306,6 +306,25 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     /**
+     * We opt out of Activity recreation on rotation (manifest `configChanges`) so a flip keeps the live
+     * camera session — BLE/datalink/WiFi and the loaded grid — instead of tearing it all down and bouncing
+     * to the selector. The only thing that actually needs to change is the grid's column count, so re-span
+     * the layout manager in place (scroll position, queue and connection all preserved).
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val cols = gridColumns()
+        if (cols == gridCols) return
+        gridCols = cols
+        (grid.layoutManager as? GridLayoutManager)?.let { lm ->
+            lm.spanCount = cols
+            lm.spanSizeLookup.invalidateSpanIndexCache()
+            grid.invalidateItemDecorations()
+            grid.requestLayout()
+        }
+    }
+
+    /**
      * Mirror the GPS-sync service's state into the UI: a coloured banner and a disabled selector while
      * a link is bound (STARTING/ACTIVE), cleared when it stops. The satellite button stays live — it's
      * the only way out of the lockout.

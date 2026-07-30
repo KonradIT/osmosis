@@ -37,8 +37,11 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:theme="@style/Theme.Osmosis">
+        <!-- Handle rotation ourselves (no Activity recreate) so a flip doesn't tear down the live camera
+             session and bounce back to the selector — we just re-flow the grid columns. -->
         <activity
             android:name=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -47,6 +50,7 @@
         </activity>
         <activity
             android:name=".ui.MediaPreviewActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:exported="false" />
         <service
             android:name=".rsdk.GpsService"
