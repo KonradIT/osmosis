@@ -9,6 +9,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.ImageButton
@@ -32,9 +34,11 @@ import dev.konraditurbe.osmosis.net.ImageLoader
  * Full-screen media preview. Videos stream DJI's low-res .LRF proxy straight off the camera —
  * native MediaPlayer honours the process network binding, so it reaches the internet-less AP and
  * range-fetches the moov + samples on demand (any clip length, full scrub, no download). Photos
- * show the JPEG. Top bar = filename · date · resolution·fps (fps from the DUML manifest; resolution
- * from the MP4 moov, since it isn't in the manifest). The bottom button toggles this item in the
- * download queue and returns the decision. The high-res file is never fetched here.
+ * show the JPEG. Top bar = 4-digit ID · date · resolution·fps (all from the DUML manifest). The bottom
+ * button toggles this item in the download queue, written straight to the grid via [PreviewNav].
+ *
+ * **Swipe to browse:** a horizontal fling moves through the grid's *filtered* list (left = next, right =
+ * previous) — for photos always, for videos only while paused. The high-res file is never fetched here.
  */
 class MediaPreviewActivity : AppCompatActivity() {
 
@@ -61,7 +65,9 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private lateinit var file: CameraFile
     private var ip = "192.168.2.1"
-    private var position = -1
+    // The grid's filtered list + our index in it, so a swipe (when paused) moves to the prev/next item.
+    private var navItems: List<CameraFile> = emptyList()
+    private var navIndex = -1
     private var queued = false
     private var resTag: String? = null // resolution label, from the manifest (video enum / photo W×H)
     private var streamCandidates: List<String> = emptyList() // preview URLs, cheapest first
@@ -93,19 +99,11 @@ class MediaPreviewActivity : AppCompatActivity() {
             isAppearanceLightNavigationBars = false
         }
 
-        val path = intent.getStringExtra(EXTRA_PATH) ?: run { finish(); return }
         ip = intent.getStringExtra(EXTRA_IP) ?: "192.168.2.1"
-        position = intent.getIntExtra(EXTRA_POSITION, -1)
-        queued = intent.getBooleanExtra(EXTRA_QUEUED, false)
-        trimStartMs = intent.getLongExtra(EXTRA_TRIM_START, -1L)
-        trimEndMs = intent.getLongExtra(EXTRA_TRIM_END, -1L)
+        // The initially-tapped burst group (if any) — its frame strip shows only on this first item and is
+        // cleared once you swipe away (swiped items show the group lead as a single photo).
         groupPaths = intent.getStringArrayListExtra(EXTRA_GROUP_PATHS) ?: emptyList()
         groupThumbs = intent.getStringArrayListExtra(EXTRA_GROUP_THUMBS) ?: emptyList()
-        file = CameraFile(path, "", intent.getIntExtra(EXTRA_STORAGE, 0),
-            intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY),
-            handle = intent.getLongExtra(EXTRA_HANDLE, 0L),
-            sizeBytes = intent.getLongExtra(EXTRA_SIZE, 0L),
-            resolution = intent.getStringExtra(EXTRA_RESOLUTION))
 
         videoView = findViewById(R.id.videoView)
         photoView = findViewById(R.id.photoView)
@@ -128,27 +126,102 @@ class MediaPreviewActivity : AppCompatActivity() {
         highlightRow = findViewById(R.id.highlightRow)
         highlightStrip = findViewById(R.id.highlightStrip)
 
-        // Tap the media to hide/show the overlays (full-frame view).
-        videoView.setOnClickListener { toggleControls() }
-        photoView.setOnClickListener { toggleControls() }
-
-        renderTop()
-        refreshQueueButton()
+        // One-time wiring; the media itself is (re)loaded per item in loadCurrent().
+        setupTrimListeners()
+        installSwipeAndTap()   // tap = toggle overlays; horizontal swipe (when paused) = prev/next item
         btnQueue.setOnClickListener {
             queued = !queued
+            commitQueue()
             refreshQueueButton()
-            publishResult()
         }
 
+        navItems = dev.konraditurbe.osmosis.net.PreviewNav.items
+        navIndex = intent.getIntExtra(EXTRA_POSITION, -1)
+        file = navItems.getOrNull(navIndex) ?: fileFromExtras()
+        if (file.path.isEmpty()) { finish(); return }
+        loadCurrent()
+    }
+
+    private fun fileFromExtras(): CameraFile = CameraFile(
+        intent.getStringExtra(EXTRA_PATH) ?: "", "", intent.getIntExtra(EXTRA_STORAGE, 0),
+        intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY),
+        handle = intent.getLongExtra(EXTRA_HANDLE, 0L),
+        sizeBytes = intent.getLongExtra(EXTRA_SIZE, 0L),
+        resolution = intent.getStringExtra(EXTRA_RESOLUTION))
+
+    /** Tap the media to toggle overlays; a horizontal fling moves to the prev/next item — but only when
+     *  paused (photos are always swipeable). Swipe **left = next**, **right = previous**. */
+    private fun installSwipeAndTap() {
+        val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            // MUST return true so the detector consumes the DOWN and keeps getting MOVE/UP — otherwise
+            // the view never forwards the rest of the gesture and onFling/onSingleTap never fire.
+            override fun onDown(e: MotionEvent): Boolean = true
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean { toggleControls(); return true }
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                if (kotlin.math.abs(vx) < kotlin.math.abs(vy) || kotlin.math.abs(vx) < 800f) return false
+                if (navItems.isEmpty() || (file.isVideo && videoView.isPlaying)) return false
+                loadItem(navIndex + if (vx < 0) 1 else -1)   // swipe left = next, swipe right = previous
+                return true
+            }
+        })
+        @Suppress("ClickableViewAccessibility")
+        val touch = View.OnTouchListener { _, ev -> gd.onTouchEvent(ev) }
+        videoView.setOnTouchListener(touch)
+        photoView.setOnTouchListener(touch)
+    }
+
+    /** Move to a different item in the filtered list: reset per-item state and (re)load the media. */
+    private fun loadItem(index: Int) {
+        if (index !in navItems.indices || index == navIndex) return
+        navIndex = index
+        file = navItems[index]
+        selectedFrame = 0
+        groupPaths = emptyList(); groupThumbs = emptyList()   // strip only for the initially-tapped burst
+        burstRow.removeAllViews(); burstStrip.visibility = View.GONE
+        main.removeCallbacks(highlightsRunnable)
+        highlightRow.removeAllViews(); highlightStrip.visibility = View.GONE
+        runCatching { videoView.stopPlayback() }
+        main.removeCallbacks(tick)
+        loadCurrent()
+    }
+
+    /** Load whatever [file] currently points at — queue/trim state comes live from the grid (PreviewNav). */
+    private fun loadCurrent() {
+        queued = dev.konraditurbe.osmosis.net.PreviewNav.isQueued?.invoke(file.path) ?: false
+        val t = dev.konraditurbe.osmosis.net.PreviewNav.trimFor?.invoke(file.path)
+        trimStartMs = t?.startMs ?: -1L; trimEndMs = t?.endMs ?: -1L
+        resTag = null
+
+        videoView.visibility = View.GONE
+        photoView.visibility = View.GONE
+        statusText.visibility = View.GONE
+        spinner.visibility = ProgressBar.VISIBLE
+        trimRow.visibility = if (file.isVideo) View.VISIBLE else View.GONE
+        controls.visibility = if (file.isVideo) View.VISIBLE else View.GONE
+        topInfo.visibility = View.VISIBLE
+
+        renderTop()
+        updateTrimUi()
+        refreshQueueButton()
+
         when {
-            file.isVideo -> { setupTrim(); loadVideo(); loadHighlights() }
+            file.isVideo -> { loadVideo(); loadHighlights() }
             file.isImage -> {
                 resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
-                if (groupPaths.size > 1) setupBurstStrip()   // frames came from the DUML group-expand
+                if (groupPaths.size > 1) setupBurstStrip()     // frames came from the DUML group-expand
                 loadPhoto()
             }
             else -> showStatus("No preview for .${file.ext}")
         }
+    }
+
+    /** Write the current item's queue decision straight to the grid via the bridge (no result round-trip). */
+    private fun commitQueue() {
+        val member = if (groupPaths.isNotEmpty() && selectedFrame > 0)
+            file.copy(path = groupPaths[selectedFrame], thumbPath = groupThumbs.getOrNull(selectedFrame) ?: file.thumbPath)
+        else null
+        val trim = if (hasTrim()) TrimRange(trimStartMs, trimEndMs) else null
+        dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(file.path, queued, trim, member)
     }
 
     /** Build the 1×n burst/interval frame strip: a thumbnail per frame, tap to view it, accent border on
@@ -176,7 +249,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         updateBurstSelection()
         loadPhoto()          // re-fetch the chosen frame (spinner shows while it loads)
         refreshQueueButton() // a different frame may already be saved (or not)
-        publishResult()      // the "currently viewed" frame changed — keep the pending result current
+        if (queued) commitQueue()   // the queued frame changed — keep the grid's queue in sync
     }
 
     private fun updateBurstSelection() {
@@ -227,10 +300,9 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnQueue.text = if (alreadySaved) "Already downloaded" else queueLabel()
     }
 
-    /** Wire the custom player (transport + scrubber) and trim. Trim points come from the paused scrubber. */
-    private fun setupTrim() {
-        trimRow.visibility = View.VISIBLE
-
+    /** Wire the custom player (transport + scrubber) and trim buttons — once. Trim *values* are (re)set
+     *  per item in loadCurrent(); a mark change on an already-queued clip updates its stored trim live. */
+    private fun setupTrimListeners() {
         btnPlay.setOnClickListener { togglePlay() }
         btnRew.setOnClickListener { seekBy(-5000) }
         btnFf.setOnClickListener { seekBy(5000) }
@@ -247,6 +319,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             trimStartMs = videoView.currentPosition.toLong()
             if (trimEndMs in 0..trimStartMs) trimEndMs = -1L // stale end now before start
             updateTrimUi()
+            if (queued) commitQueue()
         }
         btnMarkOut.setOnClickListener {
             if (videoView.isPlaying) { toast("Pause, then set the end point"); return@setOnClickListener }
@@ -255,8 +328,8 @@ class MediaPreviewActivity : AppCompatActivity() {
             if (pos <= trimStartMs) { toast("End must be after the start point"); return@setOnClickListener }
             trimEndMs = pos
             updateTrimUi()
+            if (queued) commitQueue()
         }
-        updateTrimUi()
     }
 
     private fun updateTrimUi() {
@@ -284,11 +357,14 @@ class MediaPreviewActivity : AppCompatActivity() {
         if (videoView.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
     )
 
-    /** Tap the media to hide the title + controls for a full-frame view; tap again to bring them back. */
+    /** Tap the media to hide the title + controls for a full-frame view; tap again to bring them back.
+     *  The play/scrubber + trim rows only exist for video, so a photo just toggles the title. */
     private fun toggleControls() {
-        val show = controls.visibility != View.VISIBLE
-        controls.visibility = if (show) View.VISIBLE else View.GONE
+        val show = topInfo.visibility != View.VISIBLE
         topInfo.visibility = if (show) View.VISIBLE else View.GONE
+        val v = if (show && file.isVideo) View.VISIBLE else View.GONE
+        controls.visibility = v
+        trimRow.visibility = v
     }
 
     /** Keep the scrubber + current-time in sync while playing (skipped while the user is dragging). */
@@ -313,16 +389,21 @@ class MediaPreviewActivity : AppCompatActivity() {
         topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
     }
 
-    /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge — inline on the
-     *  live session now) and, if any, show a row of tappable ⚑ m:ss chips that seek the player. The video
-     *  plays immediately; marks appear when the (fast) query returns. Best-effort — none / no session → nothing. */
-    private fun loadHighlights() {
+    /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge) and show ⚑ m:ss
+     *  chips that seek the player. **Debounced** so swiping through clips doesn't spam the datalink (each
+     *  fetch can be a fresh session on the Xtra); the result is dropped if we've since moved on. */
+    private val highlightsRunnable = Runnable {
         val handle = file.handle
-        if (handle == 0L) return
+        if (handle == 0L) return@Runnable
+        val at = navIndex
         Thread {
             val marks = runCatching { Highlights.provider?.invoke(handle) }.getOrNull().orEmpty()
-            if (marks.isNotEmpty()) main.post { if (!isFinishing) showHighlights(marks) }
+            if (marks.isNotEmpty()) main.post { if (!isFinishing && navIndex == at) showHighlights(marks) }
         }.start()
+    }
+    private fun loadHighlights() {
+        main.removeCallbacks(highlightsRunnable)
+        main.postDelayed(highlightsRunnable, 400)
     }
 
     private fun showHighlights(marks: List<Int>) {
@@ -399,6 +480,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private fun loadPhoto() {
         val dm = resources.displayMetrics
         val frame = selectedFrame            // guard against a fast frame switch racing the fetch
+        val at = navIndex                    // …or a swipe to another item
         val url = currentUrl()
         spinner.visibility = ProgressBar.VISIBLE
         statusText.visibility = TextView.GONE
@@ -419,7 +501,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 }.getOrNull()
             }
             main.post {
-                if (isFinishing || frame != selectedFrame) return@post   // a newer frame is loading
+                if (isFinishing || frame != selectedFrame || navIndex != at) return@post   // superseded
                 renderTop()
                 if (bmp != null) {
                     photoView.setImageBitmap(bmp)
@@ -448,21 +530,6 @@ class MediaPreviewActivity : AppCompatActivity() {
         statusText.visibility = TextView.VISIBLE
     }
 
-    private fun publishResult() {
-        // For a burst, hand back the *viewed* frame's own path/thumb so the queue grabs that frame — the
-        // grid never probed the group, so it can't resolve an index. Frame 0 (or non-burst) → no override.
-        val selPath = groupPaths.getOrNull(selectedFrame).takeIf { selectedFrame > 0 }
-        setResult(RESULT_OK, Intent().apply {
-            putExtra(EXTRA_PATH, intent.getStringExtra(EXTRA_PATH))   // lead path = the grid cell's identity
-            putExtra(EXTRA_POSITION, position)
-            putExtra(EXTRA_QUEUED, queued)
-            putExtra(EXTRA_GROUP_SEL_PATH, selPath)
-            putExtra(EXTRA_GROUP_SEL_THUMB, selPath?.let { groupThumbs.getOrNull(selectedFrame) })
-            putExtra(EXTRA_TRIM_START, if (hasTrim()) trimStartMs else -1L)
-            putExtra(EXTRA_TRIM_END, if (hasTrim()) trimEndMs else -1L)
-        })
-    }
-
     override fun onPause() {
         super.onPause()
         if (videoView.isPlaying) { videoView.pause(); updatePlayIcon() }
@@ -471,6 +538,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         main.removeCallbacks(tick)
+        main.removeCallbacks(highlightsRunnable)
         runCatching { videoView.stopPlayback() }
         imageLoader.shutdown()
     }

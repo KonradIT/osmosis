@@ -242,6 +242,10 @@ class MediaGridAdapter(
         else rowIndexOfPath(path).takeIf { it >= 0 }?.let { notifyItemChanged(it) }
     }
 
+    /** The filtered items in display order (no headers) — the list the preview swipes through. */
+    fun visibleFiles(): List<CameraFile> = rows.mapNotNull { (it as? Row.Item)?.file }
+    fun visibleIndexOf(path: String): Int = visibleFiles().indexOfFirst { it.path == path }
+
     fun selectedEntries(): List<Pair<CameraFile, TrimRange?>> =
         selected.entries.map { (selectedMember[it.key] ?: fileForPath(it.key)!!) to it.value }
     /** The queue keys (cell paths) in the SAME order as [selectedEntries] — for mapping a job index back

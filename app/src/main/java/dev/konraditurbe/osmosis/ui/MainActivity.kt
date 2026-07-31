@@ -124,6 +124,19 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // no longer touches the datalink, so it can't perturb the browse keep-alive.
     }
 
+    // The scan the user asked for, held while we send them to enable Bluetooth; resumed when they return.
+    private var pendingScan: Pair<Boolean, String?>? = null
+    private val enableBtLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (btAdapter?.isEnabled == true) pendingScan?.let { (sel, pk) -> pendingScan = null; startCameraScan(sel, pk) }
+        else logLine("Bluetooth still off — tap Rescan once it's on.")
+    }
+    // Returning from the Wi-Fi settings panel: re-check and continue the camera Wi-Fi join.
+    private val wifiPanelLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { promptWifiConsent(offloadSsid, offloadPass) }
+
     // The datalink session keeps the camera AP alive (the Action 5 sleeps its AP the moment the
     // datalink goes idle). Held open during browse/download; closed on a new offload / exit.
     private var datalink: DatalinkClient? = null
@@ -313,6 +326,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      */
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
+        applyOrientationChrome()
         val cols = gridColumns()
         if (cols == gridCols) return
         gridCols = cols
@@ -322,6 +336,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             grid.invalidateItemDecorations()
             grid.requestLayout()
         }
+    }
+
+    /** Per-orientation chrome that the old land layout used to do — now dynamic since we don't recreate the
+     *  Activity on rotation. Landscape: hide the status pill to give the grid the full height. */
+    private fun applyOrientationChrome() {
+        val landscape = resources.configuration.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        statusPill.visibility = if (landscape) View.GONE else View.VISIBLE
     }
 
     /**
@@ -373,8 +395,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** Scan ~4s for DJI/Xtra cameras (bonds aren't reliable for these), then feed the selector list. */
     private fun startCameraScan(select: Boolean, pick: String? = null) {
-        val adapter = btAdapter ?: run { logLine("No Bluetooth adapter."); return }
-        if (!adapter.isEnabled) { logLine("Bluetooth is OFF — enable it and try again."); return }
+        val adapter = btAdapter ?: run { logLine("No Bluetooth adapter."); toast("This device has no Bluetooth."); return }
+        if (!adapter.isEnabled) { promptEnableBluetooth(select, pick); return }
         val missing = requiredPerms().filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -399,6 +421,26 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 }?.let { onCameraChosen(it.device) }
             }
         }, 4000)
+    }
+
+    /** Bluetooth is off — scanning would silently find nothing, so ask the user to turn it on and resume
+     *  the scan when they return (via [enableBtLauncher]). Falls back to the BT settings screen if the
+     *  in-app enable request can't run (e.g. BLUETOOTH_CONNECT not yet granted on API 31+). */
+    private fun promptEnableBluetooth(select: Boolean, pick: String?) {
+        logLine("Bluetooth is OFF — prompting to enable.")
+        AlertDialog.Builder(this)
+            .setTitle("Bluetooth is off")
+            .setMessage("Osmosis finds and pairs with your camera over Bluetooth. Turn it on to scan for cameras.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Turn on") { _, _ ->
+                pendingScan = select to pick
+                runCatching { enableBtLauncher.launch(android.content.Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)) }
+                    .onFailure {
+                        logLine("BT enable request failed (${it.javaClass.simpleName}) — opening settings.")
+                        runCatching { startActivity(android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) }
+                    }
+            }
+            .show()
     }
 
     /** Selector list: saved cameras first (📶 in range / 🚫 not), then newly-scanned ones tagged NEW. */
@@ -465,6 +507,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun teardownOffload() {
         stopKeepalive()
         dev.konraditurbe.osmosis.net.Highlights.provider = null
+        dev.konraditurbe.osmosis.net.PreviewNav.clear()
         datalink?.close(); datalink = null
         apJoiner?.release(); apJoiner = null
         gattClient?.disconnect(); gattClient?.close(); gattClient = null
@@ -662,18 +705,32 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         main.postDelayed({ promptWifiConsent(offloadSsid, offloadPass) }, 3000)
     }
 
-    /** Friendly heads-up before Android's WifiNetworkSpecifier consent dialog appears. */
+    /** Kick off the camera Wi-Fi join. Android's own WifiNetworkSpecifier consent popup is explanatory
+     *  enough, so there's no app heads-up first — we only intervene if the *phone's* Wi-Fi is off (the
+     *  join fails silently otherwise), routing the user to enable it and resuming here. */
     private fun promptWifiConsent(ssid: String, pass: String) {
         if (isFinishing || isDestroyed) return
+        val wifi = applicationContext.getSystemService(WIFI_SERVICE) as? android.net.wifi.WifiManager
+        if (wifi != null && !wifi.isWifiEnabled) { promptEnableWifi(); return }
+        startWifiFlow(ssid, pass)
+    }
+
+    /** The phone's Wi-Fi is off, so the join would fail — send the user to turn it on. Apps can't enable
+     *  Wi-Fi programmatically since Android 10, so open the slide-up Wi-Fi panel (settings on older); on
+     *  return [wifiPanelLauncher] re-checks and continues the join. */
+    private fun promptEnableWifi() {
+        logLine("Wi-Fi is OFF — prompting to enable before the camera join.")
         AlertDialog.Builder(this)
-            .setTitle("Connect to the camera's Wi-Fi")
-            .setMessage(
-                "The camera's Wi-Fi is now on. Android will show a system popup to join " +
-                    "“$ssid” — tap Connect on it to browse and download your media.\n\n" +
-                    "(It may say “Searching for device…” for a few seconds first.)"
-            )
-            .setPositiveButton("Continue") { _, _ -> startWifiFlow(ssid, pass) }
+            .setTitle("Wi-Fi is off")
+            .setMessage("Osmosis joins the camera's own Wi-Fi network to browse and download media. Turn Wi-Fi on, then continue.")
             .setNegativeButton("Cancel", null)
+            .setPositiveButton("Turn on Wi-Fi") { _, _ ->
+                val intent = if (Build.VERSION.SDK_INT >= 29)
+                    android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI)
+                else android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)
+                runCatching { wifiPanelLauncher.launch(intent) }
+                    .onFailure { runCatching { startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)) } }
+            }
             .setCancelable(false)
             .show()
     }
@@ -798,6 +855,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         currentAddress?.let { savedCameras.save(it, offloadSsid, currentModelId) }
         switchToGrid()
         statusPill.render(pillName(), "Connected · WiFi", currentStatus, showPower = isNano())
+        applyOrientationChrome()   // hide the pill if we're (re)entering the grid in landscape
         if (!preserveFilters) resetGalleryChips()      // a fresh camera list starts unfiltered
         if (files.isEmpty()) {
             logLine("No media found on camera.")
@@ -814,6 +872,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             onOpen = { openPreview(it) }, onLongPress = { onGridLongPress(it) })
         adapter = ad
         ad.onQueueChanged = { updateDownloadFab() }
+        // Bridge the live queue into the preview so swiping between items toggles it directly (see PreviewNav).
+        dev.konraditurbe.osmosis.net.PreviewNav.isQueued = { p -> ad.isQueuedPath(p) }
+        dev.konraditurbe.osmosis.net.PreviewNav.trimFor = { p -> ad.trimForPath(p) }
+        dev.konraditurbe.osmosis.net.PreviewNav.setQueued = { p, q, t, m -> ad.setQueuedByPath(p, q, t, m) }
         val lm = GridLayoutManager(this, gridCols)
         // Reads the mutable gridCols so rotation can re-span without rebuilding the adapter (see
         // onConfigurationChanged) — headers span the full row at whatever the current column count is.
@@ -1054,8 +1116,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     private fun launchPreview(f: CameraFile, group: List<CameraFile>) {
         val ad = adapter ?: return
+        // Hand the preview the current filtered list + the tapped item's index so it can swipe prev/next.
+        dev.konraditurbe.osmosis.net.PreviewNav.items = ad.visibleFiles()
+        val startIndex = ad.visibleIndexOf(f.path)
         previewLauncher.launch(MediaPreviewActivity.intent(
-            this, "192.168.2.1", f, 0, ad.isQueuedPath(f.path), ad.trimForPath(f.path), group))
+            this, "192.168.2.1", f, startIndex, ad.isQueuedPath(f.path), ad.trimForPath(f.path), group))
     }
 
     /**
