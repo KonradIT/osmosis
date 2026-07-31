@@ -59,6 +59,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Osmosis ${{ github.ref_name }}
+          draft: true
           files: |
             app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/debug/*.apk
