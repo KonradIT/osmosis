@@ -14,8 +14,6 @@ Third-party Android client to download videos and photos from DJI Osmo action / 
 
 Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK or the DJI R-SDK, and should also work with the rest of the DJI Osmo lineup (see [Supported cameras](#supported-cameras)). Also tested with the **Xtra Edge Pro**, a rebadged **DJI Osmo Action 5 Pro** made by DJI front company Xtra.
 
-> Early days — this is `v0.1`. It works, but expect rough edges.
-
 ## Features
 
 - **Media grid** with thumbnails, pulled straight off the camera.
@@ -24,8 +22,17 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 - **Resumable download queue** — high-res downloads straight into your phone's gallery.
 - **Live status** — battery, shooting mode, and storage (internal / SD) shown in a status pill. More to come (recording indicator, resolution, fps, etc...)
 - **Multi-camera** — remembers your cameras and shows which are currently in range.
+- **Favorite** your videos/photos from the app, and view previously hearted media
+- **Sync GPS with your Osmo**: Uses R-SDK [Osmo GPS controller](https://github.com/dji-sdk/Osmo-GPS-Controller-Demo) commands to send GPS from the phone to your camera. Useful to add stats later using [Telemetry Overlay](https://goprotelemetryextractor.com/telemetry-overlay-gps-video-sensors).
 
 <img src="./screenshots/Screenshot_20260714-210742_1.png" width="500"/>
+
+## Planned for short term:
+
+- Camera control: start/stop recording, take photo, change settings
+- Live preview
+- USB-C offload
+- Support DJI drone offload via quick transfer (Neo2 specifically)
 
 ## Supported cameras
 
@@ -35,28 +42,54 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 | Osmo Action 5 Pro / Xtra Edge Pro | Verified on hardware |
 | Osmo Action 6 | Verified on hardware |
 | Osmo Pocket 3 | Verified on hardware |
-| Xtra Atto / Edge / Muse (rebadged Nano / Action 4 / Pocket 3) | Untested — Xtra profile (10004, no poke) |
+| Osmo Pocket 4 / 4 Pro | Planned |
+| Xtra Atto / Edge / Muse | Untested, should work |
 | Osmo Action 1 | Started, parked |
-| Osmo 360 | Unplanned (WPA3 AP) |
-| Other DJI Osmo (Action 2 / 3 / 4, etc.) | Best-effort default |
+| Osmo Action 4 | Started |
+| Osmo 360 | Unplanned (needs Mimo to render 360 content) |
+| Osmo Action 2/3 | Best-effort default, untested, not expected to work |
+| DJI drones using quick transfer | In progress |
 
-The datalink port and WiFi security are resolved from the camera's BLE **model byte** — so an unrecognized DJI Osmo is *attempted*, not refused. Got one working (or broken)? [Open an issue](../../issues) so it can be listed as fully supported.
+Want to help adding support for an unsupported camera? [Open an issue](../../issues) so it can be listed as fully supported.
 
 **Xtra rebadges.** Xtra is a [DJI front company that sells rebadged Osmo cameras US-only to sidestep the DJI ban](https://github.com/KonradIT/dji-front-companies):
+
 - **Edge Pro** = Action 5 Pro
 - **Atto** = Nano
 - **Edge** = Action 4
 - **Muse** = Pocket 3.
 
-Each advertises the *same* BLE model id as its DJI twin but runs a **10004 / no-poke** datalink — a global change in the Xtra firmware's native datalink transport (confirmed by decompiling the Xtra app: the port is baked into the JNI transport lib, with no per-model logic). 
+Actively trying to support, raise an issue if you have these cams and would like to help:
 
-The app flags a Xtra by its OUI `EC:9E:EA` and applies that profile, falling back to 9004 if wrong. Only the **Edge Pro** is hardware-verified; the rest are coded-but-untested.
+- Osmo Pocket 4/4P
+- Osmo Action 4
+- Osmo Action 3.
+
+## Debugging / supporting new cameras:
+
+Start the app, enable Save Logs, try and connect to the camera, anything that is being sent and received is being logged to an internal location only accessible by the app. Tap Save Logs again to disable the logging + gzip it to share it with me.
+
+## Reverse engineered command list:
+
+If you want to build your own app or program that interfaces with DJI Osmo cameras, this document will help:
+
+[./MEDIA_PROTOCOL.md](./MEDIA_PROTOCOL.md)
+
+This is the most extensive documentation of DJI's undocumented DUML protocol for Osmo cameras to date. It is derived using DJI Mimo wifi/ble captures.
+
+Covers both BLE/WiFi transport routes.
+
+Commands reverse engineered not found anywhere else:
+
+- Parsing media list 0x26 and it's response 0x00/0x27
+- Pagination for querying older media
+- Highlights, delete file
 
 ## How it works
 
 No DJI SDK — Osmosis speaks DJI's **DUML** protocol directly. Each session:
 
-1. **BLE pair** with the camera (CmdSet `0x07`; you approve a token on the camera screen).
+1. **BLE pair** with the camera (requires approving on the camera itself once).
 2. **Read the WiFi credentials over BLE** (SSID + passphrase).
 3. **Wake and join** the camera's WiFi access point.
 4. **List the media** via the DUML file-list command over UDP.
@@ -78,8 +111,8 @@ Contrast the official apps, which require a login and phone home to activation a
 
 ## Getting started
 
-1. Turn on Bluetooth and open Osmosis; grant the permission prompts.
-2. Power on the camera and tap it in the **Cameras** list.
+1. Turn on Bluetooth and WiFi, and open Osmosis; grant the permission prompts.
+2. Power on the camera and tap it in the **Cameras** list. Should show as "NEW".
 3. **Approve the pairing prompt on the camera screen** (will read: `OSMO`).
 4. **Approve the Android "join WiFi" dialog** when it appears.
 5. Browse the grid. Tap a clip to preview, trim, and add it to the queue.
@@ -87,8 +120,9 @@ Contrast the official apps, which require a login and phone home to activation a
 
 ## Download
 
-- GitHub releases:
-- Unobtanium:
+- Play Store:
+- GitHub releases: https://github.com/KonradIT/osmosis/releases
+- Unobtanium: https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/KonradIT/osmosis
 - F-Droid:
 
 ## Build from source
@@ -118,7 +152,7 @@ The monumental task of reverse engineering DJI's DUML protocol was initially don
 
 DJI's own official [Osmo-GPS-Controller-Demo](https://github.com/dji-sdk/Osmo-GPS-Controller-Demo) was also a useful reference for the accessory (R-SDK) pairing protocol.
 
-This application couldn't have been built without the work above. That said, much of it didn't work for the Osmo Nano and Edge Pro, so a significant additional reverse-engineering effort went into making Osmosis fully compatible with the DJI Osmo Nano.
+This application couldn't have been built without the work above. That said, much of it didn't work for the Osmo Nano and Edge Pro, so a significant additional reverse-engineering effort went into making Osmosis fully compatible with the DJI Osmo Nano, as well as fully reverse engineering the responses to unsupported DUML commands.
 
 ## License
 
