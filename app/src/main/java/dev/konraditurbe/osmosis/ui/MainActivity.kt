@@ -882,6 +882,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     }
                     datalink = dl
                     dev.konraditurbe.osmosis.net.Highlights.provider = { h -> dl.getHighlights(h) }
+                    // Drone thumbnails come over the datalink, not HTTP — see CameraFile.DUML_THUMB.
+                    dev.konraditurbe.osmosis.net.ImageLoader.dumlThumbProvider =
+                        if (currentModel.isDrone) { idx -> dl.fetchDroneThumb(idx) } else null
                     // Always: it holds the AP up, polls status for the pill, and holds playback (#12).
                     // Gating on files.isNotEmpty() left an empty camera (e.g. an Action 6 with no media)
                     // with a dead pill — status is only parsed in this loop.

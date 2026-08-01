@@ -87,16 +87,101 @@ class DroneManifestTest {
     fun `indexed files address media over v1, never by path`() {
         val f = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD))).first()
         assertTrue(f.isIndexed)
-        assertEquals("/v1?file_index=6553777&file_subtype=0", f.urlPath())
-        assertNull("drones expose no derived proxy", f.proxyUrlPath())
-        assertEquals(listOf(f.urlPath()), f.previewCandidates())
+        assertEquals("/v1?file_index=6553777&file_subtype=0&file_seg_subindex=0", f.urlPath())
+        // No sidecar-path proxy on a drone — the proxy is a subtype of the same index instead, so it
+        // surfaces through previewCandidates() rather than proxyUrlPath(). See the subtype-18 test.
+        assertNull(f.proxyUrlPath())
+        assertTrue(f.previewCandidates().last() == f.urlPath())
+    }
+
+    @Test
+    fun `video preview prefers the subtype-18 proxy, stills use the original`() {
+        // Pinned to a capture of DJI Fly playing + scrubbing videos: every playback fetch was
+        // `file_subtype=18` with Range requests, and the single `file_subtype=0` fetch was the download.
+        val files = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD)))
+        val video = files.single { it.fileIndex == 6553777L }
+        assertTrue(video.isVideo)
+        assertEquals(
+            listOf(
+                "/v1?file_index=6553777&file_subtype=18&file_seg_subindex=0",
+                "/v1?file_index=6553777&file_subtype=0&file_seg_subindex=0",
+            ),
+            video.previewCandidates(),
+        )
+        // A still gets the screen-res render first, then the original.
+        val photo = files.single { it.fileIndex == 6553771L }
+        assertEquals(
+            listOf(
+                "/v1?file_index=6553771&file_subtype=2&file_seg_subindex=0",
+                "/v1?file_index=6553771&file_subtype=0&file_seg_subindex=0",
+            ),
+            photo.previewCandidates(),
+        )
+        // Downloads always take the original, never a proxy or render.
+        assertEquals("/v1?file_index=6553777&file_subtype=0&file_seg_subindex=0", video.urlPath())
+        // Thumbnails come from subtype 1 (THM) over plain HTTP.
+        assertEquals("/v1?file_index=6553777&file_subtype=1&file_seg_subindex=0", video.thumbUrlPath())
+    }
+
+    @Test
+    fun `thumbnail query matches DJI Fly's bytes`() {
+        // Captured verbatim at t=22.49 (seq 0x12, file_index 6554140).
+        assertEquals(
+            "4a2030101200000000001c0264000100010000000000ffffffff" + "00".repeat(22),
+            DroneManifest.thumbQuery(0x12, 6554140L).joinToString("") { "%02x".format(it) },
+        )
+    }
+
+    @Test
+    fun `file_index is packed storage + directory + number, not a flat folder`() {
+        // bits 31:30 storage | 29:16 DCF directory (14 bits) | 15:0 file number.
+        // Masking the directory as 16 bits folds the storage bits in, so an internal-storage file reads
+        // as directory 16484 and gets dropped — every eMMC file silently vanishing from the grid.
+        val sd = DroneManifest.decode(record(index = (0L shl 30) or (100L shl 16) or 554L))
+        assertEquals(1, sd.size)
+        assertEquals("DCIM/100MEDIA/DJI_0554.JPG", sd[0].path)
+        assertEquals(0, sd[0].storage)
+
+        val emmc = DroneManifest.decode(record(index = (1L shl 30) or (100L shl 16) or 1L))
+        assertEquals("an internal-storage file must survive decoding", 1, emmc.size)
+        assertEquals("DCIM/100MEDIA/DJI_0001.JPG", emmc[0].path)
+        assertEquals(1, emmc[0].storage)
+    }
+
+    /** One synthetic 94-byte record with the given index (photo: duration 0). */
+    private fun record(index: Long): ByteArray {
+        val r = ByteArray(DroneManifest.RECORD_STRIDE)
+        fun put32(off: Int, v: Long) {
+            for (i in 0 until 4) r[off + i] = ((v shr (8 * i)) and 0xFF).toByte()
+        }
+        put32(0, 0x5CECB9FBL)   // FAT mtime
+        put32(4, 1_234_567L)    // size
+        put32(8, index)
+        return r
+    }
+
+    @Test
+    fun `mtime is a FAT date-time, not unix seconds`() {
+        // Ground truth: DJI_0555 was recorded 2026-07-12, and its raw field is 0x5CECB9FB. Read as a
+        // unix timestamp that lands in 2019 and every file looks seven years old; read as FAT it is
+        // 2026-07-12 23:15:54 — which is what DJI Fly shows.
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = DroneManifest.fatToEpoch(0x5CECB9FBL) * 1000L
+        assertEquals(2026, cal.get(java.util.Calendar.YEAR))
+        assertEquals(7, cal.get(java.util.Calendar.MONTH) + 1)
+        assertEquals(12, cal.get(java.util.Calendar.DAY_OF_MONTH))
+        assertEquals(23, cal.get(java.util.Calendar.HOUR_OF_DAY))
+        assertEquals(15, cal.get(java.util.Calendar.MINUTE))
+        assertEquals(54, cal.get(java.util.Calendar.SECOND))   // FAT stores seconds/2
+        assertEquals(0L, DroneManifest.fatToEpoch(0L))
     }
 
     @Test
     fun `mtime drives the display date when the name carries no timestamp`() {
         val f = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD))).first()
         assertEquals("", f.timestamp)                 // no DJI_<14 digits>_ name on a drone
-        assertTrue("expected a date from the manifest mtime", f.dateTaken.startsWith("2017-06-27"))
+        assertTrue("expected a real date from the manifest mtime", f.dateTaken.startsWith("20"))
+        assertTrue("FAT decode should not land decades in the past", f.mtimeEpoch > 1_600_000_000L)
     }
 
     @Test

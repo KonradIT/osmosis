@@ -529,7 +529,69 @@ clip's proxy is only ~17 MB. That cheap random access opens some nice polish on 
 
 Not a bug fix (previews already work) — a UX layer the proxy's small size + range access make cheap.
 
-## 14. Drone offload support — 🟡 PROTOCOL CRACKED, awaiting a hardware run
+## 14. Drone offload support — ✅ WORKING on a Mavic 3 (2026-08-01)
+
+**End to end on real hardware:** BLE pair → WiFi creds → AP join → `udp/9003` session-open → 45-file
+grid with thumbnails → proxy preview → full-res download, plus battery + storage in the status pill.
+
+**The gate was a session-open handshake on the `0x51` channel.** A drone answers *nothing* until the app
+sends `0x51/0x02` and completes a mutual challenge (`0x51/0x08`, `0x51/0x06`, carrying its serial and an
+app id). Before that it streams ~2 DUML frames/s of empty keepalive; a second after it, ~1200 frames/s
+and every command works. Found by capturing DJI Fly against a **cold** drone — both earlier captures
+began with the session already open, so neither contained the transition. Two traps cost real time:
+`r0-1` is **not** a running ack (it oscillates and only moves when a reply lands, so it can't be used to
+test whether the drone is accepting us), and the **sequence window is not enforced** (DJI Fly runs ~1600
+packets ahead of it). Replaying captured `0x51` frames verbatim still failed until the wrapper's trailing
+counter was re-stamped monotonically — frozen at capture values it ran *backwards*, and the drone
+dropped the open as a replay without answering.
+
+### `/v1` in full
+
+`file_index` is a **packed** field, not a flat number — masking the directory as 16 bits instead of 14
+folds the storage bits in, and every file on internal storage silently disappears from the grid:
+
+```
+bits 31:30 = storage (0 SD, 1 internal eMMC, 2 SSD)
+bits 29:16 = DCF directory, 14 bits (100 → 100MEDIA)
+bits 15:0  = DCF file number (554 → DJI_0554)
+```
+
+`file_subtype` selects the rendition, and the server maps each to a different tree on the card:
+
+| subtype | meaning | path |
+|---:|---|---|
+| 0 | ORG — original | `DCIM/<dir>MEDIA/DJI_<n>` |
+| 1 | THM — thumbnail | `MISC/THM/<dir>/DJI_<n>` |
+| 2 | SCR — screen-res render | `MISC/THM/<dir>/DJI_<n>` |
+| 18 | LRF — low-res proxy video | `DCIM/<dir>MEDIA/DJI_<n>` |
+
+Measured: the subtype-18 proxy is ~7× smaller than the original (38.8 MB vs 273 MB on a 30 s clip) and
+previews at 1280×720. `file_seg_subindex` picks a part of a segmented recording (0 = whole file) and is
+sent on every request — the Mavic 3 tolerates its absence but the parser expects all three parameters.
+`/v2?storage=N&path=…` also works on a drone, so the camera-style path API is available as well.
+
+Server is `lighttpd/1.4.55` on TCP 80, no auth. `Last-Modified` on a `/v1` response independently
+confirms the manifest's FAT timestamp decode, to the second.
+
+### Telemetry
+
+The drone wraps its pushes inside `0x51/0x01` tunnel frames, so a top-level scan steps straight over
+them — they need a nested-aware scan. Battery and storage then use the **same field layout as a camera**:
+`0x0D/0x02` @20 percent, @1 pack mV, @5 signed mA; `0x02/0xDC` @6/@10 SD and @24/@28 internal MiB.
+Ground-truthed on a Mavic 3: 26%, 15.18 V, −1.30 A, 238 GB card (149 GB free) + 7.9 GB internal, and
+`0x0D/0x03` carries four cell voltages. Dock/charging bytes are deliberately NOT reused — those are Osmo
+dock semantics and would show a phantom dock indicator on an aircraft.
+
+### Threading
+
+One thread owns the socket. The keep-alive loop is permanently in `recvAll`, so anything else calling it
+gets starved — that broke pagination (a page fetch received *zero bytes*) and stalled thumbnails
+part-way down the grid. Thumbnails and paging queue via `onDroneThread`, and status is decoded inside
+the pump so the pill updates during long transfers rather than only between them.
+
+---
+
+## Historical: how it got here (was 🟡 PROTOCOL CRACKED, awaiting a hardware run)
 
 DJI drones speak the **same DUML framing** over BLE/WiFi as the Osmo line. As of **2026-08-01 the whole
 chain is solved end to end** — BLE pair (token `"DJI FLY"`) → WiFi creds → AP join → datalink on

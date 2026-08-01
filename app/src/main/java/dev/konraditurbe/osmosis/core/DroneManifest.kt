@@ -31,7 +31,7 @@ package dev.konraditurbe.osmosis.core
  *
  * ### Record (94 bytes, newest first)
  * ```
- * +0  u32  mtime, unix seconds
+ * +0  u32  mtime as a FAT/DOS packed date+time — NOT unix seconds; see [fatToEpoch]
  * +4  u32  file size in bytes   — verified byte-exact against two HTTP Content-Lengths
  * +8  u32  file_index = (folder shl 16) or number  — the /v1?file_index= parameter
  * +12 u16  duration in seconds; 0 => still photo
@@ -47,7 +47,10 @@ object DroneManifest {
     private const val FINAL_FLAG = 0x1000
 
     /** Subtype 0x01 — a file-list reply. */
-    private const val SUB_LIST_REPLY = 0x01
+    const val SUB_LIST_REPLY = 0x01
+
+    /** Subtype 0x21 — a thumbnail reply: the same chunked envelope, carrying JPEG bytes. */
+    const val SUB_THUMB_REPLY = 0x21
 
     /** One `0x00/0x27` reply frame. [data] is the record bytes only, envelope stripped. */
     data class Chunk(
@@ -68,10 +71,10 @@ object DroneManifest {
             (((seq * 31 + index) * 31 + count) * 31 + totalBytes) * 31 + data.contentHashCode()
     }
 
-    /** Parse one `0x00/0x27` DUML payload, or null if it isn't a drone file-list reply. */
-    fun parseChunk(payload: ByteArray): Chunk? {
+    /** Parse one `0x00/0x27` DUML payload of the given [subtype], or null if it isn't one. */
+    fun parseChunk(payload: ByteArray, subtype: Int = SUB_LIST_REPLY): Chunk? {
         if (payload.size < HEADER) return null
-        if (u8(payload, 0) != 0x4A || u8(payload, 1) != SUB_LIST_REPLY) return null
+        if (u8(payload, 0) != 0x4A || u8(payload, 1) != subtype) return null
         val raw = u16(payload, 2)
         // Trust the frame only when its declared length matches what we actually hold; a short read
         // here would silently truncate records and invent files out of the tail bytes.
@@ -79,7 +82,10 @@ object DroneManifest {
         val seq = u16(payload, 4)
         val index = u32(payload, 6).toInt()
         val isFinal = (raw and FINAL_FLAG) != 0
-        return if (index == 0) {
+        // Only a FILE-LIST reply puts count + totalBytes in chunk 0. A thumbnail reply's chunk 0 is
+        // plain data from +10 (its own 13-byte prefix then the JPEG), so reading them there would eat
+        // the first 8 bytes of the image.
+        return if (index == 0 && subtype == SUB_LIST_REPLY) {
             if (payload.size < HEADER + CHUNK0_EXTRA) return null
             Chunk(
                 seq, 0, isFinal,
@@ -114,17 +120,26 @@ object DroneManifest {
             val size = u32(blob, off + 4)
             val index = u32(blob, off + 8)
             val duration = u16(blob, off + 12)
-            val folder = ((index shr 16) and 0xFFFF).toInt()
+            // file_index is a PACKED field, not a flat number:
+            //   bits 31:30 = storage id (0 SD, 1 internal eMMC, 2 SSD)
+            //   bits 29:16 = DCF directory (14 bits — e.g. 100 for 100MEDIA)
+            //   bits 15:0  = DCF file number (e.g. 554 for DJI_0554)
+            // Masking the directory as 16 bits instead of 14 folds the storage bits into it, so every
+            // file on internal storage reads as directory 16484 and gets dropped by the sanity check.
+            val storage = ((index shr 30) and 0x3).toInt()
+            val folder = ((index shr 16) and 0x3FFF).toInt()
             val number = (index and 0xFFFF).toInt()
             // DJI writes DCIM/100MEDIA, 101MEDIA, … — folders start at 100 and files at 1.
             if (folder !in 100..999 || number !in 1..9999) continue
             if (index == 0L || size == 0L) continue
-            out.add(toFile(index, folder, number, size, duration, mtime))
+            out.add(toFile(index, folder, number, size, duration, fatToEpoch(mtime), storage))
         }
         return out
     }
 
-    private fun toFile(index: Long, folder: Int, number: Int, size: Long, duration: Int, mtime: Long): CameraFile {
+    private fun toFile(
+        index: Long, folder: Int, number: Int, size: Long, duration: Int, mtime: Long, storage: Int,
+    ): CameraFile {
         // No name is transmitted, so rebuild DJI's on-card convention: DCIM/100MEDIA/DJI_0554.MP4.
         // duration == 0 is the only still-vs-video signal in the record; it held for every file in the
         // capture (the two we can cross-check came back from HTTP as image/jpeg).
@@ -133,12 +148,40 @@ object DroneManifest {
         val path = "DCIM/%dMEDIA/%s".format(folder, name)
         return CameraFile(
             path = path,
-            thumbPath = path,          // drones serve thumbs over DUML, not by a derived HTTP path
+            thumbPath = path,
             fileIndex = index,
             sizeBytes = size,
             durationSec = duration,
             mtimeEpoch = mtime,
+            storage = storage,        // 0 = SD, 1 = internal eMMC, 2 = SSD (from the index's top 2 bits)
         )
+    }
+
+    /**
+     * Convert the record's `+0` field from a **FAT/DOS packed date+time** to unix seconds (0 if absurd).
+     *
+     * Read as a unix timestamp it lands in 2019 and every file looks seven years old. It's the classic
+     * on-disk FAT encoding instead — which makes sense for something read straight off the card:
+     * ```
+     * high 16 bits (date): year-1980 << 9 | month << 5 | day
+     * low  16 bits (time): hour << 11 | minute << 5 | seconds/2   (2-second resolution)
+     * ```
+     * Ground truth: `0x5CECB9FB` → 2026-07-12 23:15:54, matching the date DJI Fly shows for DJI_0555.
+     * FAT stores wall-clock with no zone, so it's interpreted in the phone's local time — the same
+     * assumption the camera path makes for its filename timestamps.
+     */
+    fun fatToEpoch(v: Long): Long {
+        if (v == 0L) return 0L
+        val date = ((v shr 16) and 0xFFFF).toInt()
+        val time = (v and 0xFFFF).toInt()
+        val year = 1980 + (date shr 9)
+        val month = (date shr 5) and 0x0F
+        val day = date and 0x1F
+        if (month !in 1..12 || day !in 1..31 || year !in 1980..2200) return 0L
+        val cal = java.util.Calendar.getInstance()
+        cal.clear()
+        cal.set(year, month - 1, day, time shr 11, (time shr 5) and 0x3F, (time and 0x1F) * 2)
+        return cal.timeInMillis / 1000L
     }
 
     private fun u8(b: ByteArray, i: Int) = b[i].toInt() and 0xFF
@@ -176,6 +219,48 @@ object DroneManifest {
         p[12] = ((cursor shr 16) and 0xFF).toByte()
         p[13] = ((cursor shr 24) and 0xFF).toByte()
         return p
+    }
+
+    /**
+     * Thumbnail request for one [fileIndex] — subtype `0x20`, replied to as chunked subtype `0x21`.
+     * Captured verbatim from DJI Fly (48 bytes); only [seq] and the index vary.
+     *
+     * Thumbnails are the one thing a drone does NOT serve over HTTP: `/v1` exposes only the original,
+     * so the grid has to pull these over the datalink. They're ~13–17 kB, arriving in ~1 kB chunks.
+     */
+    fun thumbQuery(seq: Int, fileIndex: Long): ByteArray {
+        val p = ByteArray(48)
+        p[0] = 0x4A; p[1] = 0x20
+        p[2] = 0x30; p[3] = 0x10                       // len 48 | FINAL
+        p[4] = (seq and 0xFF).toByte(); p[5] = ((seq shr 8) and 0xFF).toByte()
+        // +6 chunk = 0 (already zero)
+        p[10] = (fileIndex and 0xFF).toByte()
+        p[11] = ((fileIndex shr 8) and 0xFF).toByte()
+        p[12] = ((fileIndex shr 16) and 0xFF).toByte()
+        p[13] = ((fileIndex shr 24) and 0xFF).toByte()
+        p[14] = 0x01; p[16] = 0x01                     // request params
+        p[22] = -1; p[23] = -1; p[24] = -1; p[25] = -1 // ffffffff
+        return p
+    }
+
+    /**
+     * Pull the JPEG out of a reassembled thumbnail stream, or null if there isn't one.
+     *
+     * The payload opens with a 13-byte prefix (`00000000`, `u32` total length, `u32` file index, `00`)
+     * before the image, so rather than trust that offset we just locate the JPEG markers — robust if a
+     * model ever prefixes differently.
+     */
+    fun extractJpeg(data: ByteArray): ByteArray? {
+        var soi = -1
+        for (i in 0 until data.size - 1) {
+            if (u8(data, i) == 0xFF && u8(data, i + 1) == 0xD8) { soi = i; break }
+        }
+        if (soi < 0) return null
+        var eoi = -1
+        for (i in data.size - 2 downTo soi) {
+            if (u8(data, i) == 0xFF && u8(data, i + 1) == 0xD9) { eoi = i + 2; break }
+        }
+        return if (eoi > soi) data.copyOfRange(soi, eoi) else null
     }
 
     /**
