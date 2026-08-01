@@ -580,7 +580,8 @@ bits 15:0  = DCF file number (554 → DJI_0554)
 Measured: the subtype-18 proxy is ~7× smaller than the original (38.8 MB vs 273 MB on a 30 s clip) and
 previews at 1280×720. `file_seg_subindex` picks a part of a segmented recording (0 = whole file) and is
 sent on every request — the Mavic 3 tolerates its absence but the parser expects all three parameters.
-`/v2?storage=N&path=…` also works on a drone, so the camera-style path API is available as well.
+The camera-style `/v2?storage=N&path=…` is believed to work on a drone too, but we have never exercised
+it there — everything above goes through `/v1`.
 
 Server is `lighttpd/1.4.55` on TCP 80, no auth. `Last-Modified` on a `/v1` response independently
 confirms the manifest's FAT timestamp decode, to the second.
