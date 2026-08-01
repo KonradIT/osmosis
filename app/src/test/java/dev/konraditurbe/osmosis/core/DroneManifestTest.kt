@@ -1,0 +1,140 @@
+package dev.konraditurbe.osmosis.core
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Decodes the drone media manifest from bytes captured off a **real Mavic 3** (DJI Fly browsing its
+ * gallery over QuickTransfer WiFi, PCAPdroid, 2026-08-01). Fixture: `mavic3_manifest.txt`, one line
+ * per `0x00/0x27` reply as `<seq> <chunkIndex> <hex payload>`.
+ *
+ * Two of these records can be checked against ground truth outside the manifest: DJI Fly downloaded
+ * `file_index` 6554154 and 6554148 over HTTP in the same capture, and the server's `Content-Length`
+ * came back as 14168064 and 9494528 — exactly the sizes decoded here. That pins the size field and,
+ * with it, the 94-byte stride.
+ */
+class DroneManifestTest {
+
+    private data class Row(val seq: Int, val chunk: Int, val payload: ByteArray)
+
+    private fun fixture(): List<Row> {
+        val text = javaClass.classLoader!!.getResourceAsStream("manifests/mavic3_manifest.txt")!!
+            .bufferedReader().readText()
+        return text.lineSequence()
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+            .map { line ->
+                val (s, c, hex) = line.trim().split(" ")
+                Row(s.toInt(), c.toInt(), hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray())
+            }.toList()
+    }
+
+    private fun chunksFor(seq: Int) =
+        fixture().filter { it.seq == seq }.mapNotNull { DroneManifest.parseChunk(it.payload) }
+
+    @Test
+    fun `parses the 0x4a envelope including the 0x1000 final-chunk flag`() {
+        // seq 0xdd is a complete single-chunk reply: 10 files, 948 declared bytes, FINAL set.
+        val c = chunksFor(0xDD).single()
+        assertEquals(0, c.index)
+        assertEquals(10, c.count)
+        assertEquals(948, c.totalBytes)
+        assertTrue("single-chunk reply must carry the final flag", c.isFinal)
+    }
+
+    @Test
+    fun `decodes a complete reply into all ten files, newest first`() {
+        val files = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD)))
+        assertEquals(10, files.size)
+
+        val newest = files.first()
+        assertEquals(6553777L, newest.fileIndex)
+        assertEquals("DCIM/100MEDIA/DJI_0177.MP4", newest.path)
+        assertEquals(290512504L, newest.sizeBytes)
+        assertEquals(17, newest.durationSec)
+        assertTrue(newest.isVideo)
+
+        // Records run newest-first, one file index per step down.
+        assertEquals(listOf(177, 176, 175, 174, 173, 172, 171, 170, 169, 168),
+            files.map { (it.fileIndex and 0xFFFF).toInt() })
+    }
+
+    @Test
+    fun `duration zero means a still photo and names it JPG`() {
+        val files = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD)))
+        val photo = files.single { it.fileIndex == 6553771L }
+        assertEquals(0, photo.durationSec)
+        assertEquals("DCIM/100MEDIA/DJI_0171.JPG", photo.path)
+        assertTrue(photo.isImage)
+        assertEquals(11689984L, photo.sizeBytes)
+    }
+
+    @Test
+    fun `sizes match the HTTP Content-Length DJI Fly actually received`() {
+        // The two files downloaded in the same capture, via /v1?file_index=…&file_subtype=0.
+        val all = fixture().mapNotNull { DroneManifest.parseChunk(it.payload) }
+            .groupBy { it.seq }
+            .flatMap { (_, cs) -> DroneManifest.decode(DroneManifest.assemble(cs)) }
+            .associateBy { it.fileIndex }
+
+        assertEquals(14168064L, all[6554154L]!!.sizeBytes)
+        assertEquals(9494528L, all[6554148L]!!.sizeBytes)
+    }
+
+    @Test
+    fun `indexed files address media over v1, never by path`() {
+        val f = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD))).first()
+        assertTrue(f.isIndexed)
+        assertEquals("/v1?file_index=6553777&file_subtype=0", f.urlPath())
+        assertNull("drones expose no derived proxy", f.proxyUrlPath())
+        assertEquals(listOf(f.urlPath()), f.previewCandidates())
+    }
+
+    @Test
+    fun `mtime drives the display date when the name carries no timestamp`() {
+        val f = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD))).first()
+        assertEquals("", f.timestamp)                 // no DJI_<14 digits>_ name on a drone
+        assertTrue("expected a date from the manifest mtime", f.dateTaken.startsWith("2017-06-27"))
+    }
+
+    @Test
+    fun `a reply missing middle chunks yields only the records it can trust`() {
+        // seq 0x0c declares 45 files / 4238 bytes but the capture only carries chunks 0, 3 and 4 —
+        // concatenating those shifts the stream out of phase, so the tail must be rejected rather
+        // than emitted as files with 1970s dates and absurd sizes.
+        val cs = chunksFor(0x0C)
+        assertEquals(listOf(0, 3, 4), cs.map { it.index }.sorted())
+        assertEquals(45, cs.first { it.index == 0 }.count)
+
+        val files = DroneManifest.decode(DroneManifest.assemble(cs))
+        assertTrue("should still recover the leading intact records", files.size >= 10)
+        assertTrue("must not invent 45 files from a gapped stream", files.size < 45)
+        assertTrue(files.all { (it.fileIndex shr 16) == 100L })
+        assertTrue(files.all { it.sizeBytes > 0 })
+    }
+
+    @Test
+    fun `rejects payloads whose declared length disagrees with the bytes held`() {
+        val good = fixture().first { it.seq == 0xDD }.payload
+        assertNotNull(DroneManifest.parseChunk(good))
+        assertNull(DroneManifest.parseChunk(good.copyOfRange(0, good.size - 4)))
+        assertNull(DroneManifest.parseChunk(byteArrayOf(0x4A, 0x01)))
+        // A thumbnail reply (subtype 0x21) shares the command but is not a file list.
+        val thumb = good.copyOf().also { it[1] = 0x21 }
+        assertNull(DroneManifest.parseChunk(thumb))
+    }
+
+    @Test
+    fun `list query matches DJI Fly's bytes and patches seq plus cursor`() {
+        // Captured verbatim from DJI Fly at t=11.97 (seq 0x0c, cursor 1).
+        val expected = "4a0021100c0000000000010000002d000d0100ffffffffffffffff000100000000"
+        assertEquals(expected, DroneManifest.listQuery(0x0C).joinToString("") { "%02x".format(it) })
+        // The paging variant seen at t=12.41: same frame, seq 0x0d, cursor 0x40000001.
+        assertEquals("4a0021100d0000000000010000402d000d0100ffffffffffffffff000100000000",
+            DroneManifest.listQuery(0x0D, 0x40000001L).joinToString("") { "%02x".format(it) })
+        assertEquals("4a040e100c000000000001000000",
+            DroneManifest.listAck(0x0C).joinToString("") { "%02x".format(it) })
+    }
+}

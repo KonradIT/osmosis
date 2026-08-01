@@ -541,11 +541,70 @@ clip's proxy is only ~17 MB. That cheap random access opens some nice polish on 
 
 Not a bug fix (previews already work) — a UX layer the proxy's small size + range access make cheap.
 
-## 14. Drone offload support — 🔬 EXPLORATORY
+## 14. Drone offload support — 🟡 PROTOCOL CRACKED, awaiting a hardware run
 
-DJI drones speak the **same DUML framing** over BLE/WiFi as the Osmo line, so the pairing + wake +
-media-list machinery here may extend to them with model-specific tweaks. Out of scope for the camera
-milestone, tracked separately.
+DJI drones speak the **same DUML framing** over BLE/WiFi as the Osmo line. As of **2026-08-01 the whole
+chain is solved end to end** — BLE pair (token `"DJI FLY"`) → WiFi creds → AP join → datalink on
+`udp/9003` → **media list** → **download** — cracked from a PCAPdroid capture of DJI Fly ↔ a real
+**Mavic 3** browsing its gallery (`reference/captures/wifi/mavic3_media_browse.pcap`, gitignored).
+Implemented and unit-tested against the captured bytes; **not yet run against the drone itself.**
+
+### The media API (cracked 2026-08-01)
+
+The drone reuses the camera's DUML query — `0x00/0x26` → `0x00/0x27`, `receiverType 0x01`, the same
+`0x4a` sub-protocol envelope, even the byte-identical `4a04…` follow-up frame — but **answers with a
+completely different body**, and serves the bytes over a different URL.
+
+| | Osmo camera | DJI drone |
+|---|---|---|
+| datalink | `udp/9004` (+tcp-7001 poke) or `10004` | **`udp/9003`, no poke** |
+| list reply | CompositePack TLV, carries **paths** | **flat array of fixed 94-byte records, no filename at all** |
+| media URL | `/v2?storage=N&path=DCIM/…` | **`/v1?file_index=<u32>&file_subtype=0`** |
+| thumbnails | HTTP `.scr`/`.thm` | **over DUML** (`0x4a` subtype `0x20`→`0x21`, chunked JPEG) |
+| playback mode | required to paginate | **not needed** |
+
+**`0x4a` envelope** (both directions): `+0` magic `0x4a`, `+1` subtype (`0x00` list query, `0x01` list
+reply, `0x20` thumb query, `0x21` thumb reply), `+2 u16` length — **low 12 bits are the length, bit
+`0x1000` marks the FINAL chunk** — `+4 u16` seq (echoed), `+6 u32` chunk index. Chunk 0 of a reply adds
+`+10 u32` total file count and `+14 u32` total manifest bytes. That `0x1000` flag is the trap: read the
+length as a plain `u8` and short frames parse fine while every long one silently mis-parses.
+
+**Record — 94 bytes, newest first:** `+0 u32` mtime (unix), `+4 u32` **size in bytes**, `+8 u32`
+**`file_index` = `(folder shl 16) or number`**, `+12 u16` **duration in seconds** (`0` ⇒ still photo).
+Bytes past `+14` are still unmapped (resolution/fps live in there) and are deliberately left `null`
+rather than guessed. There is **no filename on the wire** — `DroneManifest` synthesises DJI's on-card
+convention (`DCIM/100MEDIA/DJI_0554.MP4`) from the index, picking `.MP4`/`.JPG` off the duration.
+
+**Ground truth:** DJI Fly downloaded `file_index` 6554154 and 6554148 in the same capture and the
+server returned `Content-Length` **14168064** and **9494528** — byte-exact matches for the sizes decoded
+out of the manifest, which is what pins the size field and the 94-byte stride. Both were `dur = 0` and
+came back `image/jpeg`, confirming the still-vs-video signal. Pinned by
+[DroneManifestTest](app/src/test/java/dev/konraditurbe/osmosis/core/DroneManifestTest.kt) against the
+real captured frames (fixture `manifests/mavic3_manifest.txt`).
+
+**Pagination — also solved, and simpler than the camera's.** `cursor = 1` (bytes 10–13 of the query)
+asks for the newest page (45 files); each older page passes **the oldest `file_index` of the page just
+received**, and the drone replays that file as the first record of the next page, so callers dedup by
+index. No fresh session, no playback mode — pages come back to back on the live session. DJI Fly walked
+`1 → 6553910 → 6553865 → 6553821 → 6553777 → 6553768` and stopped when a page returned only the cursor
+file. (The camera's `0x40000001` video-handle cursor is meaningless here — DJI Fly issues it after every
+page and the Mavic answers `count = 0` every time.)
+
+### Still open
+
+- **Thumbnails aren't wired.** The frames are decoded (187 JPEGs recovered from the capture: query
+  subtype `0x20` carrying the `file_index`, reply subtype `0x21` streaming chunked JPEG) but the grid's
+  loader is HTTP-only. Until that's bridged, drone cells render a **placeholder** —
+  `CameraFile.thumbUrlPath()` deliberately returns empty for indexed media, because pointing it at `/v1`
+  would pull a full 14 MB frame per cell. This is the obvious next increment.
+- **No hardware run yet.** Everything above is from the capture plus unit tests; the live path
+  (`fetchDroneFileList` → grid → download) has never touched a drone.
+- **Unmapped record fields** past `+14`, and whether `file_subtype` exposes a cheaper rendition (DJI Fly
+  only ever used `0`).
+- **Delete / favourite on a drone** are untested; `0x02/0xbf` (favourite) *does* appear in the capture.
+- **Neo 2 (`0x007e`)** shares the drone defaults but its port is unconfirmed.
+
+### History (how it got here)
 
 - **Detection already works — via the DJI company id.** A drone advertises DJI's BLE company id
   `0x08AA` in its mfr data exactly like an Osmo, so the scanner already surfaces it as a `HIT` and reads
@@ -610,10 +669,11 @@ milestone, tracked separately.
     inbound** simply because that pairing attempt *failed* (DJI Fly was retrying the handshake into
     the void), not a capture limitation, so a successful browse should record both directions. Or
     fuzz the list command now that Osmosis is on the datalink.
-- **Planned — test with a Mavic 3.** Run the full offload flow against a Mavic 3 and capture what
-  diverges from an Osmo: model id, whether `0x07/0x07`/`0x0e` answer, the AP bring-up, the datalink port,
-  and the media-list format (drones may not use CompositePack). A PCAPdroid capture of the **DJI Fly**
-  app ↔ the drone would hand us the credential + list path directly, same as the Mimo captures did for
-  the cameras.
-- **Scope caveat:** drone media/telemetry pipelines are their own world (DJI Fly, not Mimo); this item
-  is about seeing how far the existing DUML stack reaches, not committing to full drone support.
+- **✅ The capture landed (2026-08-01).** A PCAPdroid capture of DJI Fly doing a full QuickTransfer
+  browse + two downloads on a real Mavic 3 answered every open question above in one go — the list
+  command was never different, only its *reply* and the media URL were. See "The media API" at the top
+  of this item; the guess that drones "may not use CompositePack" was right.
+- **Scope note (updated):** this started as "see how far the existing DUML stack reaches". It reaches
+  all the way — list, paging and download are the same stack with a different manifest body and a `/v1`
+  URL, so drone support is now a real feature rather than an experiment. Thumbnails are the one piece
+  that genuinely needs new plumbing (DUML-delivered, not HTTP).

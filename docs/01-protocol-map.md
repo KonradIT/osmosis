@@ -309,3 +309,33 @@ real 45-record Nano and 13-record Xtra blobs.
 Shared and model-agnostic: pairing (`osmo` token), the DUML frame + CRC, the `0x00/0x26`→`0x00/0x27`
 list flow and its reassembly/decode, `/v2` HTTP, storage auto-detect, moov-derived resolution/duration,
 and the streaming preview.
+
+---
+
+## 11. DJI drones (QuickTransfer) — the same stack, a different manifest
+
+A drone reaches the *same* `0x00/0x26` → `0x00/0x27` list flow described in §7, but four things change.
+Cracked from a PCAPdroid capture of DJI Fly ↔ a real Mavic 3 (2026-08-01).
+
+| | Osmo camera | DJI drone (Mavic 3 `0x0070`) |
+|--|-------------|------------------------------|
+| Pairing token | `osmo` | **`DJI FLY`** — anything else is approved but gets **no WiFi creds** |
+| Datalink | UDP 9004 (+poke) / 10004 | **UDP 9003, no poke** |
+| List reply body | CompositePack TLV, carries paths | **flat 94-byte records, no filename** |
+| Media URL | `/v2?storage=N&path=…` | **`/v1?file_index=<u32>&file_subtype=0`** |
+| Thumbnails | HTTP `.scr`/`.thm` | over DUML (`0x4a` subtype `0x20`→`0x21`, chunked JPEG) |
+| Playback mode to page | required | **not needed** |
+
+The `0x4a` envelope is shared with the camera path, but note its length field is **12 bits with
+`0x1000` as a FINAL-chunk flag** — reading it as a `u8` parses short frames correctly and silently
+corrupts every long one, which is exactly where the manifest lives.
+
+Record (94 B, newest first): `+0 u32` mtime · `+4 u32` size · `+8 u32` `file_index = (folder<<16)|number`
+· `+12 u16` duration seconds (`0` ⇒ photo). No name is transmitted; `DCIM/100MEDIA/DJI_0554.MP4` is
+reconstructed from the index. Paging passes the **oldest index of the previous page** as the cursor and
+the drone replays that file first, so callers dedup by index.
+
+Full detail, ground truth and open questions: **[ROADMAP #14](../ROADMAP.md)**; implementation in
+[DroneManifest.kt](../app/src/main/java/dev/konraditurbe/osmosis/core/DroneManifest.kt), pinned by
+[DroneManifestTest](../app/src/test/java/dev/konraditurbe/osmosis/core/DroneManifestTest.kt) against
+the captured frames.

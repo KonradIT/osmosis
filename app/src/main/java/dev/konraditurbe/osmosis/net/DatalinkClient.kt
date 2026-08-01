@@ -2,6 +2,7 @@ package dev.konraditurbe.osmosis.net
 
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.CameraStatus
+import dev.konraditurbe.osmosis.core.DroneManifest
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.duml.DjiMessage
 import dev.konraditurbe.osmosis.duml.OsmoCommands
@@ -185,6 +186,99 @@ class DatalinkClient(
             it[12] = ((cursor ushr 16) and 0xFF).toByte()
             it[13] = ((cursor ushr 24) and 0xFF).toByte()
         }
+
+    // ---- drone media list (ROADMAP #14) -----------------------------------------------------------
+    // A drone answers the SAME 0x00/0x26 query with a flat array of fixed 94-byte records instead of a
+    // camera's CompositePack TLV — no paths, just numeric file indices fetched over /v1. Cracked from a
+    // PCAPdroid capture of DJI Fly ↔ a real Mavic 3 (2026-08-01). Decoding lives in [DroneManifest].
+
+    private var droneCursor = 0L
+    private val droneSeen = HashSet<Long>()
+    private var droneQuerySeq = 0x0C
+
+    /** Handshake + register + list, for a DJI drone. Socket stays open on success, as for a camera. */
+    fun fetchDroneFileList(ip: String): List<CameraFile> {
+        if (!openAndRegister(ip)) return emptyList()
+        onFetchProgress?.invoke(50)
+        droneSeen.clear(); droneCursor = 0L; moreAvailable = false
+        val files = droneListPage(cursor = 1L)              // cursor 1 = newest page
+        droneSeen.addAll(files.map { it.fileIndex })
+        droneCursor = files.minOfOrNull { it.fileIndex } ?: 0L
+        moreAvailable = files.isNotEmpty() && droneCursor > 0L
+        log("datalink: drone manifest → ${files.size} files (newest page; more=$moreAvailable)")
+        onFetchProgress?.invoke(100)
+        return files
+    }
+
+    /**
+     * The next OLDER page for the grid's infinite scroll, or empty once exhausted. Unlike the camera
+     * path this needs no fresh session and no playback mode — the drone answers pages back to back on
+     * the live session. The cursor is the oldest index of the page just shown and the drone *repeats*
+     * that file, so the replay is filtered out by [droneSeen].
+     */
+    fun fetchNextDronePage(): List<CameraFile> {
+        if (!moreAvailable || droneCursor <= 0L) return emptyList()
+        val page = droneListPage(droneCursor)
+        val fresh = page.filter { droneSeen.add(it.fileIndex) }
+        val oldest = page.filter { it.fileIndex > 0L }.minOfOrNull { it.fileIndex } ?: 0L
+        // Stop when the page brought nothing new or the cursor failed to move older — either means we
+        // reached the oldest file on the card (the drone answers the last page with just that file).
+        val advanced = oldest in 1 until droneCursor
+        if (advanced) droneCursor = oldest
+        moreAvailable = advanced && fresh.isNotEmpty()
+        log("datalink: drone page → ${fresh.size} new of ${page.size} (more=$moreAvailable)")
+        return fresh
+    }
+
+    /** One page: send the query, collect the chunked `0x00/0x27` reply, reassemble, decode. */
+    private fun droneListPage(cursor: Long): List<CameraFile> {
+        val seq = droneQuerySeq.also { droneQuerySeq = (it + 1) and 0xFFFF }
+        sendDuml(0x00, 0x26, DroneManifest.listQuery(seq, cursor), receiverType = 0x01, receiverId = 0)
+        val chunks = LinkedHashMap<Int, DroneManifest.Chunk>()
+        var acked = false
+        for (batch in 0 until 12) {
+            for (dg in recvAll(600)) for (pl in dumlPayloads(dg, 0x00, 0x27)) {
+                val c = DroneManifest.parseChunk(pl) ?: continue
+                if (c.seq == seq) chunks.putIfAbsent(c.index, c)
+            }
+            sendAck()
+            if (droneChunksComplete(chunks)) break
+            if (!acked && chunks.isNotEmpty()) {
+                sendDuml(0x00, 0x26, DroneManifest.listAck(seq), receiverType = 0x01, receiverId = 0)
+                acked = true
+            }
+        }
+        if (chunks.isEmpty()) {
+            log("datalink: drone list — nothing answered for seq=0x%02x cursor=$cursor".format(seq))
+            return emptyList()
+        }
+        // A gap mid-stream shifts the record phase, so say so rather than emitting silent garbage —
+        // [DroneManifest.decode] drops whatever no longer parses as a real (folder, number).
+        if (!droneChunksComplete(chunks))
+            log("datalink: drone list INCOMPLETE (chunks ${chunks.keys.sorted()}) — decoding what landed")
+        return DroneManifest.decode(DroneManifest.assemble(chunks.values.toList()))
+    }
+
+    private fun droneChunksComplete(chunks: Map<Int, DroneManifest.Chunk>): Boolean {
+        if (0 !in chunks) return false
+        val last = chunks.keys.max()
+        return (0..last).all { it in chunks } && chunks[last]!!.isFinal
+    }
+
+    /** Every DUML frame of [set]/[cmd] in a raw datagram, payload only (header + CRC stripped). */
+    private fun dumlPayloads(raw: ByteArray, set: Int, cmd: Int): List<ByteArray> {
+        val out = ArrayList<ByteArray>()
+        var i = 0
+        while (i + 13 <= raw.size) {
+            if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
+            val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+            if (len < 13 || i + len > raw.size) { i++; continue }
+            if ((raw[i + 9].toInt() and 0xFF) == set && (raw[i + 10].toInt() and 0xFF) == cmd)
+                out.add(raw.copyOfRange(i + 11, i + len - 2))
+            i += len
+        }
+        return out
+    }
 
     /**
      * Fetch the next OLDER page for the grid's infinite scroll, returning ONLY the newly-seen files

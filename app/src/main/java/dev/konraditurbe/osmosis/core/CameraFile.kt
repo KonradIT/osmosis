@@ -25,7 +25,18 @@ data class CameraFile(
     // lives on the same store, so the caller resolves [storage] once per group instead of once per
     // manifest (which used to stamp one store on everything and 404 the other half).
     val group: Int = 0,
+    // DRONE ONLY (0 on every camera). DJI drones address media by a numeric index instead of a path:
+    // `(folder shl 16) or number`, served at `/v1?file_index=N` rather than `/v2?…&path=…`. The [path]
+    // above is synthesised from this index for display/naming only — it is NOT a URL the drone answers.
+    // See [DroneManifest] and ROADMAP #14.
+    val fileIndex: Long = 0L,
+    // Modification time, unix seconds — drones put it straight in the manifest record, where cameras
+    // encode it in the filename ([timestamp]). 0 = unknown.
+    val mtimeEpoch: Long = 0L,
 ) {
+    /** Index-addressed (drone) media, fetched over `/v1` rather than by path over `/v2`. */
+    val isIndexed: Boolean get() = fileIndex != 0L
+
     /** True once the manifest yielded a delete handle for this file (see DatalinkClient.deleteFiles). */
     val deletable: Boolean get() = handle != 0L
 
@@ -44,16 +55,32 @@ data class CameraFile(
      *  them by probing `_002…` on open (see MediaPreviewActivity.probeBurstFrames). */
     val isBurst: Boolean get() = groupKey != null
 
-    /** Human date from the 14-digit timestamp: "2026-07-09 19:56". */
+    /** Human date: from the 14-digit filename timestamp (cameras), else the manifest mtime (drones). */
     val dateTaken: String get() = timestamp.takeIf { it.length == 14 }?.let {
         "${it.substring(0, 4)}-${it.substring(4, 6)}-${it.substring(6, 8)} ${it.substring(8, 10)}:${it.substring(10, 12)}"
+    } ?: mtimeEpoch.takeIf { it > 0 }?.let {
+        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
+            .format(java.util.Date(it * 1000L))
     } ?: ""
 
-    fun urlPath(): String = "/v2?storage=$storage&path=$path"
-    fun thumbUrlPath(): String = "/v2?storage=$storage&path=$thumbPath"
+    fun urlPath(): String =
+        if (isIndexed) "/v1?file_index=$fileIndex&file_subtype=0"
+        else "/v2?storage=$storage&path=$path"
+
+    /**
+     * HTTP thumbnail URL, or **empty when there isn't one**.
+     *
+     * A drone serves thumbnails over the DUML datalink (`0x4a` subtype `0x20`→`0x21`, chunked JPEG),
+     * NOT over HTTP — and `/v1` only exposes the original. Returning the original here would make the
+     * grid pull a full 14 MB frame per cell, so indexed media reports "no thumbnail" and renders a
+     * placeholder until the DUML thumb channel is wired. See ROADMAP #14.
+     */
+    fun thumbUrlPath(): String =
+        if (isIndexed) "" else "/v2?storage=$storage&path=$thumbPath"
 
     /** URL of the low-res proxy for preview, or null if the camera doesn't provide one. */
-    fun proxyUrlPath(): String? = proxyPath?.let { "/v2?storage=$storage&path=$it" }
+    fun proxyUrlPath(): String? =
+        if (isIndexed) null else proxyPath?.let { "/v2?storage=$storage&path=$it" }
 
     /**
      * Low-res proxy extension pinned by camera family, read from the file-naming prefix (which is the
@@ -78,6 +105,9 @@ data class CameraFile(
      * on weaker devices). Duplicates collapse, so this is normally just [proxy, full-res].
      */
     fun previewCandidates(): List<String> {
+        // Indexed (drone) media has no path to derive a sidecar proxy from, and no proxy subtype is
+        // mapped yet — stream the original. See ROADMAP #14.
+        if (isIndexed) return listOf(urlPath())
         val urls = LinkedHashSet<String>()
         proxyUrlPath()?.let { urls.add(it) }
         proxyExt()?.let { urls.add("/v2?storage=$storage&path=${path.substringBeforeLast('.', path)}.$it") }

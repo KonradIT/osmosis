@@ -784,8 +784,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         val c = DatalinkClient(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
-                        val f = runCatching { c.fetchFileList("192.168.2.1") }
-                            .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
+                        // A drone answers the same query with fixed 94-byte records instead of the
+                        // camera's CompositePack TLV, and serves media by index over /v1 — ROADMAP #14.
+                        val f = runCatching {
+                            if (m.isDrone) c.fetchDroneFileList("192.168.2.1")
+                            else c.fetchFileList("192.168.2.1")
+                        }.getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
                         return c to f
                     }
 
@@ -995,6 +999,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** Stamp each file's HTTP storage index (per-file, by its handle's store bit) and sort newest-first —
      *  shared by the initial fetch and every lazily-loaded older page. See [resolveStorage]. */
     private fun applyStorageAndSort(files: List<CameraFile>): List<CameraFile> {
+        // Drone media is index-addressed (/v1?file_index=…) — there is no /v2 mount to resolve, and its
+        // names carry no `_<14 digits>_` stamp for the camera sort to key on, so order by the manifest's
+        // own mtime + index instead. Probing storage here would fire a pointless HEAD per file.
+        if (files.any { it.isIndexed }) return files.sortedWith(
+            compareByDescending<CameraFile> { it.mtimeEpoch }.thenByDescending { it.fileIndex }
+        )
         val out = files.map { f -> f.copy(storage = resolveStorage(f)) }
         return out.sortedWith(compareByDescending<CameraFile> { it.timestamp }.thenByDescending { it.seq })
     }
@@ -1087,7 +1097,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             visibility = View.VISIBLE; alpha = 1f; scaleX = 1f; scaleY = 1f; translationY = 0f
         }
         Thread {
-            val more = runCatching { applyStorageAndSort(dl.fetchNextPage()) }.getOrElse { emptyList() }
+            val more = runCatching {
+                applyStorageAndSort(if (currentModel.isDrone) dl.fetchNextDronePage() else dl.fetchNextPage())
+            }.getOrElse { emptyList() }
             main.post {
                 adapter?.append(more)
                 findViewById<View>(R.id.loadMoreSpinner)?.animate()?.alpha(0f)?.setDuration(180)
