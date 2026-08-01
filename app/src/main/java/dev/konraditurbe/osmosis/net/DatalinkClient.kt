@@ -577,21 +577,26 @@ class DatalinkClient(
                     storageFreeMb = if (free in 0..50_000_000) free else status.storageFreeMb,
                 ); return true
             }
-            set == 0x02 && id == 0xDC && p.size >= 32 -> {
-                // Both stores in one frame, as two [total][free] u32-LE MiB blocks: the CARD at
-                // @6/@10 and BUILT-IN at @24/@28. Ground-truthed three ways: an Action 6's @6/@10
-                // (121785/109748 MiB) matched its on-screen 118.9/107.2 GB exactly; the same camera
-                // family (Action 5 Pro and its Xtra rebadge) reports an identical 48980 MiB built-in;
-                // and a card-less Xtra reports @6 = 0. Byte 0 is *not* an inserted flag — it read
-                // 0x11 with no card and 0x00 with one, i.e. backwards — so presence is capacity > 0.
+            set == 0x02 && id == 0xDC && p.size >= 22 -> {
+                // One [total][free] u32-LE MiB block PER STORE (byte 2 = store count): the first at
+                // @6/@10, the built-in at @24/@28. Two-store bodies send 32 B (SD @6 + built-in @24);
+                // a **single-store body (Pocket 3 = microSD only) sends 22 B** with just the first
+                // block, so read the built-in only when it's actually there. Ground-truthed: an
+                // Action 6's @6/@10 (121785/109748 MiB) matched its on-screen 118.9/107.2 GB; the
+                // Action 5 Pro + Xtra rebadge report an identical 48980 MiB built-in; a card-less
+                // Xtra reports @6 = 0. Byte 0 is *not* an inserted flag (0x11 no card / 0x00 with) —
+                // presence is capacity > 0.
                 val sdTotal = u32le(p, 6).toInt(); val sdFree = u32le(p, 10).toInt()
-                val inTotal = u32le(p, 24).toInt(); val inFree = u32le(p, 28).toInt()
+                val hasInternal = p.size >= 32
+                val inTotal = if (hasInternal) u32le(p, 24).toInt() else 0
+                val inFree = if (hasInternal) u32le(p, 28).toInt() else 0
                 fun sane(v: Int) = v in 0..50_000_000
                 status = status.copy(
                     sdTotalMb = if (sane(sdTotal)) sdTotal else status.sdTotalMb,
                     sdFreeMb = if (sane(sdFree)) sdFree else status.sdFreeMb,
-                    internalTotalMb = if (sane(inTotal)) inTotal else status.internalTotalMb,
-                    internalFreeMb = if (sane(inFree)) inFree else status.internalFreeMb,
+                    // A single-store frame confirms there is no built-in (0), rather than "unknown" (-1).
+                    internalTotalMb = if (!hasInternal) 0 else if (sane(inTotal)) inTotal else status.internalTotalMb,
+                    internalFreeMb = if (!hasInternal) 0 else if (sane(inFree)) inFree else status.internalFreeMb,
                 ); return true
             }
             set == 0x00 && id == 0x00 && p.size >= 6 -> {
