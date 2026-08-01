@@ -578,8 +578,47 @@ index. No fresh session, no playback mode — pages come back to back on the liv
 file. (The camera's `0x40000001` video-handle cursor is meaningless here — DJI Fly issues it after every
 page and the Mavic answers `count = 0` every time.)
 
+### Hardware attempt (2026-08-01) — the media API is right, the drone won't serve US
+
+Everything up to the media query works against a real Mavic 3: BLE pair with the `"DJI FLY"` token →
+`ALREADY PAIRED` → SSID + passphrase over BLE → AP join at `192.168.2.100` → **`datalink: handshake OK
+on udp/9003`**. Then the drone answers the media query with nothing. Over ~10 runs it sent us ~30 kB
+per session consisting *only* of its own `0x51/0x01` + `0x51/0x13` beacons, and never once replied to a
+command.
+
+**Eliminated by direct byte-level comparison against DJI Fly** (each of these was a real defect, is
+fixed, and did *not* unblock it):
+
+| Suspect | Verdict |
+|---|---|
+| Query payload | **identical** — pinned by `DroneManifestTest` |
+| DUML framing / CRCs | identical (`crc16(frame) == 0` both) |
+| Routing header ack + seq | matched (`ack=channel`, `seq=channel+8`) |
+| Session id / handshake | drone echoes our id and ACKs `01`, same as DJI Fly's |
+| Channel echo (`r0-1`) | drone mirrors our `b887` exactly as it mirrored DJI Fly's `40ef` |
+| Symmetric UDP port | now bind 9003→9003 as DJI Fly does |
+| Camera registration | removed for drones (DJI Fly never sends it) |
+| 29-command WiFi prelude | replayed verbatim |
+| BLE prelude | replayed verbatim (DJI Fly sends it over **BLE**, we had only sent it over WiFi) |
+| 860/s uplink stream (`0x02/0x82`, `0x02/0xdc`, `0x04/0x1c` — 95% of DJI Fly's traffic) | replayed |
+| App identity in `0x07/0x45` | tried DJI Fly's own install UUID |
+
+**Two things worth not re-deriving.** `r0-1` is **not** a running ack — it oscillates
+(`ef40→ef58→ef40→ef60`) and only changes when a reply lands, so it can't be used as an "are we being
+accepted" probe. And the **sequence window is not enforced**: DJI Fly runs ~1600 packets ahead of it.
+Also note the drone replies to *nothing* except `0x00/0x26` — even DJI Fly gets no response to any
+prelude command — so silence during setup is normal and only the manifest is a real signal.
+
+**What that leaves.** Whatever distinguishes us is something the drone knows that isn't in DJI Fly's
+outbound bytes — most likely client authorisation (account binding), given it already withholds
+credentials from any pairing token but `"DJI FLY"`. Seeing it needs a capture of **our own** session,
+which PCAPdroid can't provide: its VPN mode breaks `bindProcessToNetwork`, so an attempted capture
+recorded only DJI Fly's traffic and none of ours. That needs PCAPdroid's root/pcapd mode or `tcpdump`
+on-device.
+
 ### Still open
 
+- **The drone refuses our datalink commands** — see above. This is the blocker for the whole feature.
 - **Thumbnails aren't wired.** The frames are decoded (187 JPEGs recovered from the capture: query
   subtype `0x20` carrying the `file_index`, reply subtype `0x21` streaming chunked JPEG) but the grid's
   loader is HTTP-only. Until that's bridged, drone cells render a **placeholder** —

@@ -20,8 +20,26 @@ fun djiPackString(value: String): ByteArray {
  * 15-digit string; we keep this known-accepted blob for the initial handshake attempt and
  * will make the identifier configurable once we see how the Nano responds.
  */
-class DjiPairMessagePayload(private val pairPinCode: String) {
+class DjiPairMessagePayload(
+    private val pairPinCode: String,
+    /**
+     * The app identity presented alongside the PIN. Both are 32 characters, so the frame length is
+     * unchanged. A Mavic already discriminates on the *token* (only "DJI FLY" unlocks WiFi creds), so
+     * it may well discriminate on this too for anything beyond credentials — see [DJI_FLY_IDENTIFIER].
+     */
+    private val identifier: String = DEFAULT_IDENTIFIER,
+) {
     companion object {
+        /** What moblin/dji-remote use; accepted by every Osmo camera. */
+        const val DEFAULT_IDENTIFIER = "284ae5b8d76b3375a04a6417ad71bea3"
+
+        /**
+         * DJI Fly's own per-install UUID, read off a btsnoop of it pairing this Mavic 3 (2026-08-01).
+         * Tried because the drone hands out WiFi credentials to us yet refuses every datalink command,
+         * and this is the last identity field we had never varied.
+         */
+        const val DJI_FLY_IDENTIFIER = "bbf9994f-a1da-44db-b1e0-9d889c5b"
+
         // PackString("284ae5b8d76b3375a04a6417ad71bea3") -- 0x20 length prefix + 32 hex chars.
         val identifierBlob = byteArrayOf(
             0x20, 0x32, 0x38, 0x34, 0x61, 0x65, 0x35, 0x62,
@@ -34,7 +52,7 @@ class DjiPairMessagePayload(private val pairPinCode: String) {
 
     fun encode(): ByteArray {
         val writer = ByteWriter()
-        writer.writeBytes(identifierBlob)
+        writer.writeBytes(djiPackString(identifier))
         writer.writeBytes(djiPackString(pairPinCode))
         return writer.data
     }

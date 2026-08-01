@@ -690,6 +690,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // 0x53/0x10 is the one that matters: the camera answers 01 00 00 00 and wakes.
         val c = dev.konraditurbe.osmosis.duml.OsmoCommands
         main.postDelayed({ gattClient?.writeCommand(c.session5310()); logLine("sent 0x53/0x10 (wake)") }, 100)
+        if (currentModel.isDrone) sendDroneBlePrelude()
         main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x07, id = 0x8007)) }, 900)
         main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x0E, id = 0x800E)) }, 1400)
         main.postDelayed({
@@ -700,6 +701,47 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 addr != null -> { logLine("No BLE creds — asking for the password."); promptPasswordFor(addr) { offloadPass = savedPassFor(addr); maybeStartOffload() } }
             }
         }, 4500)
+    }
+
+    /**
+     * The setup sequence DJI Fly runs **over BLE** right after pairing a Mavic, replayed verbatim from a
+     * btsnoop taken alongside a working QuickTransfer browse (2026-08-01, 17:30:53).
+     *
+     * We had been sending these same commands over the **WiFi datalink**, where the drone accepts
+     * nothing at all — so they never actually ran. Over BLE it demonstrably answers us (pairing and both
+     * credential getters work), which makes this the one transport where the sequence can take effect.
+     * The working hypothesis is that this is what puts the drone into the state that serves media; its
+     * AP comes up either way, which is why we get a healthy datalink that refuses every command.
+     *
+     * Receiver addressing recovered from each captured frame's DUML target (`(id shl 5) or type`):
+     * `0x2802` = type 8/id 1, `0x6F02` = type 15/id 3, `0x4F02` = type 15/id 2, `0x0302` = type 3/id 0.
+     * fff5 is write-without-response, so these must be paced or they silently drop — same constraint as
+     * the credential reads above.
+     */
+    private fun sendDroneBlePrelude() {
+        val c = dev.konraditurbe.osmosis.duml.OsmoCommands
+        val seq = listOf(
+            Triple(0x00 to 0x51, 0x2802, "06"),
+            Triple(0x00 to 0xE5, 0x6F02, "323201"),
+            Triple(0x03 to 0x20, 0x0302, "034fdf6802ba68c7ff2d116e6a"),
+            Triple(0x00 to 0x4F, 0x4F02, "040000000000000000"),
+            Triple(0x00 to 0xE5, 0x6F02, "040401"),
+            Triple(0x00 to 0x51, 0x0302, "04"),
+            Triple(0x03 to 0xF8, 0x0302, "5806be97"),
+            Triple(0x03 to 0xF8, 0x0302, "0b163bde0b163bdf0b163be0713d65cbef979092ef3963f5"),
+            Triple(0x00 to 0x4F, 0x4F02, "0100000000e8030000"),
+            Triple(0x00 to 0x99, 0x2802, "0100060063616d657261"),
+        )
+        seq.forEachIndexed { i, (cmd, target, hex) ->
+            val (set, id) = cmd
+            main.postDelayed({
+                val bytes = ByteArray(hex.length / 2) {
+                    ((hex[it * 2].digitToInt(16) shl 4) or hex[it * 2 + 1].digitToInt(16)).toByte()
+                }
+                gattClient?.writeCommand(c.command(set, id, bytes, target = target, id = 0x8100 + i))
+            }, 150L + i * 55L)
+        }
+        main.postDelayed({ logLine("drone: sent DJI Fly's BLE setup prelude (${seq.size} cmds)") }, 150L + seq.size * 55L)
     }
 
     /** Parse a `[status:1][PackString]` reply (0x07/0x07 SSID, 0x07/0x0e password): status byte, then
@@ -1354,9 +1396,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         )
         logLine("READY — sent session wake 0x00/0x2b[04 00] ok=$woke")
         main.postDelayed({
-            val frame = dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin)
+            // A drone gets DJI Fly's own install UUID as the identity, not our generic one. It already
+            // gates WiFi credentials on the "DJI FLY" token, and identity is the last field we hadn't
+            // varied while it accepts our credentials yet refuses every datalink command.
+            val ident = if (currentModel.isDrone)
+                dev.konraditurbe.osmosis.duml.DjiPairMessagePayload.DJI_FLY_IDENTIFIER
+            else dev.konraditurbe.osmosis.duml.DjiPairMessagePayload.DEFAULT_IDENTIFIER
+            val frame = dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin, identifier = ident)
             val ok = gattClient?.writeCommand(frame) ?: false
-            logLine("sent SetPairingPIN(pin=\"$pairPin\") ok=$ok")
+            logLine("sent SetPairingPIN(pin=\"$pairPin\" id=\"${ident.take(8)}…\") ok=$ok")
         }, 120)
         // The keepalive used to re-send SetPairingPIN every 2 s, which doubled as a retry if the
         // first write dropped (fff5 is write-without-response). Now that it pings 0x00/0x2b instead,

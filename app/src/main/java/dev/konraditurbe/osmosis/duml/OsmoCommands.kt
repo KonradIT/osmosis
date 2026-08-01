@@ -16,8 +16,12 @@ object OsmoCommands {
      * identifier is the known-accepted 32-hex blob from [DjiPairMessagePayload]. Camera replies
      * on 0x07/0x45 with payload 0x0001 (already paired) or 0x0002 (approval required on screen).
      */
-    fun setPairingPin(pin: String, id: Int = PAIR_MSG_ID): ByteArray {
-        val payload = DjiPairMessagePayload(pin).encode()
+    fun setPairingPin(
+        pin: String,
+        id: Int = PAIR_MSG_ID,
+        identifier: String = DjiPairMessagePayload.DEFAULT_IDENTIFIER,
+    ): ByteArray {
+        val payload = DjiPairMessagePayload(pin, identifier).encode()
         return DjiMessage(TARGET_APP_TO_WIFI, id, TYPE_SET_PAIRING_PIN, payload).encode()
     }
 
