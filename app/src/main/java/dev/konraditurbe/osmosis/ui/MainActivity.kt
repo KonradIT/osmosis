@@ -149,6 +149,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // shows its approval popup once, then stores it for silent re-pair). Overridable via
     // `am start ... --es pin <value>`.
     private var pairPin = "osmo"
+
+    /** `--ez nojoin true` — skip the WiFi join/bind and talk over whatever network is already default. */
+    private var noJoin = false
     private var pinOverride: String? = null // `--es pin <v>` test hook; wins over the per-model token
 
     // Shown while the camera/drone is waiting for the user to confirm pairing (0x07/45 → 0x02).
@@ -272,6 +275,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // Test hooks: `--es pin <v>` overrides the pairing PIN; `--ez autoscan true` auto-starts
         // a scan (perms permitting) so device testing doesn't depend on tapping. Dormant otherwise.
         intent?.getStringExtra("pin")?.let { pinOverride = it; pairPin = it; logLine("pairPin set to \"$it\"") }
+        // `--ez nojoin true`: phone is already on the AP via Android WiFi settings, so skip the join +
+        // bindProcessToNetwork. Needed to capture our own session — see maybeStartOffload.
+        if (intent?.getBooleanExtra("nojoin", false) == true) {
+            noJoin = true; logLine("nojoin: will use the current default network, no WiFi join")
+        }
         if (intent?.getBooleanExtra("autoscan", false) == true) {
             main.postDelayed({ startCameraScan(select = true) }, 500)
         }
@@ -769,6 +777,19 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         } else {
             logLine("OFFLOAD: paired -> AP up via the session sequence (0x00/0x2b + 0x53/0x10)")
         }
+        // DEBUG (`--ez nojoin true`): assume the phone is ALREADY on the camera/drone AP via Android's
+        // own WiFi settings, and skip WifiNetworkSpecifier + bindProcessToNetwork entirely.
+        //
+        // This exists to make the session capturable. PCAPdroid captures through a VPN interface, but
+        // bindProcessToNetwork pins our sockets to the AP network and bypasses that VPN — so a VPN-mode
+        // capture sees none of our traffic (and on this tablet the bind then fails outright, killing the
+        // datalink). Joining the AP normally makes it the DEFAULT route, so our traffic goes through the
+        // VPN, gets captured, and still reaches the drone. See ROADMAP #14.
+        if (noJoin) {
+            logLine("OFFLOAD: --ez nojoin — skipping the WiFi join, using the current default network")
+            main.postDelayed({ startDatalink() }, 1500)
+            return
+        }
         // AP needs a few seconds to come up; the WifiNetworkSpecifier dialog keeps searching
         // until it appears, so a modest delay before requesting the network is fine.
         main.postDelayed({ promptWifiConsent(offloadSsid, offloadPass) }, 3000)
@@ -816,6 +837,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     ?.firstOrNull { it is java.net.Inet4Address }
                 setConnectProgress(58) // WiFi joined + bound
                 logLine("WiFi link: ip=${ip4?.hostAddress}")
+                startDatalink()
+            }
+        })
+        apJoiner = joiner
+        val useWpa3 = currentModel.wpa3 && !wpa3FallbackDone
+        joiner.join(ssid, pass, useWpa3)
+    }
+
+    /** Open the datalink and fetch the media list. Split out of the join callback so the `nojoin`
+     *  debug path can run it against whatever network is already current. */
+    private fun startDatalink() {
                 Thread {
                     // Datalink port + poke come from the model AND brand: 10004/no-poke was only ever
                     // confirmed on the Xtra rebrand (own OUI EC:9E:EA), so a genuine DJI unit gets the
@@ -864,11 +896,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         (if (dl.moreAvailable) " · more on scroll" else ""))
                     main.post { showGrid(fixed) }
                 }.start()
-            }
-        })
-        apJoiner = joiner
-        val useWpa3 = currentModel.wpa3 && !wpa3FallbackDone
-        joiner.join(ssid, pass, useWpa3)
     }
 
     /**
