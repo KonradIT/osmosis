@@ -1407,7 +1407,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val model = CameraModel.resolve(modelId, name, brand)
         if (discovered.put(addr, Cam(device, name, brand, rssi, modelId, model)) == null) {
             logLine("found ${model.name} [$brand] (${name ?: addr}) rssi=$rssi" +
-                if (!model.verified) "  ~experimental" else "")
+                if (!model.verified) "  🧪" else "")
             main.post { rebuildCameraList() }
         }
     }
