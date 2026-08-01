@@ -781,7 +781,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     // handshake never lands we retry the alternate config and log which port answered.
                     fun open(m: CameraModel): Pair<DatalinkClient, List<CameraFile>> {
                         logLine("=== media list [${m.name}] via udp/${m.datalinkPort} (poke=${m.tcpPoke}) ===")
-                        val c = DatalinkClient(::logLine, m.datalinkPort, m.tcpPoke)
+                        val c = DatalinkClient(::logLine, m.datalinkPort, m.tcpPoke, m.isDrone)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
                         // A drone answers the same query with fixed 94-byte records instead of the
