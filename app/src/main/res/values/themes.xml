@@ -1,5 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.Osmosis" parent="Theme.Material3.Light.NoActionBar">
+    <!-- DayNight so the OS dark theme flips -night resources (Android 10+). On Android 12+ the OsmosisApp
+         Application applies Material You dynamic color on top of these, so accent, surfaces and background
+         follow the system palette; the values here are the pre-12 (and non-dynamic) fallback. -->
+    <style name="Theme.Osmosis" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">@color/osmo_accent</item>
         <item name="colorOnPrimary">@color/osmo_on_accent</item>
         <item name="colorPrimaryContainer">@color/osmo_accent</item>
@@ -14,10 +17,10 @@
         <item name="colorOnSurfaceVariant">@color/osmo_muted</item>
         <item name="colorOutline">@color/osmo_track</item>
 
-        <!-- System bars blend into the cream background with dark icons. -->
-        <item name="android:statusBarColor">@color/osmo_bg</item>
-        <item name="android:navigationBarColor">@color/osmo_bg</item>
-        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
-        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
+        <!-- Bars follow the (possibly dynamic) window background; icon polarity flips with the theme. -->
+        <item name="android:statusBarColor">?android:attr/colorBackground</item>
+        <item name="android:navigationBarColor">?android:attr/colorBackground</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">@bool/osmo_light_system_bars</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">@bool/osmo_light_system_bars</item>
     </style>
 </resources>

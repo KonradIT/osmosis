@@ -1307,10 +1307,15 @@ class DatalinkClient(
 
     private fun advance() { udpSeq = (udpSeq + 8) and 0xFFFF }
 
+    /** Send a UDP packet, swallowing a send failure. When the camera AP drops or the WiFi network is
+     *  unbound mid-session (e.g. teardown, or the phone losing the AP) sock.send throws ENETUNREACH —
+     *  that's expected on a dying link and must NEVER crash the keep-alive thread (it once did). */
+    private fun sendPacket(pkt: ByteArray): Boolean =
+        runCatching { sock.send(DatagramPacket(pkt, pkt.size, cam, port)) }.isSuccess
+
     private fun sendRaw(pktType: Int, payload: ByteArray) {
         val pkt = udpHeader(pktType, payload.size) + payload
-        sock.send(DatagramPacket(pkt, pkt.size, cam, port))
-        advance()
+        if (sendPacket(pkt)) advance()
     }
 
     private fun sendAck() {
@@ -1324,7 +1329,7 @@ class DatalinkClient(
         val hdr = udpHeader(0x04, payload.size)
         udpSeq = old
         val pkt = hdr + payload
-        sock.send(DatagramPacket(pkt, pkt.size, cam, port))
+        sendPacket(pkt)
     }
 
     private fun sendDuml(
@@ -1338,8 +1343,7 @@ class DatalinkClient(
         val duml = DjiMessage(target, dumlSeq, type, payload).encode()
         dumlSeq = (dumlSeq + 1) and 0xFFFF
         val pkt = udpHeader(0x05, rt.size + duml.size) + rt + duml
-        sock.send(DatagramPacket(pkt, pkt.size, cam, port))
-        advance()
+        if (sendPacket(pkt)) advance()
     }
 
     private fun recvAll(durationMs: Long): List<ByteArray> {

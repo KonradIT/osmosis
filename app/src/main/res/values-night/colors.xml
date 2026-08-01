@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Neutral dark palette (Android 10+ system dark theme). On Android 12+, Material You dynamic color
+         overrides these at runtime. -->
+    <color name="osmo_bg">#121212</color>
+    <color name="osmo_surface">#1E1E1E</color>
+    <color name="osmo_surface_dim">#2A2A2A</color>
+    <color name="osmo_ink">#ECECEC</color>
+    <color name="osmo_muted">#A0A0A0</color>
+    <color name="osmo_accent">#4DD0E1</color>
+    <color name="osmo_on_accent">#00363D</color>
+    <color name="osmo_green">#6ED6A6</color>
+    <color name="osmo_track">#3A3A3A</color>
+    <color name="osmo_danger">#EF6A5E</color>
+    <color name="osmo_amber">#EFB84E</color>
+
+    <!-- Pill semantic indicators, brightened for dark. -->
+    <color name="osmo_warn">#EFB84E</color>
+    <color name="osmo_low">#EF6A5E</color>
+</resources>

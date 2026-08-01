@@ -13,4 +13,9 @@
     <color name="osmo_danger">#C62828</color>
     <color name="osmo_amber">#B26A00</color>
     <color name="white">#FFFFFF</color>
+
+    <!-- Status-pill semantic indicators (battery / storage). Fixed hues (not brand accent), with a
+         -night variant for contrast on dark surfaces. -->
+    <color name="osmo_warn">#E0A83E</color>
+    <color name="osmo_low">#E05A4E</color>
 </resources>

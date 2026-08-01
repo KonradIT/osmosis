@@ -11,6 +11,8 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.content.ContextCompat
+import com.google.android.material.color.MaterialColors
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.core.CameraStatus
 
@@ -28,14 +30,26 @@ class StatusPillView @JvmOverloads constructor(
     private val batteryBar: ProgressBar
     private val rows: LinearLayout
 
+    // Neutral colors follow the theme (so they adapt to dark mode + Material You dynamic color); the
+    // battery/storage status hues are fixed semantic colors (with a -night variant).
+    private val ink = attr(com.google.android.material.R.attr.colorOnSurface, 0xFF2B2722.toInt())
+    private val muted = attr(com.google.android.material.R.attr.colorOnSurfaceVariant, 0xFF8C867D.toInt())
+    private val track = attr(com.google.android.material.R.attr.colorSurfaceVariant, 0xFFE2DCD2.toInt())
+    private val gray = attr(com.google.android.material.R.attr.colorOutline, 0xFFD8D2C8.toInt())
+    private val green = ContextCompat.getColor(context, R.color.osmo_green)
+    private val orange = ContextCompat.getColor(context, R.color.osmo_warn)
+    private val red = ContextCompat.getColor(context, R.color.osmo_low)
+
+    private fun attr(attrRes: Int, fallback: Int) = MaterialColors.getColor(context, attrRes, fallback)
+
     init {
         orientation = VERTICAL
         background = context.getDrawable(R.drawable.pill_bg)
         setPadding(dp(20), dp(16), dp(20), dp(16))
         elevation = dp(6).toFloat()
 
-        nameView = mkText(17f, true, INK).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
-        batteryText = mkText(15f, true, INK)
+        nameView = mkText(17f, true, ink).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        batteryText = mkText(15f, true, ink)
         addView(LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -69,15 +83,15 @@ class StatusPillView @JvmOverloads constructor(
         }
         batteryBar.progress = pct.coerceIn(0, 100)
         batteryBar.progressTintList = ColorStateList.valueOf(
-            when { pct < 0 -> TRACK; s.charging -> GREEN; pct <= 15 -> RED; pct <= 35 -> ORANGE; else -> GREEN }
+            when { pct < 0 -> track; s.charging -> green; pct <= 15 -> red; pct <= 35 -> orange; else -> green }
         )
 
         rows.removeAllViews()
-        row(GREEN, connection)
+        row(green, connection)
         // One line per store the camera actually has, so a card is never mislabelled as built-in
         // (which is what happened while we showed only the active store under a fixed "Internal").
         for ((label, free, total) in storeLines(s)) row(storageDot(free, total), storeLabel(label, free, total))
-        if (showPower && s.hasPowerInfo) row(if (s.charging) GREEN else GRAY, powerLabel(s))
+        if (showPower && s.hasPowerInfo) row(if (s.charging) green else gray, powerLabel(s))
     }
 
     /**
@@ -112,9 +126,9 @@ class StatusPillView @JvmOverloads constructor(
     }
 
     private fun storageDot(freeMb: Int, totalMb: Int): Int {
-        if (freeMb < 0 || totalMb <= 0) return GRAY
+        if (freeMb < 0 || totalMb <= 0) return gray
         val ratio = freeMb.toFloat() / totalMb
-        return when { ratio < 0.08f -> RED; ratio < 0.2f -> ORANGE; else -> GREEN }
+        return when { ratio < 0.08f -> red; ratio < 0.2f -> orange; else -> green }
     }
 
     private fun storeLabel(store: String, freeMb: Int, totalMb: Int): String {
@@ -133,7 +147,7 @@ class StatusPillView @JvmOverloads constructor(
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(dot, LayoutParams(dp(6), dp(6)).apply { rightMargin = dp(8) })
-            addView(mkText(12f, false, MUTED).apply { text = label })
+            addView(mkText(12f, false, muted).apply { text = label })
         }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(7) })
     }
 
@@ -144,14 +158,4 @@ class StatusPillView @JvmOverloads constructor(
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-
-    companion object {
-        private const val INK = 0xFF2B2722.toInt()
-        private const val MUTED = 0xFF8C867D.toInt()
-        private const val GREEN = 0xFF52B788.toInt()
-        private const val ORANGE = 0xFFE0A83E.toInt()
-        private const val RED = 0xFFE05A4E.toInt()
-        private const val GRAY = 0xFFD8D2C8.toInt()
-        private const val TRACK = 0xFFE2DCD2.toInt()
-    }
 }
