@@ -49,7 +49,7 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 | Osmo Action 4 | Started |
 | Osmo 360 | Unplanned (needs Mimo to render 360 content) |
 | Osmo Action 2/3 | Best-effort default, untested, not expected to work |
-| DJI Mavic 3 (QuickTransfer) | Protocol cracked, awaiting a hardware run |
+| DJI Mavic 3 (QuickTransfer) | Pairs, joins the AP and handshakes on udp/9003; media API decoded but the drone serves no commands yet ([#14](ROADMAP.md)) |
 | DJI Neo 2 (QuickTransfer) | Same path as the Mavic 3, datalink port unconfirmed |
 
 Want to help adding support for an unsupported camera? [Open an issue](../../issues) so it can be listed as fully supported.
