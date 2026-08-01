@@ -359,24 +359,78 @@ class DatalinkClient(
      * Replayed verbatim (serial `1581F45T…` and UUID are this drone's own, from the capture) so the
      * mechanism can be proven before generalising to parsing the serial out of the beacon.
      */
-    private val droneOpenFrames = listOf(
-        // 1. open request
-        "551204c7eee97c004051020501040100619639fdb2ae020100000079102e9b010000000000000000",
-        // 3. answer the drone's 0x51/0x08 challenge
-        "55250484eee90100c05108000011313538314634355438323431323030454131544100381439fdb2" +
-            "ae020300000079102e9b010000000000000000",
-        // 4. our 0x51/0x06 (UUID + serial)
-        "553c04daeee97d0040510604020037386565383937622d643231392d343964642d00000011313538" +
-            "3146343554383234313230304541315441008d1a39fdb2ae020400000079102e9b010000000000000000",
-        // 5. answer the drone's 0x51/0x06
-        "55250484eee90000c05106000011313538314634355438323431323030454131544100cbd739fdb2" +
-            "ae020500000079102e9b010000000000000000",
-    ).map { hex(it) }
+    /**
+     * The 19-byte app identity in `0x51/0x06`. This is DJI Fly's, taken from the capture — a value the
+     * drone is known to accept. Substituting our own is untested and would be its own experiment: the
+     * drone already discriminates on the pairing token, so it may well check this too.
+     */
+    private val appId51 = "78ee897b-d219-49dd-".toByteArray(Charsets.US_ASCII)
+
+    /** Common 22-byte wrapper tail; byte 5 is the counter [sendDumlRaw] re-stamps per frame. */
+    private val trailing51 = hex("39fdb2ae020100000079102e9b010000000000000000")
+
+    /** The drone's 20-char serial, read from its own `0x51/0x13` beacon. */
+    @Volatile private var droneSerial: ByteArray? = null
+
+    /**
+     * Pull the serial out of a `0x51/0x13` beacon payload: a `0x11` tag followed by 20 printable ASCII
+     * bytes (`1581F45T8241200EA1TA`). Parsing it is what makes the session-open work on *any* drone
+     * rather than only the one that was captured.
+     */
+    private fun parseDroneSerial(payload: ByteArray): ByteArray? {
+        for (i in 0..payload.size - 21) {
+            if ((payload[i].toInt() and 0xFF) != 0x11) continue
+            val s = payload.copyOfRange(i + 1, i + 21)
+            if (s.all { it >= 0x20 && it < 0x7F }) return s
+        }
+        return null
+    }
+
+    /** Watch received frames for the beacon and latch the serial. */
+    private fun latchDroneSerial(raw: ByteArray) {
+        if (droneSerial != null) return
+        for ((set, cmd, pl) in scanFrames(raw)) {
+            if (set != 0x51 || cmd != 0x01 || pl.size < 13 || (pl[0].toInt() and 0xFF) != 0x55) continue
+            val ln = (pl[1].toInt() and 0xFF) or ((pl[2].toInt() and 0x03) shl 8)
+            if (ln > pl.size || (pl[10].toInt() and 0xFF) != 0x13) continue
+            parseDroneSerial(pl.copyOfRange(11, ln - 2))?.let {
+                droneSerial = it
+                log("datalink: drone serial ${String(it, Charsets.US_ASCII)}")
+            }
+        }
+    }
+
+    /** One `0x51`-channel frame: inner DUML (target 0xe9ee) + the shared 22-byte tail. */
+    private fun frame51(cmd: Int, flags: Int, innerId: Int, payload: ByteArray): ByteArray =
+        DjiMessage(0xE9EE, innerId, flags or (0x51 shl 8) or (cmd shl 16), payload).encode() + trailing51
+
+    /** `00 00 11 <serial:20> 00` — the body of both `0x51/0x08` and `0x51/0x06` responses. */
+    private fun serialBody(serial: ByteArray) =
+        byteArrayOf(0, 0, 0x11) + serial + byteArrayOf(0)
+
+    private fun droneOpenFrames(serial: ByteArray) = listOf(
+        frame51(0x02, 0x40, 0x007C, hex("0501040100")),                       // 1. open request
+        frame51(0x08, 0xC0, 0x0001, serialBody(serial)),                      // 3. answer the challenge
+        frame51(0x06, 0x40, 0x007D,                                           // 4. our id + the serial
+            byteArrayOf(0x04, 0x02, 0x00) + appId51 + byteArrayOf(0, 0, 0, 0x11) + serial + byteArrayOf(0)),
+        frame51(0x06, 0xC0, 0x0000, serialBody(serial)),                      // 5. answer its 0x51/0x06
+    )
 
     /** Run the `0x51` session-open exchange, pumping the link between steps so replies get through. */
     private fun droneSessionOpen() {
         val sink = java.io.ByteArrayOutputStream()
-        for ((i, frame) in droneOpenFrames.withIndex()) {
+        // The serial comes off the drone's own beacon; wait for one rather than guessing.
+        val waitUntil = System.currentTimeMillis() + 3000
+        while (droneSerial == null && System.currentTimeMillis() < waitUntil) {
+            val probe = java.io.ByteArrayOutputStream()
+            dronePump(200, probe)
+            latchDroneSerial(probe.toByteArray())
+        }
+        val serial = droneSerial ?: run {
+            log("datalink: no drone serial seen in a beacon — cannot open the session")
+            return
+        }
+        for ((i, frame) in droneOpenFrames(serial).withIndex()) {
             sendDumlRaw(0xE93B, 0x51, 0x01, frame)
             if (i == 0) log("datalink: 51/02 open sent, len=${frame.size}")
             // DJI Fly paces these ~400 ms, ~230 ms, ~2 ms, ~100 ms apart; a uniform gap is close enough
@@ -486,7 +540,10 @@ class DatalinkClient(
      */
     fun fetchNextDronePage(): List<CameraFile> {
         if (!moreAvailable || droneCursor <= 0L) return emptyList()
-        val page = droneListPage(droneCursor)
+        // Must run on the session thread — see [onDroneThread]. Called directly it raced the keep-alive
+        // and received nothing at all. Before the keep-alive exists (the very first page) run it inline.
+        var page: List<CameraFile> = emptyList()
+        if (!onDroneThread(30_000) { page = droneListPage(droneCursor) }) page = droneListPage(droneCursor)
         val fresh = page.filter { droneSeen.add(it.fileIndex) }
         val oldest = page.filter { it.fileIndex > 0L }.minOfOrNull { it.fileIndex } ?: 0L
         // Stop when the page brought nothing new or the cursor failed to move older — either means we
@@ -510,7 +567,7 @@ class DatalinkClient(
         //   4280ea9d701505d5 4815701500000000c601604d 552e04a7020177c94000264a0021…
         log("datalink: drone query pkt ${lastSent?.joinToString("") { "%02x".format(it) }}")
         for (batch in 0 until 14) {
-            dronePump(600, blob)   // keep the uplink alive while waiting for the manifest
+            dronePump(600, blob, manifestStream = true)  // uplink alive + reassembled data stream
             sendAck()
             // A manifest chunk is ~1 kB and overruns the datagram (measured: a 1012-byte frame inside a
             // 1472-byte packet, with the next chunk's head trailing it), so frames routinely straddle a
@@ -887,8 +944,127 @@ class DatalinkClient(
      * whole browse session (so inline commands needing it — favorite/group-expand/pagination — work) and
      * services the inline command queue ([runCommand]).
      */
+    // ---- drone thumbnails (DUML, not HTTP) --------------------------------------------------------
+
+    private class DroneJob(val work: () -> Unit) { @Volatile var done = false }
+
+    private val droneJobs = java.util.concurrent.ConcurrentLinkedQueue<DroneJob>()
+
+    /**
+     * Run [work] on the drone keep-alive thread and wait for it.
+     *
+     * **Everything that touches the socket must go through here.** The keep-alive loop is permanently
+     * in `recvAll`, so any other thread calling it gets starved — that is exactly what broke pagination
+     * (`nothing for cursor=…  after 0B; heard (no valid DUML at all)`: the page fetch received literally
+     * zero bytes because the keep-alive had already drained them) and what stalled thumbnails part-way
+     * down the grid. One thread owns the socket; callers queue.
+     */
+    private fun onDroneThread(timeoutMs: Long, work: () -> Unit): Boolean {
+        if (!keepAliveOn || !isDrone) return false
+        val j = DroneJob(work)
+        droneJobs.add(j)
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!j.done && System.currentTimeMillis() < deadline) runCatching { Thread.sleep(25) }
+        return j.done
+    }
+
+    /**
+     * Fetch one thumbnail as JPEG bytes, or null. Blocking; call off the UI thread.
+     *
+     * The request is queued onto the drone keep-alive thread rather than run here, because that thread
+     * owns the socket — several grid cells load at once and concurrent recv would interleave their
+     * chunk streams. Returns null if the keep-alive isn't running, so the caller just shows a placeholder.
+     */
+    fun fetchDroneThumb(fileIndex: Long, timeoutMs: Long = 20_000): ByteArray? {
+        var out: ByteArray? = null
+        // Generous timeout: this is queue-wait + service, and the grid asks for several at once while
+        // only one can be in flight. Better a slow thumbnail than a blank cell.
+        onDroneThread(timeoutMs) { out = serveThumb(fileIndex) }
+        return out
+    }
+
+    /** Serve one thumbnail: send the query, collect subtype-0x21 chunks, extract the JPEG. */
+    private fun serveThumb(fileIndex: Long): ByteArray? {
+        val seq = droneQuerySeq.also { droneQuerySeq = (it + 1) and 0xFFFF }
+        val blob = java.io.ByteArrayOutputStream()
+        val chunks = LinkedHashMap<Int, DroneManifest.Chunk>()
+        sendDuml(0x00, 0x26, DroneManifest.thumbQuery(seq, fileIndex), receiverType = 0x01, receiverId = 0)
+        for (round in 0 until 16) {
+            dronePump(200, blob, manifestStream = true)
+            chunks.clear()
+            for ((set, cmd, pl) in scanFrames(blob.toByteArray())) {
+                if (set != 0x00 || cmd != 0x27) continue
+                val c = DroneManifest.parseChunk(pl, DroneManifest.SUB_THUMB_REPLY) ?: continue
+                if (c.seq == seq) chunks.putIfAbsent(c.index, c)
+            }
+            if (droneChunksComplete(chunks)) break
+        }
+        return if (chunks.isEmpty()) null
+        else DroneManifest.extractJpeg(DroneManifest.assemble(chunks.values.toList()))
+    }
+
+    /**
+     * Drone keep-alive. A drone needs the uplink stream kept running or it stops talking to us, and it
+     * wants none of the camera's playback/status polling — so it gets its own loop, which doubles as the
+     * server for [fetchDroneThumb].
+     */
+    private fun startDroneKeepAlive() {
+        keepAliveOn = true
+        Thread {
+            while (keepAliveOn) {
+                runCatching {
+                    val j = droneJobs.poll()
+                    if (j != null) { runCatching { j.work() }; j.done = true }
+                    else { dronePump(250); sendAck() }
+                }
+            }
+        }.apply { isDaemon = true; name = "datalink-drone-keepalive" }.start()
+    }
+
+    /**
+     * Decode the drone's telemetry for the status pill.
+     *
+     * A drone wraps its pushes inside `0x51/0x01` tunnel frames, so [parseStatus] never sees them — it
+     * scans top level and steps over the wrapper. [scanFrames] finds nested frames, so the battery push
+     * comes through.
+     *
+     * Battery percent is the same field as a camera's: `0x0D/0x02` byte 20. Ground-truthed across three
+     * captures of this Mavic — 62% → 34% → 26%, rock steady within each session and matching the 20–30%
+     * DJI Fly showed at the time. Deliberately NOT reusing the camera's full `0x0D/0x02` decode: that
+     * also reads @27/@32 as dock-attached and charging, which are Osmo dock semantics and would light up
+     * a meaningless dock indicator for an aircraft.
+     */
+    private fun parseDroneStatus(raw: ByteArray) {
+        if (raw.isEmpty()) return
+        for ((set, cmd, p) in scanFrames(raw)) {
+            when {
+                // Storage uses the SAME field layout as a camera, so reuse that decode verbatim.
+                // Read off a Mavic 3: 0x02/0xDC @6/@10 = 243702/152763 MiB (a 238 GB card, 149 GB free)
+                // and @24/@28 = 8091/8090 MiB (its 8 GB internal). 0x02/0x80 @5/@9 is the active store.
+                set == 0x02 && (cmd == 0x80 || cmd == 0xDC) -> applyStatusFrame(set, cmd, p)
+                set == 0x0D && cmd == 0x02 && p.size >= 21 -> {
+                    // Percent @20, pack mV @1, signed mA @5 — all as on a camera. NOT delegated to
+                    // applyStatusFrame, because its 0x0D/0x02 branch also reads @27/@32 as dock-attached
+                    // and charging: Osmo dock semantics that would show a dock indicator for an aircraft.
+                    val pct = p[20].toInt() and 0xFF
+                    val mv = (p[1].toInt() and 0xFF) or ((p[2].toInt() and 0xFF) shl 8)
+                    val ma = (p[5].toInt() and 0xFF) or ((p[6].toInt() and 0xFF) shl 8) or
+                        ((p[7].toInt() and 0xFF) shl 16) or ((p[8].toInt() and 0xFF) shl 24)
+                    status = status.copy(
+                        batteryPercent = if (pct in 0..100) pct else status.batteryPercent,
+                        batteryMilliVolts = if (mv in 1..30_000) mv else status.batteryMilliVolts,
+                        batteryMilliAmps = ma,
+                    )
+                }
+            }
+        }
+        val sig = displaySig(status)
+        if (sig != lastSig) { lastSig = sig; onStatus?.invoke(status) }
+    }
+
     fun startKeepAlive() {
         if (keepAliveOn) return
+        if (isDrone) { startDroneKeepAlive(); return }
         keepAliveOn = true
         status = CameraStatus()
         lastSig = ""
@@ -1858,11 +2034,38 @@ class DatalinkClient(
         return frames
     }
 
-    /** Pump the uplink for [ms], draining anything that arrives into [sink]. */
-    private fun dronePump(ms: Long, sink: java.io.ByteArrayOutputStream? = null) {
+    /**
+     * Pump the uplink for [ms], draining anything that arrives into [sink].
+     *
+     * With [manifestStream] the sink instead receives a **reassembled data stream**: only `pktType 0x03`
+     * packets, each stripped of its 8-byte transport + 12-byte routing header.
+     *
+     * This matters more than it looks. A manifest reply is ~4 kB and arrives as several back-to-back
+     * 1472-byte packets, with individual DUML frames spanning packet boundaries — and every packet
+     * carries its own 20-byte header. Concatenating whole datagrams injects those headers mid-frame, so
+     * every chunk that straddles a boundary fails CRC and silently disappears: on hardware we recovered
+     * chunks [0, 3, 4] and 11 of 45 files. Stripping the headers first yields all 5 chunks and 45/45
+     * records, verified against both DJI Fly captures.
+     */
+    private fun dronePump(
+        ms: Long,
+        sink: java.io.ByteArrayOutputStream? = null,
+        manifestStream: Boolean = false,
+    ) {
         val deadline = System.nanoTime() + ms * 1_000_000
         while (System.nanoTime() < deadline) {
-            for (dg in recvAll(20)) sink?.write(dg)
+            for (dg in recvAll(20)) {
+                // Telemetry rides pktType 0x01 (small keepalive-sized packets). Decode it HERE rather
+                // than only when idle: the keep-alive is busy serving thumbnails for minutes on end, and
+                // status parsed only between jobs meant battery and storage never appeared at all.
+                if (dg.size > 8 && (dg[6].toInt() and 0xFF) == 0x01) {
+                    latchDroneSerial(dg)
+                    parseDroneStatus(dg)
+                }
+                if (sink == null) continue
+                if (!manifestStream) sink.write(dg)
+                else if (dg.size > 20 && (dg[6].toInt() and 0xFF) == 0x03) sink.write(dg, 20, dg.size - 20)
+            }
             droneUplinkTick()
         }
     }

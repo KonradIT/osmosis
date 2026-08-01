@@ -63,20 +63,39 @@ data class CameraFile(
             .format(java.util.Date(it * 1000L))
     } ?: ""
 
-    fun urlPath(): String =
-        if (isIndexed) "/v1?file_index=$fileIndex&file_subtype=0"
-        else "/v2?storage=$storage&path=$path"
+    fun urlPath(): String = if (isIndexed) v1(SUBTYPE_ORG) else "/v2?storage=$storage&path=$path"
 
     /**
-     * HTTP thumbnail URL, or **empty when there isn't one**.
+     * A `/v1` URL for this file's [subtype].
      *
-     * A drone serves thumbnails over the DUML datalink (`0x4a` subtype `0x20`→`0x21`, chunked JPEG),
-     * NOT over HTTP — and `/v1` only exposes the original. Returning the original here would make the
-     * grid pull a full 14 MB frame per cell, so indexed media reports "no thumbnail" and renders a
-     * placeholder until the DUML thumb channel is wired. See ROADMAP #14.
+     * `file_seg_subindex` selects a part of a segmented recording; 0 means the whole file. It's included
+     * because the server's parser expects all three parameters — some models close the connection
+     * without a response when one is missing, even though the Mavic 3 tolerates two.
+     */
+    private fun v1(subtype: Int) = "/v1?file_index=$fileIndex&file_subtype=$subtype&file_seg_subindex=0"
+
+    /**
+     * Where to get this file's thumbnail.
+     *
+     * Cameras serve one over HTTP. A drone does not — `/v1` exposes only the original (pointing the grid
+     * at it would pull a full 14 MB frame per cell), and thumbnails instead come over the DUML datalink
+     * as chunked JPEG. So indexed media returns the pseudo-URL [DUML_THUMB]`<file_index>`, which
+     * `ImageLoader` routes to the datalink rather than HTTP. See ROADMAP #14.
      */
     fun thumbUrlPath(): String =
-        if (isIndexed) "" else "/v2?storage=$storage&path=$thumbPath"
+        if (isIndexed) v1(SUBTYPE_THM) else "/v2?storage=$storage&path=$thumbPath"
+
+    companion object {
+        /** Scheme marking a thumbnail fetched over DUML — the fallback when HTTP has no `.THM`. */
+        const val DUML_THUMB = "duml://thumb/"
+
+        // `/v1` file_subtype selectors. The server maps each to a different on-card tree:
+        //   ORG/LRF live under DCIM/<dir>MEDIA/, THM/SCR under MISC/THM/<dir>/.
+        const val SUBTYPE_ORG = 0    // original full-res media
+        const val SUBTYPE_THM = 1    // thumbnail
+        const val SUBTYPE_SCR = 2    // screen-res preview
+        const val DRONE_PROXY_SUBTYPE = 18   // low-res proxy video (the `.LRF`/`.LRV`)
+    }
 
     /** URL of the low-res proxy for preview, or null if the camera doesn't provide one. */
     fun proxyUrlPath(): String? =
@@ -105,9 +124,16 @@ data class CameraFile(
      * on weaker devices). Duplicates collapse, so this is normally just [proxy, full-res].
      */
     fun previewCandidates(): List<String> {
-        // Indexed (drone) media has no path to derive a sidecar proxy from, and no proxy subtype is
-        // mapped yet — stream the original. See ROADMAP #14.
-        if (isIndexed) return listOf(urlPath())
+        // A drone's proxy is a SUBTYPE of the same index, not a sidecar path: `file_subtype=18` is the
+        // low-res clip DJI Fly streams for playback and scrubbing (range-requested), where subtype 0 is
+        // the original it only ever fetches for a download. Measured ~7× smaller — 38.8 MB vs 273 MB on
+        // a 30 s 5.1K clip — which is the difference between a scrubbable preview and streaming a
+        // quarter-gigabyte. Only videos have one; stills fall through to the original.
+        // Videos: the low-res proxy first, original as fallback. Stills: the screen-res render before
+        // the full-size original, which on a 14 MP frame is the difference between a snappy preview and
+        // decoding ~14 MB.
+        if (isIndexed) return if (isVideo) listOf(v1(DRONE_PROXY_SUBTYPE), urlPath())
+        else listOf(v1(SUBTYPE_SCR), urlPath())
         val urls = LinkedHashSet<String>()
         proxyUrlPath()?.let { urls.add(it) }
         proxyExt()?.let { urls.add("/v2?storage=$storage&path=${path.substringBeforeLast('.', path)}.$it") }

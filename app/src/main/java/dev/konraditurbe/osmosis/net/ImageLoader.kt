@@ -18,13 +18,36 @@ class ImageLoader(private val http: HttpClient, private val log: (String) -> Uni
     private val cache = LruCache<String, Bitmap>(96)
     @Volatile private var loggedFailure = false
 
+    companion object {
+        /** Set while a drone session is live: file index → JPEG bytes, fetched over the datalink. */
+        @Volatile var dumlThumbProvider: ((Long) -> ByteArray?)? = null
+    }
+
     fun load(thumbUrlPath: String, view: ImageView) {
         view.tag = thumbUrlPath
-        // Empty = this media has no HTTP thumbnail (drone media is index-addressed and serves thumbs
-        // over DUML instead). Show the placeholder rather than fetching the full-size original.
         if (thumbUrlPath.isEmpty()) { view.setImageBitmap(null); return }
         cache.get(thumbUrlPath)?.let { view.setImageBitmap(it); return }
         view.setImageBitmap(null)
+        // Drone thumbnails aren't served over HTTP at all — they arrive as chunked JPEG on the DUML
+        // datalink, so they're routed to [dumlThumbProvider] instead. Same cache and same ImageView
+        // tag check, so a recycled cell still can't be painted with a stale image.
+        val marker = dev.konraditurbe.osmosis.core.CameraFile.DUML_THUMB
+        val idx = if (thumbUrlPath.startsWith(marker)) thumbUrlPath.removePrefix(marker).toLongOrNull() else null
+        if (idx != null) {
+            val provider = dumlThumbProvider ?: run { return }
+            exec.submit {
+                val bytes = runCatching { provider(idx) }.getOrNull()
+                val bmp = bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
+                if (bmp != null) {
+                    cache.put(thumbUrlPath, bmp)
+                    view.post { if (view.tag == thumbUrlPath) view.setImageBitmap(bmp) }
+                } else if (!loggedFailure) {
+                    loggedFailure = true
+                    log("thumb: DUML thumbnail for index $idx did not decode (${bytes?.size ?: 0}B)")
+                }
+            }
+            return
+        }
         exec.submit {
             // Derived path is a `.scr` screennail (videos). Photos have a `.thm` instead, so if the
             // `.scr` isn't there, fall back to `.thm` before giving up — the camera lists one or the
@@ -33,6 +56,13 @@ class ImageLoader(private val http: HttpClient, private val log: (String) -> Uni
             var bytes = http.getBytes(thumbUrlPath)
             if (bytes == null && thumbUrlPath.endsWith(".scr")) {
                 bytes = http.getBytes(thumbUrlPath.removeSuffix(".scr") + ".thm")
+            }
+            // Drone thumbnails come from `/v1?file_subtype=1` over plain HTTP, which parallelises across
+            // this pool. Only if the card has no `.THM` for that index do we fall back to pulling one
+            // over DUML — that path is strictly serialised on the session thread, so it's a last resort.
+            if (bytes == null && thumbUrlPath.contains("file_subtype=1&")) {
+                val fi = Regex("""file_index=(\d+)""").find(thumbUrlPath)?.groupValues?.get(1)?.toLongOrNull()
+                if (fi != null) bytes = runCatching { dumlThumbProvider?.invoke(fi) }.getOrNull()
             }
             val bmp = bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
             if (bmp == null && bytes != null && !loggedFailure) {
