@@ -32,7 +32,8 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 - Camera control: start/stop recording, take photo, change settings
 - Live preview
 - USB-C offload
-- Support DJI drone offload via quick transfer (Neo2 specifically)
+- DJI drone offload via QuickTransfer — list, paging and download are implemented off a Mavic 3
+  capture ([ROADMAP #14](ROADMAP.md)); thumbnails (delivered over DUML, not HTTP) still to wire
 
 ## Supported cameras
 
@@ -48,7 +49,8 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 | Osmo Action 4 | Started |
 | Osmo 360 | Unplanned (needs Mimo to render 360 content) |
 | Osmo Action 2/3 | Best-effort default, untested, not expected to work |
-| DJI drones using quick transfer | In progress |
+| DJI Mavic 3 (QuickTransfer) | Protocol cracked, awaiting a hardware run |
+| DJI Neo 2 (QuickTransfer) | Same path as the Mavic 3, datalink port unconfirmed |
 
 Want to help adding support for an unsupported camera? [Open an issue](../../issues) so it can be listed as fully supported.
 

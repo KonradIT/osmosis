@@ -20,6 +20,9 @@ class ImageLoader(private val http: HttpClient, private val log: (String) -> Uni
 
     fun load(thumbUrlPath: String, view: ImageView) {
         view.tag = thumbUrlPath
+        // Empty = this media has no HTTP thumbnail (drone media is index-addressed and serves thumbs
+        // over DUML instead). Show the placeholder rather than fetching the full-size original.
+        if (thumbUrlPath.isEmpty()) { view.setImageBitmap(null); return }
         cache.get(thumbUrlPath)?.let { view.setImageBitmap(it); return }
         view.setImageBitmap(null)
         exec.submit {
