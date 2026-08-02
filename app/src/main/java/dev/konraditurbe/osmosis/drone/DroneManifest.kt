@@ -194,8 +194,40 @@ object DroneManifest {
      * before — it does not trigger the transfer), and it is byte-identical to the one the camera path
      * already emits mid-stream, so the same frame serves both.
      */
-    fun listAck(seq: Int): ByteArray {
+    fun listAck(seq: Int, subtype: Int = SUB_LIST_ACK): ByteArray {
         val p = byteArrayOf(0x4A, 0x04, 0x0E, 0x10, 0x00, 0x00, 0, 0, 0, 0, 0x01, 0, 0, 0)
+        p[1] = subtype.toByte()
+        p[4] = (seq and 0xFF).toByte(); p[5] = ((seq shr 8) and 0xFF).toByte()
+        return p
+    }
+
+    /**
+     * The `0x4a` subtypes run as a family per transfer kind: `+0` query, `+1` reply, `+2` proceed,
+     * `+3` state, `+4` release. A media list is `0x00`–`0x04`, a thumbnail `0x20`–`0x24`.
+     *
+     * All four in use, captured from the reference app:
+     * ```
+     * -> 4a sub=00 seq=0005   query
+     * <- 4a sub=03 seq=0005   drone: state (arrives before the data, and again after it)
+     * -> 4a sub=02 seq=0005   app: proceed
+     * <- 4a sub=01 seq=0005   data
+     * -> 4a sub=04 seq=0005   app: release
+     * ```
+     */
+    const val SUB_LIST_GO = 0x02
+    const val SUB_LIST_STATE = 0x03
+    const val SUB_LIST_ACK = 0x04
+    const val SUB_THUMB_STATE = 0x23
+    const val SUB_THUMB_ACK = 0x24
+
+    /**
+     * The "proceed" frame answering a [SUB_LIST_STATE] the drone raises before it starts sending.
+     * Byte-identical to the reference app's: `4a020f10 <seq:u16> 00000000 0000000000`.
+     */
+    fun transferGo(seq: Int, subtype: Int = SUB_LIST_GO): ByteArray {
+        val p = ByteArray(15)
+        p[0] = 0x4A; p[1] = subtype.toByte()
+        p[2] = 0x0F; p[3] = 0x10                       // len 15 | FINAL
         p[4] = (seq and 0xFF).toByte(); p[5] = ((seq shr 8) and 0xFF).toByte()
         return p
     }

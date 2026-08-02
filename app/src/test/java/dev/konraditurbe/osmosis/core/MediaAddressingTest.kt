@@ -97,9 +97,18 @@ class MediaAddressingTest {
     fun `indexed media is addressed by number, never by path`() {
         val f = dcfFile()
         assertEquals("/v1?file_index=6554154&file_subtype=0&file_seg_subindex=0", f.urlPath())
-        assertEquals("/v1?file_index=6554154&file_subtype=1&file_seg_subindex=0", f.thumbUrlPath())
         assertTrue("no /v2 may ever be built for an indexed file",
             f.previewCandidates().none { it.startsWith("/v2") })
+    }
+
+    @Test
+    fun `a video's thumbnail is its THM, a still's can only come over the datalink`() {
+        // Probed on a Mavic 3: for a photo index only subtype 0 answers — every other subtype makes
+        // the server close the connection, which is how this firmware reports a missing file. So a
+        // still has no HTTP thumbnail to ask for, and asking anyway left every photo cell blank.
+        assertEquals("/v1?file_index=6554154&file_subtype=1&file_seg_subindex=0",
+            dcfFile(video = true).thumbUrlPath())
+        assertEquals("${CameraFile.DUML_THUMB}6554154", dcfFile(video = false).thumbUrlPath())
     }
 
     @Test

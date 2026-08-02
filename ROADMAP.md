@@ -602,32 +602,57 @@ gets starved — that broke pagination (a page fetch received *zero bytes*) and 
 part-way down the grid. Thumbnails and paging queue via `onDroneThread`, and status is decoded inside
 the pump so the pill updates during long transfers rather than only between them.
 
-### 🐞 Open: paging stops after page 2
+### Transfers are leased, and must be released
 
-Two pages land (89 of 187 files on the card); the third gets nothing. Reproduced on five separate
-sessions and bisected against `e4a6353` — it predates the camera/drone refactor and is not caused by it.
+Every `0x00/0x26` media transfer — list *or* thumbnail — holds a slot on the drone until the client
+releases it, and only so many exist. Leak them and the drone stops serving new transfers while telemetry
+keeps streaming, so the link looks perfectly healthy and answers nothing.
 
-The failure is **not** "the drone reports an empty list". It answers page 2 in 0.6 s and then, for the
-page-3 query, sends *nothing at all* for the full 8.6 s window:
+The `0x4a` subtypes are a family per transfer kind: `+0` query, `+1` reply, `+2` proceed, `+3` state,
+`+4` release. A media list is `0x00`–`0x04`; a thumbnail is `0x20`–`0x24`. A full exchange, captured
+from the reference app:
 
 ```
-drone list — nothing for seq=0x1d cursor=6554066 after 0B; heard (no valid DUML at all)
+-> 4a sub=00 seq=0005     query
+<- 4a sub=03 seq=0005     drone raises state, and waits
+-> 4a sub=02 seq=0005     app says proceed
+<- 4a sub=01 seq=0005     data
+-> 4a sub=04 seq=0005     app releases the slot
 ```
 
-`no valid DUML at all` means the drone's entire ~1000 frame/s telemetry stream went quiet, not merely
-the manifest reply — and it recovers afterwards. So this is closer to "that query wedges the link" than
-to "the library ends here", and the 187-vs-89 gap is probably not a protocol limit.
+We released list transfers but never thumbnail ones, so browsing died a dozen cells in. Two symptoms
+that took a while to connect: paging stopped after ~2 pages, and scrolling *fast* got much further —
+because it outran the thumbnail queue. `seq` is one monotonic counter shared by both transfer kinds;
+the reference app runs it past 30 in a session without stalling.
 
-What is ruled out:
+The failure log used to say `heard (no valid DUML at all)`, which read like a dead link. It wasn't —
+that sink only keeps `pktType 0x03` (the data stream), and the drone was pushing ~850 telemetry packets
+per query throughout. Queries now log received datagrams **by pktType**, so "silent" and "ignoring us"
+can't be confused again.
 
-- **Our cursor.** `6554066` = storage 0, dir 100, file 466 — exactly the oldest `file_index` of page 2,
-  which is the rule that made page 2 work. The query bytes are otherwise identical to page 2's.
-- **The sequence number.** Failed at `0x17`, `0x1b` and `0x1d` across sessions.
-- **HTTP contention.** One failing run overlapped a preview stream; another had no HTTP traffic at all.
+Separately, and a genuine second bug: the `0x51` data session lapses **~30 s** after it opens unless the
+identity beacon keeps being answered (~2/s — it was answered once, at session open). Measured across
+five sessions, every query at t ≤ 28.5 s worked and every one at t ≥ 28.9 s returned nothing.
 
-Next step is the pcaps: find whether DJI Fly pages deeper than two on this card, and if so what it sends
-that we don't — a re-issued `0x4a04` ack, a different page size (byte 14 = `0x2d`), or a mode change
-between pages.
+### Thumbnails: a still has none on the card
+
+Probed against a Mavic 3 for a photo index: only `file_subtype=0` answers. Every other subtype makes the
+server close the connection with no response — which is how this firmware reports a missing file, not a
+404. A failed lookup returns `HANDLER_ERROR` and the connection dies, which is also why `GET /` returns
+an empty reply. So a still has **no THM, SCR, AIS or LRF**, and its thumbnail can only come over the
+datalink.
+
+The reference app fetches *every* thumbnail that way — across three captures it never once requests
+subtype 1 or 2 over HTTP, only subtype 0 (downloads) and 18 (playback). Keeping videos on HTTP is a
+deliberate deviation: their THM does exist, and HTTP parallelises where the datalink is one-at-a-time.
+
+### Reading a capture with our own decoder
+
+`PcapAnalysis` (test sources, skipped unless `OSMOSIS_PCAP` is set) walks a LINKTYPE_RAW pcap, filters
+`udp/9003`, and decodes it with the app's own `DumlTransport.scanFrames`. It prints the pktType mix, the
+command histogram, every `0x4a` subtype with its seq range, and a media timeline with control frames
+dumped verbatim. Every byte-level claim above came out of it, and the frame builders are unit-tested
+against those captured bytes.
 
 ---
 
