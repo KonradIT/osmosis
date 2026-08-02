@@ -180,6 +180,22 @@ class DroneManifestTest {
     }
 
     @Test
+    fun `the transfer control frames match the reference app byte for byte`() {
+        // Lifted from a capture of DJI Fly browsing a Mavic 3's album. A transfer that is never
+        // released holds its slot, and the drone serves a bounded number of them per session — which
+        // is what stalled paging a few thumbnails in.
+        assertEquals("release a media list (sub 04)",
+            "4a040e1005000000000001000000",
+            DroneManifest.listAck(0x05).joinToString("") { "%02x".format(it) })
+        assertEquals("release a thumbnail (sub 24)",
+            "4a240e100b000000000001000000",
+            DroneManifest.listAck(0x0B, DroneManifest.SUB_THUMB_ACK).joinToString("") { "%02x".format(it) })
+        assertEquals("proceed, answering the drone's state frame (sub 02)",
+            "4a020f100500000000000000000000",
+            DroneManifest.transferGo(0x05).joinToString("") { "%02x".format(it) })
+    }
+
+    @Test
     fun `list query matches DJI Fly's bytes and patches seq plus cursor`() {
         // Captured verbatim from DJI Fly at t=11.97 (seq 0x0c, cursor 1).
         val expected = "4a0021100c0000000000010000002d000d0100ffffffffffffffff000100000000"

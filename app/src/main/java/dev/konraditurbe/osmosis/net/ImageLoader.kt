@@ -19,7 +19,13 @@ class ImageLoader(private val http: HttpClient, private val log: (String) -> Uni
     @Volatile private var loggedFailure = false
 
     companion object {
-        /** Set while a drone session is live: file index → JPEG bytes, fetched over the datalink. */
+        /**
+         * Set while a drone session is live: file index → JPEG bytes, fetched over the datalink.
+         *
+         * The only route to a still's thumbnail on a drone — it has no rendition on the card, so HTTP
+         * cannot serve one. Strictly serialised on the session thread, so it is used for stills only;
+         * videos take their THM over HTTP, which parallelises across this pool.
+         */
         @Volatile var dumlThumbProvider: ((Long) -> ByteArray?)? = null
     }
 
@@ -57,13 +63,9 @@ class ImageLoader(private val http: HttpClient, private val log: (String) -> Uni
             if (bytes == null && thumbUrlPath.endsWith(".scr")) {
                 bytes = http.getBytes(thumbUrlPath.removeSuffix(".scr") + ".thm")
             }
-            // Drone thumbnails come from `/v1?file_subtype=1` over plain HTTP, which parallelises across
-            // this pool. Only if the card has no `.THM` for that index do we fall back to pulling one
-            // over DUML — that path is strictly serialised on the session thread, so it's a last resort.
-            if (bytes == null && thumbUrlPath.contains("file_subtype=1&")) {
-                val fi = Regex("""file_index=(\d+)""").find(thumbUrlPath)?.groupValues?.get(1)?.toLongOrNull()
-                if (fi != null) bytes = runCatching { dumlThumbProvider?.invoke(fi) }.getOrNull()
-            }
+            // DCF thumbnails need no fallback: DcfAddressing decides by media type — a video's THM over
+            // HTTP, a still over the datalink (it has no rendition on the card at all), and the latter
+            // never reaches here because it carries the DUML_THUMB marker handled above.
             val bmp = bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
             if (bmp == null && bytes != null && !loggedFailure) {
                 loggedFailure = true

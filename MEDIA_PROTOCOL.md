@@ -709,7 +709,7 @@ The `0x4a` envelope (both directions, all subtypes):
 | off | size | field |
 |---:|---|---|
 | +0 | u8 | `0x4a` |
-| +1 | u8 | subtype — `0x00` list query · `0x01` list reply · `0x20` thumb query · `0x21` thumb reply |
+| +1 | u8 | subtype — see below |
 | +2 | u16 | low 12 bits = this frame's payload length; bit `0x1000` = **final chunk** |
 | +4 | u16 | seq (reply echoes the query's) |
 | +6 | u32 | chunk index |
@@ -717,6 +717,27 @@ The `0x4a` envelope (both directions, all subtypes):
 | +14 | u32 | *(list reply chunk 0 only)* total manifest bytes |
 
 Reading `+2` as a `u8` parses short frames and silently corrupts every long one.
+
+#### Transfer lifecycle
+
+Subtypes are a family per transfer kind — `+0` query, `+1` reply, `+2` proceed, `+3` state, `+4`
+release. A media list is `0x00`–`0x04`, a thumbnail `0x20`–`0x24`. `seq` is one monotonic counter
+shared by both kinds.
+
+| subtype | dir | meaning | bytes |
+|---:|---|---|---|
+| `0x00` / `0x20` | → | query | 33 B list · 48 B thumb |
+| `0x01` / `0x21` | ← | data, chunked | |
+| `0x02` | → | proceed, answering a state frame | `4a020f10 <seq:u16> 00000000 0000000000` |
+| `0x03` / `0x23` | ← | transfer state: raised before the data, and again once it ends | `4a030a00 <seq:u16> 00000000` |
+| `0x04` / `0x24` | → | **release the transfer** | `4a040e10 <seq:u16> 00000000 01000000` |
+
+**A transfer holds a slot until it is released, and there is a finite number of them.** Leak them and
+the drone stops answering media queries while telemetry keeps streaming at full rate — a healthy-looking
+link that serves nothing. Release every transfer, including one that returned no data and one abandoned
+part-way (the reference app cancels by sending the release immediately after the query).
+
+If a state frame arrives before any data, answer it with `0x02` or the drone will keep waiting.
 
 **Reassembly.** A reply spans several 1472-byte packets and single frames straddle packet boundaries.
 The manifest rides `pktType 0x03`; strip each packet's **8-byte transport + 12-byte routing header**
@@ -766,8 +787,11 @@ def decode_manifest(blob):                   # blob = chunks concatenated, envel
 GET /v1?file_index=<u32>&file_subtype=<S>&file_seg_subindex=<G>
 ```
 
-All three parameters are expected — some models close the connection when one is missing.
-`file_seg_subindex` selects a part of a segmented recording; `0` = whole file.
+All three parameters are expected — the connection is closed when one is missing.
+`file_seg_subindex` selects a part of a segmented recording; `0` = whole file. It is not a status code
+away from that: **this firmware reports a missing file by closing the connection with no response at
+all**, so a client sees an IOException where it expects a 404. (Every URL that is not `/v1` or `/v2`
+takes the same path, which is why `GET /` returns an empty reply.)
 
 **`file_index` is a packed 32-bit field**, not a flat number:
 
@@ -791,6 +815,12 @@ All three parameters are expected — some models close the connection when one 
 | 2 | SCR | screen-res render | `MISC/THM/<dir>/DJI_<n>` |
 | 17 | AIS | sensor data | `MISC/THM/<dir>/DJI_<n>` |
 | 18 | LRF | low-res proxy video | `DCIM/<dir>MEDIA/DJI_<n>` |
+
+**Which renditions actually exist depends on the media.** On a Mavic 3 a video has a THM, while a still
+has *nothing but the original* — subtypes 1, 2, 17 and 18 all close the connection for a photo index. A
+still's thumbnail therefore has to come over the datalink ([§28](#28-get-media-list-drone), subtype
+`0x20`). The reference app fetches every thumbnail that way regardless of type and never requests
+subtype 1 or 2 over HTTP at all.
 
 Extensions are probed in order (`.JPG .jpg .MP4 .mp4 .MOV .mov .DNG .dng` for ORG; `.LRF/.lrf`,
 `.THM/.thm`, `.SCR/.scr` for the rest), so the URL carries no extension.

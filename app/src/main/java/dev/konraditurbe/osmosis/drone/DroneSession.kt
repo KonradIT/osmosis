@@ -129,6 +129,7 @@ class DroneSession(
         val heard = LinkedHashMap<Int, Int>()     // set<<8|cmd -> count, so a dead query is diagnosable
         val blob = java.io.ByteArrayOutputStream()
         var acked = false
+        var wentAhead = false
         rxByType.clear()
         pageNo++
         val tState = "page=$pageNo seq=0x%02x cursor=%d(file %d) udpSeq=0x%04x chan=0x%04x t=%.1fs thumbs=%d"
@@ -146,13 +147,21 @@ class DroneSession(
             // 1472-byte packet, with the next chunk's head trailing it), so frames routinely straddle a
             // UDP boundary. Rescan the whole accumulated stream, not each datagram on its own.
             chunks.clear(); heard.clear()
+            var sawState = false
             for ((set, cmd, pl) in scanFrames(blob.toByteArray())) {
                 heard.merge((set shl 8) or cmd, 1, Int::plus)
                 if (set != 0x00 || cmd != 0x27) continue
+                if (isState(pl, DroneManifest.SUB_LIST_STATE, seq)) sawState = true
                 val c = DroneManifest.parseChunk(pl) ?: continue
                 if (c.seq == seq) chunks.putIfAbsent(c.index, c)
             }
             if (chunksComplete(chunks)) break
+            // The drone raises a state frame before it starts sending and waits to be told to proceed.
+            // Ignoring it means sitting out the whole timeout and calling the page empty.
+            if (sawState && chunks.isEmpty() && !wentAhead) {
+                sendDuml(0x00, 0x26, DroneManifest.transferGo(seq), receiverType = 0x01, receiverId = 0)
+                wentAhead = true
+            }
             if (!acked && chunks.isNotEmpty()) {
                 sendDuml(0x00, 0x26, DroneManifest.listAck(seq), receiverType = 0x01, receiverId = 0)
                 acked = true
@@ -182,6 +191,11 @@ class DroneSession(
             log("datalink: drone list INCOMPLETE (chunks ${chunks.keys.sorted()}) — decoding what landed")
         return DroneManifest.decode(DroneManifest.assemble(chunks.values.toList()))
     }
+
+    /** True if [pl] is a `0x4a` state frame of [subtype] carrying [seq] — the drone's transfer signal. */
+    private fun isState(pl: ByteArray, subtype: Int, seq: Int): Boolean =
+        pl.size >= 6 && (pl[0].toInt() and 0xFF) == 0x4A && (pl[1].toInt() and 0xFF) == subtype &&
+            ((pl[4].toInt() and 0xFF) or ((pl[5].toInt() and 0xFF) shl 8)) == seq
 
     private fun chunksComplete(chunks: Map<Int, DroneManifest.Chunk>): Boolean {
         if (0 !in chunks) return false
@@ -248,16 +262,24 @@ class DroneSession(
         for (round in 0 until 16) {
             dronePump(200, blob, manifestStream = true)
             chunks.clear()
+            var sawState = false
             for ((set, cmd, pl) in scanFrames(blob.toByteArray())) {
                 if (set != 0x00 || cmd != 0x27) continue
+                if (isState(pl, DroneManifest.SUB_THUMB_STATE, seq)) sawState = true
                 val c = DroneManifest.parseChunk(pl, DroneManifest.SUB_THUMB_REPLY) ?: continue
                 if (c.seq == seq) chunks.putIfAbsent(c.index, c)
             }
             if (chunksComplete(chunks)) break
+            // The drone closes a transfer with a state frame. Seeing one with nothing to show means
+            // this index has no thumbnail — stop now instead of burning the full 3.2 s of rounds,
+            // which with a gridful of stills is the difference between a slow grid and a stalled one.
+            if (sawState && chunks.isEmpty()) break
         }
         // Ack whatever happened — including a transfer that never completed, which is exactly the case
-        // most likely to leave a slot held open.
-        sendDuml(0x00, 0x26, DroneManifest.listAck(seq), receiverType = 0x01, receiverId = 0)
+        // most likely to leave a slot held open. Subtype 0x24 mirrors the thumbnail query/reply pair
+        // (0x20/0x21) the way 0x04 mirrors the list pair (0x00/0x01).
+        sendDuml(0x00, 0x26, DroneManifest.listAck(seq, DroneManifest.SUB_THUMB_ACK),
+            receiverType = 0x01, receiverId = 0)
         return if (chunks.isEmpty()) null
         else DroneManifest.extractJpeg(DroneManifest.assemble(chunks.values.toList()))
     }
