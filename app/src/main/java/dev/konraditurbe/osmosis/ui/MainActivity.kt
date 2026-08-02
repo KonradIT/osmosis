@@ -1190,15 +1190,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     /**
-     * Drop one cell after a confirmed delete by rebuilding the grid without it. The remaining files'
-     * handles are zeroed: a delete can shift the camera's object table (Mimo re-lists for this very
-     * reason), so we require a reconnect to refresh handles before another delete — rather than risk
-     * acting on a stale one. Size labels and preview keep working.
+     * Drop one cell after a confirmed delete by rebuilding the grid without it.
+     *
+     * The surviving files keep their handles. This used to zero them all, on the worry that a delete
+     * might shift the camera's object table and leave us holding a handle that now points at a
+     * different file — which for an irreversible command is the worst possible failure. A Mimo capture
+     * settles it: across two deletes, the second file's handle was byte-identical before and after the
+     * first was destroyed. Mimo does re-list after each delete, but to refresh what it *shows*, not
+     * because the handles moved. Zeroing them made every delete after the first look unavailable.
      */
     private fun removeFromGrid(path: String) {
         val ad = adapter ?: return
-        val remaining = ad.allFilesSnapshot().filter { it.path != path }.map { it.copy(handle = 0L) }
-        showGrid(remaining, preserveFilters = true)
+        showGrid(ad.allFilesSnapshot().filter { it.path != path }, preserveFilters = true)
     }
 
     private fun toast(s: String) =

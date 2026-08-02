@@ -651,7 +651,7 @@ class DatalinkClient(
      */
     fun deleteFiles(handles: List<Long>): Int? {
         if (handles.isEmpty()) return null
-        val payload = deletePayload(handles)
+        val payload = deletePayload(handles, delCounter++)
 
         // Inline on the live session first (#12). For a DESTRUCTIVE op a landed reply is authoritative —
         // we return it as-is and never re-issue via the fallback (which could delete twice / report a stale
@@ -678,12 +678,23 @@ class DatalinkClient(
         return status
     }
 
-    /** Delete request payload: `[count:u8][handle:u32-LE …][count:u32] 00 [count:u32] 01 01 00 00`.
-     *  The trailing `00` / `01 01 00 00` (storage selector) are verbatim from the Mimo capture. */
-    private fun deletePayload(handles: List<Long>): ByteArray = java.io.ByteArrayOutputStream().apply {
+    /**
+     * Delete request payload: `[count:u8][handle:u32-LE …][counter:u32] 00 [count:u32] 01 01 00 00`.
+     *
+     * The field after the handles is a **per-request counter**, not a second copy of the count — it
+     * advances 1, 2, 3… across a session exactly as the favourite counter does. With a single handle
+     * the two are indistinguishable in one sample, which is how it came to be written as the count;
+     * two consecutive deletes in a Mimo capture show `01` then `02` while the count stays `01`. So the
+     * first delete of a session happened to be right and every one after it repeated a counter — the
+     * shape a replay check rejects.
+     *
+     * Verified against Mimo↔Nano, `n=1` only. Multi-handle deletes are still inferred: the UI deletes
+     * one file at a time, so that path has never been exercised on hardware.
+     */
+    internal fun deletePayload(handles: List<Long>, counter: Int): ByteArray = java.io.ByteArrayOutputStream().apply {
         write(handles.size and 0xFF)
         for (h in handles) write(le32(h.toInt()))
-        write(le32(handles.size)); write(0x00); write(le32(handles.size)); write(byteArrayOf(0x01, 0x01, 0x00, 0x00))
+        write(le32(counter)); write(0x00); write(le32(handles.size)); write(byteArrayOf(0x01, 0x01, 0x00, 0x00))
     }.toByteArray()
 
     private fun freshSessionDelete(ip: String, payload: ByteArray): Int? {
@@ -701,6 +712,8 @@ class DatalinkClient(
         return null
     }
 
+    /** Per-session request counters — both commands carry one that must advance. See [deletePayload]. */
+    private var delCounter = 1
     private var favCounter = 1
 
     /**
