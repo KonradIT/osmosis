@@ -177,6 +177,20 @@ class DroneManifestTest {
     }
 
     @Test
+    fun `grid id and date grouping work without a camera-style filename`() {
+        val files = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD)))
+        val f = files.single { it.fileIndex == 6553777L }
+        // seq feeds the "%04d" badge on a grid cell and the preview screen's ID. A drone name has no
+        // _NNNN_D field, so without the packed-index fallback every cell reads 0000.
+        assertEquals(177, f.seq)
+        // Date grouping keys off ymd. Empty means everything piles under one unknown-date header even
+        // though the preview screen shows the right date.
+        assertEquals(8, f.ymd.length)
+        assertTrue("ymd should be a real YYYYMMDD", f.ymd.startsWith("20"))
+        assertEquals(f.ymd, f.dateTaken.take(10).replace("-", ""))
+    }
+
+    @Test
     fun `mtime drives the display date when the name carries no timestamp`() {
         val f = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD))).first()
         assertEquals("", f.timestamp)                 // no DJI_<14 digits>_ name on a drone
