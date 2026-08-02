@@ -547,11 +547,14 @@ class MediaPreviewActivity : AppCompatActivity() {
         val dm = resources.displayMetrics
         val frame = selectedFrame            // guard against a fast frame switch racing the fetch
         val at = navIndex                    // …or a swipe to another item
-        val url = currentUrl()
+        // A drone serves a screen-res render of a still (`file_subtype=2`), so try that before pulling a
+        // full ~14 MB frame just to downsample it for the display. Cameras have no such rendition — they
+        // keep the single full-res URL. Burst frames address a specific path, so they bypass this.
+        val urls = if (groupPaths.isEmpty() && file.isIndexed) file.previewCandidates() else listOf(currentUrl())
         spinner.visibility = ProgressBar.VISIBLE
         statusText.visibility = TextView.GONE
         Thread {
-            val bytes = runCatching { http.getBytes(url) }.getOrNull()
+            val bytes = urls.firstNotNullOfOrNull { runCatching { http.getBytes(it) }.getOrNull() }
             var bmp: Bitmap? = null
             if (bytes != null) {
                 // Bounds are decoded to pick a safe downsample factor; they also backfill the resolution

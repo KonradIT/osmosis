@@ -219,21 +219,26 @@ class MediaDownloader(
 
     companion object {
         /**
-         * True if [file] is already fully saved in its Osmosis collection. Matched by display name and
-         * **completed** state (`IS_PENDING=0`) only — NOT by exact byte size. Camera capture names carry a
-         * timestamp+seq so they're unique per file, and a completed row is only ever written after a full
-         * transfer, so the name is sufficient proof. (The old exact-size match false-negatived a few files
-         * whose manifest/HEAD size disagreed slightly with the stored bytes, re-saving them as duplicates
-         * every run.) Used by the preview to gray out the download button for a *whole* (untrimmed) file.
+         * True if [file] is already fully saved **in its Osmosis folder**. Matched by display name,
+         * relative path and **completed** state (`IS_PENDING=0`) — NOT by exact byte size. A completed
+         * row is only ever written after a full transfer, so name + folder is sufficient proof. (An
+         * exact-size match false-negatived files whose manifest size disagreed slightly with the stored
+         * bytes, re-saving them as duplicates every run.)
+         *
+         * The relative-path clause matters: this used to match on name alone, on the assumption that a
+         * capture name is globally unique. That holds for a camera (`DJI_20260329115359_0211_D.MP4`) but
+         * not for a drone, whose DCF names are just `DJI_0554.JPG` — one of the most common filenames
+         * there is. Any unrelated DJI photo already on the device made us declare the file downloaded
+         * and gray out the button for something never saved.
          */
         fun isDownloaded(context: Context, file: CameraFile): Boolean = downloadedUri(context, file) != null
 
         /**
          * The saved copy's `content://` Uri, or null if it isn't in the gallery yet.
          *
-         * Same match as [isDownloaded] — completed row, by unique capture name — but keeping the row id
-         * instead of discarding it, so the file can be handed to another app (share / edit). A MediaStore
-         * Uri is directly grantable, which a raw path would not be.
+         * The match [isDownloaded] documents — completed row, matched on name **and** our own relative
+         * path — but keeping the row id instead of discarding it, so the file can be handed to another
+         * app (share / edit). A MediaStore Uri is directly grantable, which a raw path would not be.
          */
         fun downloadedUri(context: Context, file: CameraFile): Uri? {
             val collection = when {
@@ -241,12 +246,20 @@ class MediaDownloader(
                 file.isImage -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                 else -> MediaStore.Downloads.EXTERNAL_CONTENT_URI
             }
+            val relPath = when {
+                file.isVideo -> "Movies/Osmosis"
+                file.isImage -> "Pictures/Osmosis"
+                else -> "Download/Osmosis"
+            }
             val proj = arrayOf(MediaStore.MediaColumns._ID)
-            val sel = "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.IS_PENDING}=0"
+            val sel = "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.IS_PENDING}=0" +
+                " AND ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
             return runCatching {
-                context.contentResolver.query(collection, proj, sel, arrayOf(file.name), null)?.use { c ->
-                    if (c.moveToFirst()) ContentUris.withAppendedId(collection, c.getLong(0)) else null
-                }
+                context.contentResolver
+                    .query(collection, proj, sel, arrayOf(file.name, "$relPath%"), null)
+                    ?.use { c ->
+                        if (c.moveToFirst()) ContentUris.withAppendedId(collection, c.getLong(0)) else null
+                    }
             }.getOrNull()
         }
 
