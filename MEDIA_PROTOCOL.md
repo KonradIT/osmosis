@@ -788,10 +788,17 @@ GET /v1?file_index=<u32>&file_subtype=<S>&file_seg_subindex=<G>
 ```
 
 All three parameters are expected — the connection is closed when one is missing.
-`file_seg_subindex` selects a part of a segmented recording; `0` = whole file. It is not a status code
-away from that: **this firmware reports a missing file by closing the connection with no response at
-all**, so a client sees an IOException where it expects a 404. (Every URL that is not `/v1` or `/v2`
-takes the same path, which is why `GET /` returns an empty reply.)
+`file_seg_subindex` selects a part of a segmented recording; `0` = whole file. **It is a real per-file
+value, not a constant**: the reference app reads it off each file's own record rather than hardcoding
+zero, so a segmented recording is only reachable by passing the right one.
+
+**A missing file is reported by closing the connection with no response at all**, not by a 404 — so a
+client sees an IOException where it expects a status code. (Every URL that is not `/v1` or `/v2` takes
+the same path, which is why `GET /` returns an empty reply.)
+
+The reference app only ever builds a `/v1` URL with `file_subtype=0`. Every other rendition it fetches
+by **physical path over `/v2`**, taking the path from the file's own record and appending the extension
+for the type it wants — which is exactly the `/v2?storage=N&path=…` shape the cameras use.
 
 **`file_index` is a packed 32-bit field**, not a flat number:
 
@@ -808,13 +815,29 @@ takes the same path, which is why `GET /` returns an empty reply.)
 | 2 | NVMe SSD |
 | 3 | reserved / unset |
 
+`file_subtype` is a **19-value enum**, recovered in full (with its own names) from a decompiled
+DJI-derived app. Only the five below are exercised here; the rest are listed because guessing at a
+number is how you end up with a connection close and no idea why.
+
 | `file_subtype` | name | content | on-card path |
 |---:|---|---|---|
-| 0 | ORG | original full-res | `DCIM/<dir>MEDIA/DJI_<n>` |
-| 1 | THM | thumbnail | `MISC/THM/<dir>/DJI_<n>` |
-| 2 | SCR | screen-res render | `MISC/THM/<dir>/DJI_<n>` |
+| 0 | ORIGIN | original full-res | `DCIM/<dir>MEDIA/DJI_<n>` |
+| 1 | THUMBNAIL | thumbnail (`.thm`) | `MISC/THM/<dir>/DJI_<n>` |
+| 2 | SCREEN | screen-res render (`.scr`) | `MISC/THM/<dir>/DJI_<n>` |
 | 17 | AIS | sensor data | `MISC/THM/<dir>/DJI_<n>` |
-| 18 | LRF | low-res proxy video | `DCIM/<dir>MEDIA/DJI_<n>` |
+| 18 | PROXY | low-res proxy video (`.lrf`) | `DCIM/<dir>MEDIA/DJI_<n>` |
+
+The rest: 3 CLIP · 4 STREAM · 5 PANO · 6 PANOSCREENNAIL · 7 PANOTHUMBNAIL · 8 TIMELAPSESCREENAIL ·
+9 FILE · 10 CUSTOM_DATA · 11 PHOTO_METADATA · 12 USER_CTRL_INFO · 13 JSON · 14 PAYLOAD_WIDGET_JSON ·
+**15 PROXY_MOOV** · **16 ORIGIN_MOOV**.
+
+The two `_MOOV` subtypes are worth noting: an MP4's `moov` atom served on its own, without the media
+data. Streaming a clip currently costs a range request for the `moov` before playback can start, so
+these would replace that with one small fetch. Untested — the Neo 2 firmware answers "Not support this
+subtype yet!" for everything in 3–16, so support is per-model.
+
+Extensions per type, from the same source: `.jpg .dng .mov .mp4 .pano .tiff .log.lz4 .seq .tiff.seq
+.lrf .thm .scr`.
 
 **Which renditions actually exist depends on the media.** On a Mavic 3 a video has a THM, while a still
 has *nothing but the original* — subtypes 1, 2, 17 and 18 all close the connection for a photo index.
