@@ -1,5 +1,6 @@
 package dev.konraditurbe.osmosis.net
 
+import dev.konraditurbe.osmosis.camera.CameraSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -18,7 +19,7 @@ class StorageStatusTest {
 
     private fun hex(s: String) = s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     private fun status(payload: String) =
-        DatalinkClient({}, 9004, true).applyStatusFrameForTest(0x02, 0xDC, hex(payload))
+        CameraSession({}, 9004, true).applyStatusFrameForTest(0x02, 0xDC, hex(payload))
 
     // Action 6 with a card. Its own screen read "107.2 / 118.9 GB" for the card.
     private val action6 = "001202000001b9db0100b4ac0100000000002a2b000001011dc8000072c50000"

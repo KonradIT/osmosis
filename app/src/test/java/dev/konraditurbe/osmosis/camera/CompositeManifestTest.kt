@@ -1,4 +1,4 @@
-package dev.konraditurbe.osmosis.net
+package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.core.StorageRules
 import org.junit.Assert.assertEquals
@@ -44,7 +44,7 @@ class CompositeManifestTest {
         "3731323137343234335f303236365f44001b0a00000002020114021500ea8cec5c"
     )
 
-    private fun decode() = DatalinkClient({}, 9004, true).decodeCompositeForTest(threeRecords)
+    private fun decode() = CameraSession({}, 9004, true).decodeCompositeForTest(threeRecords)
 
     @Test
     fun `decodes every record with the exact captured fields`() {
@@ -72,7 +72,7 @@ class CompositeManifestTest {
     fun `a blob with no CompositePack marker decodes to nothing (falls back to scrape)`() {
         // No 03 ff 19 06 marker anywhere → the structural decoder must yield empty, not crash.
         val garbage = hex("00010203040506070809" + "444a495f".repeat(8))
-        assertEquals(0, DatalinkClient({}, 9004, true).decodeCompositeForTest(garbage).size)
+        assertEquals(0, CameraSession({}, 9004, true).decodeCompositeForTest(garbage).size)
     }
 
     // One real record each from the model-suffix cameras — Pocket 3 (`_OP3`), Action 5 Pro (`_DOA5`),
@@ -91,7 +91,7 @@ class CompositeManifestTest {
             Triple(oa6Rec, "DCIM/DJI_001_OA6/DJI_20260724100446_0002_D_DOA6.MP4", 0x40100080L),
         )
         for ((bytes, path, handle) in cases) {
-            val f = DatalinkClient({}, 9004, true).decodeCompositeForTest(bytes).single()
+            val f = CameraSession({}, 9004, true).decodeCompositeForTest(bytes).single()
             assertEquals(path, f.path)
             assertEquals("delete handle for $path", handle, f.handle)
             assertEquals("MP4", f.ext)
@@ -122,7 +122,7 @@ class CompositeManifestTest {
 
     @Test
     fun `Action-family media size is the per-file marker-12 value, not the head+38 constant`() {
-        val files = DatalinkClient({}, 9004, true).decodeCompositeForTest(oa5Manifest)
+        val files = CameraSession({}, 9004, true).decodeCompositeForTest(oa5Manifest)
             .sortedByDescending { it.path }
         assertEquals(2, files.size)
         assertTrue(files.all { it.path.startsWith("DCIM/DJI_001_OA5/DJI_") && it.path.endsWith("_DOA5.MP4") })
@@ -163,7 +163,7 @@ class CompositeManifestTest {
 
     @Test
     fun `xtra decodes the CAM_ family, video vs photo`() {
-        val files = DatalinkClient({}, 10004, false).decodeCompositeForTest(xtraTwoRecords)
+        val files = CameraSession({}, 10004, false).decodeCompositeForTest(xtraTwoRecords)
         assertEquals(2, files.size)
         val video = files.single { it.ext == "MP4" }
         assertEquals("DCIM/CAM_001/CAM_20260711185615_0016_D.MP4", video.path)
@@ -223,7 +223,7 @@ class CompositeManifestTest {
 
     @Test
     fun `star flag and resolution decode from the record header`() {
-        val files = DatalinkClient({}, 9004, true).decodeCompositeForTest(starRes)
+        val files = CameraSession({}, 9004, true).decodeCompositeForTest(starRes)
         val f0280 = files.single { it.name.contains("_0280_") }
         val f0281 = files.single { it.name.contains("_0281_") }
         // 0280: 2.7K 4:3, not starred; 0281: 4K 16:9, ⭐starred.
@@ -250,7 +250,7 @@ class CompositeManifestTest {
 
     @Test
     fun `photo star flag decodes via the photo pseudo-marker`() {
-        val files = DatalinkClient({}, 9004, true).decodeCompositeForTest(photoStar)
+        val files = CameraSession({}, 9004, true).decodeCompositeForTest(photoStar)
         assertEquals(false, files.single { it.name.contains("_0274_") }.starred)
         assertEquals(true,  files.single { it.name.contains("_0282_") }.starred)
     }
@@ -281,7 +281,7 @@ class CompositeManifestTest {
      */
     @Test
     fun `records are grouped by their per-storage manifest list`() {
-        val files = DatalinkClient({}, 10004, false).decodeCompositeForTest(mixedStorage)
+        val files = CameraSession({}, 10004, false).decodeCompositeForTest(mixedStorage)
         assertEquals(2, files.size)
         assertEquals("SD list record is group 0",
             0, files.single { it.name.contains("_0005_") }.group)
@@ -292,7 +292,7 @@ class CompositeManifestTest {
     /** One list (no card in) must stay a single group, so storage is resolved exactly once. */
     @Test
     fun `a single-list manifest leaves every record in group 0`() {
-        val files = DatalinkClient({}, 10004, false).decodeCompositeForTest(xtraTwoRecords)
+        val files = CameraSession({}, 10004, false).decodeCompositeForTest(xtraTwoRecords)
         assertTrue("no card in -> one list -> one group", files.all { it.group == 0 })
     }
 
@@ -305,7 +305,7 @@ class CompositeManifestTest {
     @Test
     fun `storage mount guess matches each camera's real store from its handle`() {
         fun guess(bytes: ByteArray): Int? {
-            val f = DatalinkClient({}, 9004, true).decodeCompositeForTest(bytes).first { it.ext == "MP4" }
+            val f = CameraSession({}, 9004, true).decodeCompositeForTest(bytes).first { it.ext == "MP4" }
             return StorageRules.mountGuess(singleSdStorage = false, handle = f.handle, cmdHandle = f.cmdHandle)
         }
         assertEquals("Nano internal -> storage 1", 1, guess(threeRecords))        // 0x40104200
