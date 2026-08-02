@@ -27,3 +27,7 @@ replay_pid*.log
 
 # Pulled device logs (dump-logs.sh) — device-specific, not source.
 logs-dump/
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
