@@ -817,10 +817,14 @@ takes the same path, which is why `GET /` returns an empty reply.)
 | 18 | LRF | low-res proxy video | `DCIM/<dir>MEDIA/DJI_<n>` |
 
 **Which renditions actually exist depends on the media.** On a Mavic 3 a video has a THM, while a still
-has *nothing but the original* — subtypes 1, 2, 17 and 18 all close the connection for a photo index. A
-still's thumbnail therefore has to come over the datalink ([§28](#28-get-media-list-drone), subtype
-`0x20`). The reference app fetches every thumbnail that way regardless of type and never requests
-subtype 1 or 2 over HTTP at all.
+has *nothing but the original* — subtypes 1, 2, 17 and 18 all close the connection for a photo index.
+The reference app sidesteps this by pulling every thumbnail over the datalink instead
+([§28](#28-get-media-list-drone), subtype `0x20`), and never requests subtype 1 or 2 over HTTP at all.
+
+A cheaper route for a still, since `Range` is supported: fetch the **first 64 kB of the original** and
+take the thumbnail out of its EXIF `APP1` segment (a u16 length caps `APP1` at 64 kB, so one request
+always suffices). Measured on a Mavic 3, the embedded JPEG starts 1502 bytes in. Unlike the datalink
+route this parallelises and leases no transfer slot.
 
 Extensions are probed in order (`.JPG .jpg .MP4 .mp4 .MOV .mov .DNG .dng` for ORG; `.LRF/.lrf`,
 `.THM/.thm`, `.SCR/.scr` for the rest), so the URL carries no extension.

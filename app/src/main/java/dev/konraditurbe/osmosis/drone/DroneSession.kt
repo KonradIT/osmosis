@@ -17,7 +17,7 @@ import dev.konraditurbe.osmosis.net.DumlSession
  * | gate | none | **`0x51` session-open** — answers no command at all until it completes |
  * | media list | CompositePack TLV of paths | flat 94-byte DCF records ([DroneManifest]) |
  * | paging | fresh playback session per page | back to back on the live session |
- * | thumbnails | HTTP | HTTP `/v1?file_subtype=1`, or [thumbnail] over the datalink |
+ * | thumbnails | HTTP | HTTP — a video's THM, a still's from inside the original (see `DcfAddressing`) |
  * | keep-alive | ACK + status polling | an ~860/s uplink stream it expects from a controller |
  *
  * Blocking; call on a background thread. The process must already be bound to the drone's AP.
@@ -39,7 +39,6 @@ class DroneSession(
     private val rxByType = LinkedHashMap<Int, Int>()
     private var pageNo = 0
     private var sessionStartMs = 0L
-    private var thumbsServed = 0
 
     override fun onHandshakeReply(reply: ByteArray) {
         // Log what the drone actually said, not just that *something* typed 0x00 came back: if it answers
@@ -85,7 +84,7 @@ class DroneSession(
     // ---- media list --------------------------------------------------------------------------------
 
     override fun fetchFileList(ip: String): List<CameraFile> {
-        sessionStartMs = System.currentTimeMillis(); pageNo = 0; thumbsServed = 0
+        sessionStartMs = System.currentTimeMillis(); pageNo = 0
         if (!openSession(ip)) return emptyList()
         runDronePrelude()
         onFetchProgress?.invoke(50)
@@ -132,9 +131,9 @@ class DroneSession(
         var wentAhead = false
         rxByType.clear()
         pageNo++
-        val tState = "page=$pageNo seq=0x%02x cursor=%d(file %d) udpSeq=0x%04x chan=0x%04x t=%.1fs thumbs=%d"
+        val tState = "page=$pageNo seq=0x%02x cursor=%d(file %d) udpSeq=0x%04x chan=0x%04x t=%.1fs"
             .format(seq, cursor, cursor and 0xFFFF, tx.seq, tx.cameraChannel,
-                (System.currentTimeMillis() - sessionStartMs) / 1000.0, thumbsServed)
+                (System.currentTimeMillis() - sessionStartMs) / 1000.0)
         sendDuml(0x00, 0x26, DroneManifest.listQuery(seq, cursor), receiverType = 0x01, receiverId = 0)
         log("datalink: drone list QUERY $tState")
         // Verbatim, so it can be diffed against DJI Fly's working query (capture f2229):
@@ -228,66 +227,9 @@ class DroneSession(
     }
 
     /**
-     * Fetch one thumbnail as JPEG bytes, or null. Blocking; call off the UI thread.
-     *
-     * The request is queued onto the drone keep-alive thread rather than run here, because that thread
-     * owns the socket — several grid cells load at once and concurrent recv would interleave their
-     * chunk streams. Returns null if the keep-alive isn't running, so the caller just shows a placeholder.
-     *
-     * Generous timeout: this is queue-wait + service, and the grid asks for several at once while only
-     * one can be in flight. Better a slow thumbnail than a blank cell.
-     */
-    override fun thumbnail(fileIndex: Long): ByteArray? {
-        var out: ByteArray? = null
-        onDroneThread(20_000) { out = serveThumb(fileIndex); thumbsServed++ }
-        return out
-    }
-
-    /**
-     * Serve one thumbnail: send the query, collect subtype-0x21 chunks, extract the JPEG, **and close
-     * the transfer out with the `0x4a04` ack**.
-     *
-     * That last step is not decoration. It used to be sent only for a media *list*, never for a
-     * thumbnail — while DJI Fly sends it after every transfer. Instrumented on hardware, paging died
-     * once ~19 thumbnails had been served (0/5/9 fine, 19 dead) with the drone still pushing 857
-     * telemetry packets a query: wide awake, refusing new transfers. Scrolling fast outran the thumbnail
-     * queue and paged much deeper, which is the same fact from the other side. The working reading is
-     * that un-acked transfers hold a slot and the drone only has so many. See ROADMAP #14.
-     */
-    private fun serveThumb(fileIndex: Long): ByteArray? {
-        val seq = querySeq.also { querySeq = (it + 1) and 0xFFFF }
-        val blob = java.io.ByteArrayOutputStream()
-        val chunks = LinkedHashMap<Int, DroneManifest.Chunk>()
-        sendDuml(0x00, 0x26, DroneManifest.thumbQuery(seq, fileIndex), receiverType = 0x01, receiverId = 0)
-        for (round in 0 until 16) {
-            dronePump(200, blob, manifestStream = true)
-            chunks.clear()
-            var sawState = false
-            for ((set, cmd, pl) in scanFrames(blob.toByteArray())) {
-                if (set != 0x00 || cmd != 0x27) continue
-                if (isState(pl, DroneManifest.SUB_THUMB_STATE, seq)) sawState = true
-                val c = DroneManifest.parseChunk(pl, DroneManifest.SUB_THUMB_REPLY) ?: continue
-                if (c.seq == seq) chunks.putIfAbsent(c.index, c)
-            }
-            if (chunksComplete(chunks)) break
-            // The drone closes a transfer with a state frame. Seeing one with nothing to show means
-            // this index has no thumbnail — stop now instead of burning the full 3.2 s of rounds,
-            // which with a gridful of stills is the difference between a slow grid and a stalled one.
-            if (sawState && chunks.isEmpty()) break
-        }
-        // Ack whatever happened — including a transfer that never completed, which is exactly the case
-        // most likely to leave a slot held open. Subtype 0x24 mirrors the thumbnail query/reply pair
-        // (0x20/0x21) the way 0x04 mirrors the list pair (0x00/0x01).
-        sendDuml(0x00, 0x26, DroneManifest.listAck(seq, DroneManifest.SUB_THUMB_ACK),
-            receiverType = 0x01, receiverId = 0)
-        return if (chunks.isEmpty()) null
-        else DroneManifest.extractJpeg(DroneManifest.assemble(chunks.values.toList()))
-    }
-
-    /**
      * A drone needs the uplink stream kept running or it stops talking to us, and it wants none of the
      * camera's playback/status polling — so it gets its own loop, which doubles as the server for
-     * [thumbnail] and [fetchNextPage].
+     * [fetchNextPage].
      */
     override fun startKeepAlive() {
         keepAliveOn = true

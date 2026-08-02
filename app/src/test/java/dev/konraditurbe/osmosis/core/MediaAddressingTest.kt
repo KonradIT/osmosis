@@ -108,7 +108,8 @@ class MediaAddressingTest {
         // still has no HTTP thumbnail to ask for, and asking anyway left every photo cell blank.
         assertEquals("/v1?file_index=6554154&file_subtype=1&file_seg_subindex=0",
             dcfFile(video = true).thumbUrlPath())
-        assertEquals("${CameraFile.DUML_THUMB}6554154", dcfFile(video = false).thumbUrlPath())
+        assertEquals("${CameraFile.EXIF_THUMB}/v1?file_index=6554154&file_subtype=0&file_seg_subindex=0",
+            dcfFile(video = false).thumbUrlPath())
     }
 
     @Test

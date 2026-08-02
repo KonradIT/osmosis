@@ -92,15 +92,6 @@ class DroneManifestTest {
     }
 
     @Test
-    fun `thumbnail query matches DJI Fly's bytes`() {
-        // Captured verbatim at t=22.49 (seq 0x12, file_index 6554140).
-        assertEquals(
-            "4a2030101200000000001c0264000100010000000000ffffffff" + "00".repeat(22),
-            DroneManifest.thumbQuery(0x12, 6554140L).joinToString("") { "%02x".format(it) },
-        )
-    }
-
-    @Test
     fun `file_index is packed storage + directory + number, not a flat folder`() {
         // bits 31:30 storage | 29:16 DCF directory (14 bits) | 15:0 file number.
         // Masking the directory as 16 bits folds the storage bits in, so an internal-storage file reads
@@ -187,9 +178,6 @@ class DroneManifestTest {
         assertEquals("release a media list (sub 04)",
             "4a040e1005000000000001000000",
             DroneManifest.listAck(0x05).joinToString("") { "%02x".format(it) })
-        assertEquals("release a thumbnail (sub 24)",
-            "4a240e100b000000000001000000",
-            DroneManifest.listAck(0x0B, DroneManifest.SUB_THUMB_ACK).joinToString("") { "%02x".format(it) })
         assertEquals("proceed, answering the drone's state frame (sub 02)",
             "4a020f100500000000000000000000",
             DroneManifest.transferGo(0x05).joinToString("") { "%02x".format(it) })
