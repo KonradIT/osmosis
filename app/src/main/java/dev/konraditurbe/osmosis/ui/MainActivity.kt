@@ -38,7 +38,9 @@ import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.duml.DjiMessage
 import dev.konraditurbe.osmosis.net.ApJoiner
 import dev.konraditurbe.osmosis.net.HttpClient
-import dev.konraditurbe.osmosis.net.DatalinkClient
+import dev.konraditurbe.osmosis.camera.CameraSession
+import dev.konraditurbe.osmosis.core.MediaSession
+import dev.konraditurbe.osmosis.drone.DroneSession
 import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MediaDownloader
 import dev.konraditurbe.osmosis.net.MetaLoader
@@ -140,7 +142,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     // The datalink session keeps the camera AP alive (the Action 5 sleeps its AP the moment the
     // datalink goes idle). Held open during browse/download; closed on a new offload / exit.
-    private var datalink: DatalinkClient? = null
+    private var datalink: MediaSession? = null
 
     // Favorites are camera writes that run in a fresh session (~re-handshake each), so serialize them
     // on one worker — rapid star toggles queue instead of tearing down/rebuilding sessions concurrently.
@@ -854,17 +856,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     // confirmed on the Xtra rebrand (own OUI EC:9E:EA), so a genuine DJI unit gets the
                     // DJI-standard 9004+poke. Either guess can be wrong on an untested model, so if the
                     // handshake never lands we retry the alternate config and log which port answered.
-                    fun open(m: CameraModel): Pair<DatalinkClient, List<CameraFile>> {
+                    fun open(m: CameraModel): Pair<MediaSession, List<CameraFile>> {
                         logLine("=== media list [${m.name}] via udp/${m.datalinkPort} (poke=${m.tcpPoke}) ===")
-                        val c = DatalinkClient(::logLine, m.datalinkPort, m.tcpPoke, m.isDrone)
+                        // A drone speaks a different protocol end to end — the 0x51 session-open gate,
+                        // flat DCF records instead of CompositePack, /v1 instead of /v2 (ROADMAP #14).
+                        // This is the only place in the app that decides which of the two it is.
+                        val c: MediaSession =
+                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort)
+                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
-                        // A drone answers the same query with fixed 94-byte records instead of the
-                        // camera's CompositePack TLV, and serves media by index over /v1 — ROADMAP #14.
-                        val f = runCatching {
-                            if (m.isDrone) c.fetchDroneFileList("192.168.2.1")
-                            else c.fetchFileList("192.168.2.1")
-                        }.getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
+                        val f = runCatching { c.fetchFileList("192.168.2.1") }
+                            .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
                         return c to f
                     }
 
@@ -883,9 +886,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     }
                     datalink = dl
                     dev.konraditurbe.osmosis.net.Highlights.provider = { h -> dl.getHighlights(h) }
-                    // Drone thumbnails come over the datalink, not HTTP — see CameraFile.DUML_THUMB.
-                    dev.konraditurbe.osmosis.net.ImageLoader.dumlThumbProvider =
-                        if (currentModel.isDrone) { idx -> dl.fetchDroneThumb(idx) } else null
+                    // Datalink thumbnails, for hardware that serves none over HTTP — CameraFile.DUML_THUMB.
+                    dev.konraditurbe.osmosis.net.ImageLoader.dumlThumbProvider = { idx -> dl.thumbnail(idx) }
                     // Always: it holds the AP up, polls status for the pill, and holds playback (#12).
                     // Gating on files.isNotEmpty() left an empty camera (e.g. an Action 6 with no media)
                     // with a dead pill — status is only parsed in this loop.
@@ -1171,7 +1173,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         }
         Thread {
             val more = runCatching {
-                applyStorageAndSort(if (currentModel.isDrone) dl.fetchNextDronePage() else dl.fetchNextPage())
+                applyStorageAndSort(dl.fetchNextPage())
             }.getOrElse { emptyList() }
             main.post {
                 adapter?.append(more)
@@ -1254,7 +1256,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** Toggle the camera's ⭐ favorite for [f] (DUML 0x02/0xbf). Optimistic grid badge; the write runs on
      *  the serialized favorite worker and reverts the badge on failure. */
-    private fun toggleFavorite(f: CameraFile, dl: DatalinkClient) {
+    private fun toggleFavorite(f: CameraFile, dl: MediaSession) {
         val on = !f.starred
         // Videos carry their own handle; photos don't, so fall back to the manifest-fitted one (a
         // hardcoded Nano formula is why photo favorites failed on the Xtra). See withCmdHandles.
@@ -1271,7 +1273,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     /** Confirm + delete [f] from the camera (DUML 0x00/0x28) — irreversible, so it's gated by a dialog. */
-    private fun confirmDelete(f: CameraFile, dl: DatalinkClient) {
+    private fun confirmDelete(f: CameraFile, dl: MediaSession) {
         val hx = "0x%08x".format(f.handle)
         AlertDialog.Builder(this)
             .setTitle("Delete from camera?")

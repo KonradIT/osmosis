@@ -1,4 +1,4 @@
-package dev.konraditurbe.osmosis.net
+package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.core.CameraFile
 import org.junit.Assert.assertEquals
@@ -13,12 +13,12 @@ import org.junit.Test
  *    10-13, count `0x2d`=45 at byte 14, counter at byte 4. `0x00000001` selects the newest page; older
  *    pages feed the oldest video handle of the previous page. The cursor hex below are the *exact*
  *    values Mimo sent while scrolling this Nano's library, so a regression means the format moved.
- *  - [DatalinkClient.stepPagination]: the pure per-page advance (dedup + pick the next cursor + decide
+ *  - [CameraSession.stepPagination]: the pure per-page advance (dedup + pick the next cursor + decide
  *    whether more remain), which is what the grid's infinite scroll drives.
  */
 class PaginationTest {
 
-    private val dl = DatalinkClient({}, 9004, true)
+    private val dl = CameraSession({}, 9004, true)
 
     private fun file(seq: Int, handle: Long) = CameraFile(
         path = "DCIM/DJI_001/DJI_20260101120000_%04d_D.MP4".format(seq),
