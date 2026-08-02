@@ -1,4 +1,4 @@
-package dev.konraditurbe.osmosis.core
+package dev.konraditurbe.osmosis.drone
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -160,21 +160,7 @@ class DroneManifestTest {
         return r
     }
 
-    @Test
-    fun `mtime is a FAT date-time, not unix seconds`() {
-        // Ground truth: DJI_0555 was recorded 2026-07-12, and its raw field is 0x5CECB9FB. Read as a
-        // unix timestamp that lands in 2019 and every file looks seven years old; read as FAT it is
-        // 2026-07-12 23:15:54 — which is what DJI Fly shows.
-        val cal = java.util.Calendar.getInstance()
-        cal.timeInMillis = DroneManifest.fatToEpoch(0x5CECB9FBL) * 1000L
-        assertEquals(2026, cal.get(java.util.Calendar.YEAR))
-        assertEquals(7, cal.get(java.util.Calendar.MONTH) + 1)
-        assertEquals(12, cal.get(java.util.Calendar.DAY_OF_MONTH))
-        assertEquals(23, cal.get(java.util.Calendar.HOUR_OF_DAY))
-        assertEquals(15, cal.get(java.util.Calendar.MINUTE))
-        assertEquals(54, cal.get(java.util.Calendar.SECOND))   // FAT stores seconds/2
-        assertEquals(0L, DroneManifest.fatToEpoch(0L))
-    }
+    // The FAT-vs-unix mtime decode is a DCF concern shared with the Osmo Action 1 — see DcfIndexTest.
 
     @Test
     fun `grid id and date grouping work without a camera-style filename`() {

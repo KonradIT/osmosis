@@ -2,7 +2,7 @@ package dev.konraditurbe.osmosis.net
 
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.CameraStatus
-import dev.konraditurbe.osmosis.core.DroneManifest
+import dev.konraditurbe.osmosis.drone.DroneManifest
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.duml.DjiMessage
 import dev.konraditurbe.osmosis.duml.OsmoCommands
