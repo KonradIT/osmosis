@@ -31,6 +31,16 @@ class DroneSession(
     private val droneSeen = HashSet<Long>()
     private var querySeq = 0x0C
 
+    // ---- paging diagnostics (ROADMAP #14, "paging stops after page 2") -----------------------------
+    // Every datagram seen during a query, counted by transport pktType. This is the field the old
+    // failure log could NOT show: its sink keeps only pktType 0x03 (the data stream), so "no valid DUML
+    // at all" was equally consistent with a silent drone and a chatty one that simply ignored the query.
+    // Those need completely different fixes, so count the raw packets instead of inferring.
+    private val rxByType = LinkedHashMap<Int, Int>()
+    private var pageNo = 0
+    private var sessionStartMs = 0L
+    private var thumbsServed = 0
+
     override fun onHandshakeReply(reply: ByteArray) {
         // Log what the drone actually said, not just that *something* typed 0x00 came back: if it answers
         // with a session id other than the one we chose, we would keep stamping ours on every packet and
@@ -64,6 +74,9 @@ class DroneSession(
         sendDroneIdentity()
         dronePump(400)
         droneSessionOpen()
+        // From here the beacon must keep being answered or the data session lapses — see [beaconOn].
+        // Started only now so the 0x51 message ids during the open still run 1,2,3… as DJI Fly's do.
+        beaconOn = true
         dronePump(1200)
         log("datalink: drone session-open sent — drone frames/s now ${droneRxFrameRate()}")
         return true
@@ -72,6 +85,7 @@ class DroneSession(
     // ---- media list --------------------------------------------------------------------------------
 
     override fun fetchFileList(ip: String): List<CameraFile> {
+        sessionStartMs = System.currentTimeMillis(); pageNo = 0; thumbsServed = 0
         if (!openSession(ip)) return emptyList()
         runDronePrelude()
         onFetchProgress?.invoke(50)
@@ -115,7 +129,13 @@ class DroneSession(
         val heard = LinkedHashMap<Int, Int>()     // set<<8|cmd -> count, so a dead query is diagnosable
         val blob = java.io.ByteArrayOutputStream()
         var acked = false
+        rxByType.clear()
+        pageNo++
+        val tState = "page=$pageNo seq=0x%02x cursor=%d(file %d) udpSeq=0x%04x chan=0x%04x t=%.1fs thumbs=%d"
+            .format(seq, cursor, cursor and 0xFFFF, tx.seq, tx.cameraChannel,
+                (System.currentTimeMillis() - sessionStartMs) / 1000.0, thumbsServed)
         sendDuml(0x00, 0x26, DroneManifest.listQuery(seq, cursor), receiverType = 0x01, receiverId = 0)
+        log("datalink: drone list QUERY $tState")
         // Verbatim, so it can be diffed against DJI Fly's working query (capture f2229):
         //   4280ea9d701505d5 4815701500000000c601604d 552e04a7020177c94000264a0021…
         log("datalink: drone query pkt ${tx.lastSentPacket?.joinToString("") { "%02x".format(it) }}")
@@ -142,14 +162,20 @@ class DroneSession(
             if (batch == 3 && chunks.isEmpty())
                 sendDuml(0x00, 0x26, DroneManifest.listQuery(seq, cursor), receiverType = 0x01, receiverId = 0)
         }
+        // Whether the drone was talking to us AT ALL decides which bug this is: packets arriving but no
+        // 0x00/0x27 means the query was received and refused (or dropped by its receive window); no
+        // packets at all means the link itself stalled.
+        val rx = rxByType.entries.sortedBy { it.key }
+            .joinToString(", ") { "pkt%02x×%d".format(it.key, it.value) }
+            .ifEmpty { "NOTHING — link silent" }
         if (chunks.isEmpty()) {
             val what = heard.entries.joinToString(", ") {
                 "%02x/%02x×%d".format(it.key shr 8, it.key and 0xFF, it.value)
-            }.ifEmpty { "(no valid DUML at all)" }
-            log("datalink: drone list — nothing for seq=0x%02x cursor=$cursor after ${blob.size()}B; heard $what"
-                .format(seq))
+            }.ifEmpty { "(no 0x00/0x27 frames)" }
+            log("datalink: drone list FAILED $tState after ${blob.size()}B data; rx [$rx]; frames $what")
             return emptyList()
         }
+        log("datalink: drone list OK $tState — ${chunks.size} chunks, rx [$rx]")
         // A gap mid-stream shifts the record phase, so say so rather than emitting silent garbage —
         // [DroneManifest.decode] drops whatever no longer parses as a real (folder, number).
         if (!chunksComplete(chunks))
@@ -199,11 +225,21 @@ class DroneSession(
      */
     override fun thumbnail(fileIndex: Long): ByteArray? {
         var out: ByteArray? = null
-        onDroneThread(20_000) { out = serveThumb(fileIndex) }
+        onDroneThread(20_000) { out = serveThumb(fileIndex); thumbsServed++ }
         return out
     }
 
-    /** Serve one thumbnail: send the query, collect subtype-0x21 chunks, extract the JPEG. */
+    /**
+     * Serve one thumbnail: send the query, collect subtype-0x21 chunks, extract the JPEG, **and close
+     * the transfer out with the `0x4a04` ack**.
+     *
+     * That last step is not decoration. It used to be sent only for a media *list*, never for a
+     * thumbnail — while DJI Fly sends it after every transfer. Instrumented on hardware, paging died
+     * once ~19 thumbnails had been served (0/5/9 fine, 19 dead) with the drone still pushing 857
+     * telemetry packets a query: wide awake, refusing new transfers. Scrolling fast outran the thumbnail
+     * queue and paged much deeper, which is the same fact from the other side. The working reading is
+     * that un-acked transfers hold a slot and the drone only has so many. See ROADMAP #14.
+     */
     private fun serveThumb(fileIndex: Long): ByteArray? {
         val seq = querySeq.also { querySeq = (it + 1) and 0xFFFF }
         val blob = java.io.ByteArrayOutputStream()
@@ -219,6 +255,9 @@ class DroneSession(
             }
             if (chunksComplete(chunks)) break
         }
+        // Ack whatever happened — including a transfer that never completed, which is exactly the case
+        // most likely to leave a slot held open.
+        sendDuml(0x00, 0x26, DroneManifest.listAck(seq), receiverType = 0x01, receiverId = 0)
         return if (chunks.isEmpty()) null
         else DroneManifest.extractJpeg(DroneManifest.assemble(chunks.values.toList()))
     }
@@ -413,6 +452,20 @@ class DroneSession(
                 .ifEmpty { "NONE — drone ignored the open" }))
     }
 
+    /**
+     * Once the session is open the identity beacon must keep being answered, ~2×/s, for as long as we
+     * want it to stay open. The drone beacons its serial at that rate and the reference app answers
+     * every one.
+     *
+     * Answering it only at session-open is what capped media browsing at ~30 seconds: measured across
+     * four instrumented sessions, every media query at t ≤ 28.5 s succeeded and every one at t ≥ 28.9 s
+     * came back empty — while the drone was still pushing ~850 telemetry packets per query. The uplink
+     * stream keeps the *link* alive, so nothing looks wrong; it is the `0x51` data session underneath
+     * that lapses. See ROADMAP #14.
+     */
+    @Volatile private var beaconOn = false
+    private var lastBeaconMs = 0L
+
     /** Answer the drone's identity beacon. Cheap — call it once per receive round. */
     private fun sendDroneIdentity() {
         val p = droneIdentityFrame.copyOf()
@@ -563,6 +616,7 @@ class DroneSession(
         val deadline = System.nanoTime() + ms * 1_000_000
         while (System.nanoTime() < deadline) {
             for (dg in recvAll(20)) {
+                if (dg.size > 6) rxByType.merge(dg[6].toInt() and 0xFF, 1, Int::plus)
                 // Telemetry rides pktType 0x01 (small keepalive-sized packets). Decode it HERE rather
                 // than only when idle: the keep-alive is busy serving thumbnails for minutes on end, and
                 // status parsed only between jobs meant battery and storage never appeared at all.
@@ -575,6 +629,11 @@ class DroneSession(
                 else if (dg.size > 20 && (dg[6].toInt() and 0xFF) == 0x03) sink.write(dg, 20, dg.size - 20)
             }
             droneUplinkTick()
+            // Keep the 0x51 data session alive. Rides the pump rather than the keep-alive loop, so it
+            // also fires during a long list or thumbnail transfer — which is exactly when the session
+            // used to lapse.
+            val now = System.currentTimeMillis()
+            if (beaconOn && now - lastBeaconMs >= 500) { lastBeaconMs = now; sendDroneIdentity() }
         }
     }
 }

@@ -58,6 +58,9 @@ class DumlTransport(
     /** The peer's own sequence channel, learned from bytes 8–9 of everything it sends. */
     val cameraChannel: Int get() = camChannel
 
+    /** Our current send sequence — for diagnosing window drift. See [routingHeader]. */
+    val seq: Int get() = udpSeq
+
     val isOpen: Boolean get() = ::sock.isInitialized && !sock.isClosed
 
     val localPort: Int get() = if (::sock.isInitialized) sock.localPort else -1
