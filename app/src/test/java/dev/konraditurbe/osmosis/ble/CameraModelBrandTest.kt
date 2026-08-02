@@ -95,4 +95,23 @@ class CameraModelBrandTest {
         // The Xtra carries cid 0x08AA too, but its own OUI must keep it XTRA (it needs port 10004).
         assertEquals(Brand.XTRA, Brand.of("EC:9E:EA:00:00:01", "XtraEdgePro-2DCA", djiCid = true))
     }
+
+    @Test
+    fun `an unknown model in the aircraft range gets drone defaults, not camera ones`() {
+        // A Mini 3 (or anything else we have not met) must not be handed the camera config: a drone
+        // releases WiFi credentials only for the "DJI FLY" token, so guessing "camera" fails before it
+        // reaches the network and the log says nothing useful.
+        val unknown = CameraModel.resolve(0x0075, "Mini 3", Brand.DJI)
+        assertTrue("treated as a drone", unknown.isDrone)
+        assertEquals("DJI FLY", unknown.pairingToken)
+        assertEquals(9003, unknown.datalinkPort)
+        assertFalse("and never claimed as verified", unknown.verified)
+    }
+
+    @Test
+    fun `an unknown model in the camera range still gets camera defaults`() {
+        val unknown = CameraModel.resolve(0x0016, "Osmo Whatever", Brand.DJI)
+        assertFalse(unknown.isDrone)
+        assertEquals("osmo", unknown.pairingToken)
+    }
 }

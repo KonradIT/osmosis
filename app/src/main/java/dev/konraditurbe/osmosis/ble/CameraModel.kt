@@ -104,8 +104,31 @@ data class CameraModel(
             )
         }
 
+        /**
+         * Model ids at or above this are treated as aircraft when we don't recognise them.
+         *
+         * A **guess**, and flagged as one: every camera we have ever seen sits in `0x10`–`0x21`, and
+         * both drones we have seen sit at `0x70` and `0x7e`. It exists because the fallback has to pick
+         * *something*, and picking "camera" for an aircraft fails at the very first step — a drone
+         * releases its WiFi credentials only for the `DJI FLY` pairing token, so an unknown drone
+         * treated as a camera never even gets on its network, and the log says nothing more useful than
+         * "no credentials". Guessing "drone" for an unknown id in this range at least gets far enough
+         * to be diagnosable.
+         *
+         * The scan logs the raw manufacturer bytes for every hit, so an unrecognised model can be
+         * pinned properly from a single log line and added to [BY_ID].
+         */
+        private const val DRONE_ID_FLOOR = 0x0040
+
         private fun byIdOrName(modelId: Int?, name: String?): CameraModel {
             BY_ID[modelId]?.let { return it }
+            // An unknown id in the aircraft range: take the drone defaults rather than the camera ones.
+            if (modelId != null && modelId >= DRONE_ID_FLOOR) {
+                return CameraModel(
+                    name = name?.takeIf { it.isNotBlank() }?.let { "DJI drone ($it)" } ?: "DJI drone",
+                    datalinkPort = 9003, tcpPoke = false, isDrone = true, verified = false,
+                )
+            }
             val n = name?.lowercase()?.replace(" ", "").orEmpty()
             // Xtra product names map to their DJI twin (Atto=Nano, Edge=Action 4, Edge Pro=Action 5
             // Pro, Muse=Pocket 3). Matters for the mfr-data-less units (Pocket 3 / Muse) that only
