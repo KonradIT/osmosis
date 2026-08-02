@@ -117,7 +117,12 @@ class DroneSession(
         val advanced = oldest in 1 until droneCursor
         if (advanced) droneCursor = oldest
         moreAvailable = advanced && fresh.isNotEmpty()
-        log("datalink: drone page → ${fresh.size} new of ${page.size} (more=$moreAvailable)")
+        // Which store each record came from — the top two bits of its index. A Mavic has both a card
+        // and internal memory mounted at separate roots, so footage present on both enumerates twice
+        // under different storage ids, which would inflate the grid without any record being wrong.
+        val byStore = fresh.groupingBy { it.storage }.eachCount().toSortedMap()
+            .entries.joinToString(",") { "s${it.key}=${it.value}" }
+        log("datalink: drone page → ${fresh.size} new of ${page.size} [$byStore] (more=$moreAvailable)")
         return fresh
     }
 

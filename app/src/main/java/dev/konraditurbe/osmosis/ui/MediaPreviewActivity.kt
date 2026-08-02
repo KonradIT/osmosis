@@ -224,8 +224,9 @@ class MediaPreviewActivity : AppCompatActivity() {
         photoView.visibility = View.GONE
         statusText.visibility = View.GONE
         spinner.visibility = ProgressBar.VISIBLE
-        // `controls` is the whole bottom overlay — it holds Add-to-Queue and the burst strip as well as
-        // the transport, so it must stay up for stills. Only the transport/trim row is video-only.
+        // `controls` is the whole bottom overlay — it also holds the queue button and the burst strip,
+        // so it stays up for a still. Only [trimRow], the scrubber/transport/trim block inside it, is
+        // video-only. Hiding the container instead took "Add to Queue" down with it on every photo.
         trimRow.visibility = if (file.isVideo) View.VISIBLE else View.GONE
         controls.visibility = View.VISIBLE
         topInfo.visibility = View.VISIBLE
@@ -431,8 +432,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     )
 
     /** Tap the media to hide the title + controls for a full-frame view; tap again to bring them back.
-     *  Only the transport/trim row is video-only — `controls` itself carries Add-to-Queue and the burst
-     *  strip, so it toggles for stills too. */
+     *  The scrubber/transport/trim block is video-only, but the bar itself carries the queue button,
+     *  so a photo gets it back on the second tap like everything else does. */
     private fun toggleControls() {
         val show = topInfo.visibility != View.VISIBLE
         topInfo.visibility = if (show) View.VISIBLE else View.GONE
