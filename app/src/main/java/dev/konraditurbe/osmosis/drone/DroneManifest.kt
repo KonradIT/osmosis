@@ -1,19 +1,23 @@
-package dev.konraditurbe.osmosis.core
+package dev.konraditurbe.osmosis.drone
+
+import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.dcf.DcfRecords
 
 /**
- * The DJI **drone** media manifest — a different payload inside the *same* `0x00/0x26` → `0x00/0x27`
- * DUML exchange the Osmo cameras use. Reverse-engineered from a PCAPdroid capture of **DJI Fly ↔ a
- * real Mavic 3** browsing its gallery over QuickTransfer WiFi (2026-08-01); see ROADMAP #14.
+ * The DJI **drone** wire format for media listing — a different payload inside the *same*
+ * `0x00/0x26` → `0x00/0x27` DUML exchange the Osmo cameras use. Reverse-engineered from a PCAPdroid
+ * capture of **DJI Fly ↔ a real Mavic 3** browsing its gallery over QuickTransfer WiFi (2026-08-01);
+ * see ROADMAP #14.
  *
  * **What's the same as a camera:** the DUML command pair (`0x00/0x26` query, `0x00/0x27` reply,
  * `receiverType = 0x01`), the datalink transport, and the `0x4a` sub-protocol envelope — the drone
  * even accepts the byte-identical `4a04…` trigger frame the camera path already sends.
  *
- * **What differs — and it's the whole reason this file exists:** a camera answers with DJI's
- * *CompositePack* TLV carrying real **paths** (`DCIM/DJI_001/DJI_…_0211_D.MP4`). A drone answers with
- * a **flat array of fixed 94-byte records that contain no filename at all** — just a numeric
- * `file_index`. Media is then fetched by that number over HTTP (`/v1?file_index=…`), not by path
- * (`/v2?…&path=…`). So [decode] *synthesises* the DJI-convention name from the index.
+ * **What differs:** a camera answers with DJI's *CompositePack* TLV carrying real **paths**
+ * (`DCIM/DJI_001/DJI_…_0211_D.MP4`). A drone answers with a flat array of fixed 94-byte records that
+ * contain no filename at all — just a numeric `file_index`, addressed over `/v1` instead of `/v2`.
+ * That addressing scheme is **not drone-specific** (the Osmo Action 1 uses it too), so it lives in
+ * `dcf/`; this file holds only what is specific to a drone's wire protocol.
  *
  * ### `0x4a` envelope (both directions)
  * ```
@@ -28,20 +32,12 @@ package dev.konraditurbe.osmosis.core
  * ```
  * The `0x1000` flag is why a naive `u8` length read appears to work on short frames and then silently
  * mis-parses long ones — a 26-byte reply reads `1a 10`, a 999-byte one reads `e7 03`.
- *
- * ### Record (94 bytes, newest first)
- * ```
- * +0  u32  mtime as a FAT/DOS packed date+time — NOT unix seconds; see [fatToEpoch]
- * +4  u32  file size in bytes   — verified byte-exact against two HTTP Content-Lengths
- * +8  u32  file_index = (folder shl 16) or number  — the /v1?file_index= parameter
- * +12 u16  duration in seconds; 0 => still photo
- * ```
- * Fields past +14 are not yet mapped (resolution/fps live in there somewhere) and are left null
- * rather than guessed — see ROADMAP #14.
  */
 object DroneManifest {
 
-    const val RECORD_STRIDE = 94
+    /** Record stride of a drone's manifest, re-exported from the DCF decoders for callers and tests. */
+    const val RECORD_STRIDE = DcfRecords.DRONE_STRIDE
+
     private const val HEADER = 10          // 4a + subtype + len + seq + chunk
     private const val CHUNK0_EXTRA = 8     // + count + totalBytes
     private const val FINAL_FLAG = 0x1000
@@ -108,81 +104,11 @@ object DroneManifest {
     }
 
     /**
-     * Decode reassembled record bytes into files, dropping any trailing partial record and any record
-     * whose index doesn't look like a real `(folder, number)` pair — a dropped middle chunk shifts the
-     * stream out of phase, and it's far better to return the records we can trust than to emit
-     * plausible-looking garbage with 1970s dates and nonsense sizes.
+     * Decode reassembled record bytes into files. The record layout, the packed index, the FAT
+     * timestamp and the name synthesis are all DCF concerns — see [DcfRecords.decodeDrone].
      */
-    fun decode(blob: ByteArray): List<CameraFile> {
-        val out = ArrayList<CameraFile>()
-        for (off in 0..blob.size - RECORD_STRIDE step RECORD_STRIDE) {
-            val mtime = u32(blob, off)
-            val size = u32(blob, off + 4)
-            val index = u32(blob, off + 8)
-            val duration = u16(blob, off + 12)
-            // file_index is a PACKED field, not a flat number:
-            //   bits 31:30 = storage id (0 SD, 1 internal eMMC, 2 SSD)
-            //   bits 29:16 = DCF directory (14 bits — e.g. 100 for 100MEDIA)
-            //   bits 15:0  = DCF file number (e.g. 554 for DJI_0554)
-            // Masking the directory as 16 bits instead of 14 folds the storage bits into it, so every
-            // file on internal storage reads as directory 16484 and gets dropped by the sanity check.
-            val storage = ((index shr 30) and 0x3).toInt()
-            val folder = ((index shr 16) and 0x3FFF).toInt()
-            val number = (index and 0xFFFF).toInt()
-            // DJI writes DCIM/100MEDIA, 101MEDIA, … — folders start at 100 and files at 1.
-            if (folder !in 100..999 || number !in 1..9999) continue
-            if (index == 0L || size == 0L) continue
-            out.add(toFile(index, folder, number, size, duration, fatToEpoch(mtime), storage))
-        }
-        return out
-    }
-
-    private fun toFile(
-        index: Long, folder: Int, number: Int, size: Long, duration: Int, mtime: Long, storage: Int,
-    ): CameraFile {
-        // No name is transmitted, so rebuild DJI's on-card convention: DCIM/100MEDIA/DJI_0554.MP4.
-        // duration == 0 is the only still-vs-video signal in the record; it held for every file in the
-        // capture (the two we can cross-check came back from HTTP as image/jpeg).
-        val ext = if (duration > 0) "MP4" else "JPG"
-        val name = "DJI_%04d.%s".format(number, ext)
-        val path = "DCIM/%dMEDIA/%s".format(folder, name)
-        return CameraFile(
-            path = path,
-            thumbPath = path,
-            fileIndex = index,
-            sizeBytes = size,
-            durationSec = duration,
-            mtimeEpoch = mtime,
-            storage = storage,        // 0 = SD, 1 = internal eMMC, 2 = SSD (from the index's top 2 bits)
-        )
-    }
-
-    /**
-     * Convert the record's `+0` field from a **FAT/DOS packed date+time** to unix seconds (0 if absurd).
-     *
-     * Read as a unix timestamp it lands in 2019 and every file looks seven years old. It's the classic
-     * on-disk FAT encoding instead — which makes sense for something read straight off the card:
-     * ```
-     * high 16 bits (date): year-1980 << 9 | month << 5 | day
-     * low  16 bits (time): hour << 11 | minute << 5 | seconds/2   (2-second resolution)
-     * ```
-     * Ground truth: `0x5CECB9FB` → 2026-07-12 23:15:54, matching the date DJI Fly shows for DJI_0555.
-     * FAT stores wall-clock with no zone, so it's interpreted in the phone's local time — the same
-     * assumption the camera path makes for its filename timestamps.
-     */
-    fun fatToEpoch(v: Long): Long {
-        if (v == 0L) return 0L
-        val date = ((v shr 16) and 0xFFFF).toInt()
-        val time = (v and 0xFFFF).toInt()
-        val year = 1980 + (date shr 9)
-        val month = (date shr 5) and 0x0F
-        val day = date and 0x1F
-        if (month !in 1..12 || day !in 1..31 || year !in 1980..2200) return 0L
-        val cal = java.util.Calendar.getInstance()
-        cal.clear()
-        cal.set(year, month - 1, day, time shr 11, (time shr 5) and 0x3F, (time and 0x1F) * 2)
-        return cal.timeInMillis / 1000L
-    }
+    fun decode(blob: ByteArray): List<CameraFile> =
+        DcfRecords.decodeDrone(blob).map { it.toCameraFile() }
 
     private fun u8(b: ByteArray, i: Int) = b[i].toInt() and 0xFF
     private fun u16(b: ByteArray, i: Int) = u8(b, i) or (u8(b, i + 1) shl 8)
@@ -225,8 +151,8 @@ object DroneManifest {
      * Thumbnail request for one [fileIndex] — subtype `0x20`, replied to as chunked subtype `0x21`.
      * Captured verbatim from DJI Fly (48 bytes); only [seq] and the index vary.
      *
-     * Thumbnails are the one thing a drone does NOT serve over HTTP: `/v1` exposes only the original,
-     * so the grid has to pull these over the datalink. They're ~13–17 kB, arriving in ~1 kB chunks.
+     * Kept as a fallback: `/v1?file_subtype=1` serves the same thumbnail over plain HTTP and
+     * parallelises, whereas this path is one request at a time on the session thread.
      */
     fun thumbQuery(seq: Int, fileIndex: Long): ByteArray {
         val p = ByteArray(48)
