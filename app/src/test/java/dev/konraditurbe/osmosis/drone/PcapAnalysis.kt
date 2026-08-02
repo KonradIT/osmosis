@@ -71,13 +71,20 @@ class PcapAnalysis {
         val f = File(path)
         if (!f.isFile) { println("PcapAnalysis: no such file $path"); return }
 
-        val grams = readUdp(f, 9003)
-        println("=== ${f.name}: ${grams.size} datagrams on udp/9003 ===")
+        // udp/9003 drone, 9004 Osmo 360 / Nano / Pocket 3, 10004 Xtra Edge Pro / Action 5 Pro.
+        val port = (System.getenv("OSMOSIS_PORT") ?: "9003").toInt()
+        val grams = readUdp(f, port)
+        println("=== ${f.name}: ${grams.size} datagrams on udp/$port ===")
 
         val pktTypes = sortedMapOf<Int, Int>()
         val cmdCounts = sortedMapOf<String, Int>()
         val mediaEvents = ArrayList<String>()
         val subtypeSeqs = HashMap<Int, MutableSet<Int>>()
+
+        // Every file-management frame, verbatim. 0x00/0x28 is delete: the request carries the handles
+        // and the trailing selector bytes, the reply its status word. 0x02/0xbf is favourite, which
+        // shares the handle namespace and is the cheapest cross-check that a handle is still valid.
+        val fileOps = ArrayList<String>()
 
         for (g in grams) {
             if (g.payload.size > 6) pktTypes.merge(g.payload[6].toInt() and 0xFF, 1, Int::plus)
@@ -86,6 +93,10 @@ class PcapAnalysis {
             for ((set, cmd, pl) in DumlTransport.scanFrames(g.payload)) {
                 val dir = if (g.fromApp) "->" else "<-"
                 cmdCounts.merge("$dir %02x/%02x".format(set, cmd), 1, Int::plus)
+                if ((set == 0x00 && cmd == 0x28) || (set == 0x02 && cmd == 0xBF)) {
+                    fileOps.add("%7.2fs %s %02x/%02x  %s"
+                        .format(g.tMs / 1000.0, dir, set, cmd, pl.joinToString("") { "%02x".format(it) }))
+                }
                 if (set != 0x00 || (cmd != 0x26 && cmd != 0x27)) continue
                 val env = envelope(pl) ?: continue
                 val (sub, seq, len) = env
@@ -117,7 +128,10 @@ class PcapAnalysis {
             println("  sub=%02x  %d distinct seqs, range %04x..%04x"
                 .format(sub, seqs.size, seqs.min(), seqs.max()))
         }
-        println("\n-- media timeline (queries + reply heads), first 120 --")
+        println("\n-- file management: 0x00/0x28 delete, 0x02/0xbf favourite --")
+        if (fileOps.isEmpty()) println("  (none)") else fileOps.forEach { println("  $it") }
+
+        println("\n-- media timeline (queries + reply heads) --")
         mediaEvents.take(400).forEach { println("  $it") }
         println("\n  … ${mediaEvents.size} media events total")
     }

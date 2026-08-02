@@ -600,11 +600,20 @@ class CameraSession(
      * index `0x40100000 + seq*0x40`. Returns true on the camera's `0x00` ack. Blocks (~re-handshake);
      * call on a background thread, serialized so rapid toggles don't overlap sessions.
      */
-    override fun setFavorite(handle: Long, on: Boolean): Boolean {
-        val payload = java.io.ByteArrayOutputStream().apply {
-            write(byteArrayOf(0x01, 0x01)); write(le32(handle.toInt())); write(le32(favCounter++))
+    /**
+     * Favourite request payload: `01 01 [handle:u32-LE][counter:u32-LE] 00 [on:u8] 00 00 00`.
+     *
+     * Byte-identical to Mimo's, verified against a Nano capture — including the counter, which
+     * increments per request within a session rather than being a constant.
+     */
+    internal fun favoritePayload(handle: Long, counter: Int, on: Boolean): ByteArray =
+        java.io.ByteArrayOutputStream().apply {
+            write(byteArrayOf(0x01, 0x01)); write(le32(handle.toInt())); write(le32(counter))
             write(0x00); write(if (on) 0x01 else 0x00); write(byteArrayOf(0x00, 0x00, 0x00))
         }.toByteArray()
+
+    override fun setFavorite(handle: Long, on: Boolean): Boolean {
+        val payload = favoritePayload(handle, favCounter++, on)
 
         // Try INLINE on the live session first (it holds playback + a faithful seq now — #12). No pause,
         // no re-registration. Fall back to a fresh session only if the camera doesn't answer.
