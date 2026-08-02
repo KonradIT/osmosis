@@ -174,7 +174,13 @@ class CompositeManifestTest {
 
         val photo = files.single { it.ext == "JPG" }
         assertEquals("DCIM/CAM_001/CAM_20251015103957_0015_D.JPG", photo.path)
-        assertEquals("photos carry no marker → no delete handle", 0L, photo.handle)
+        // A photo's marker is `00 fe 19 06` where a video's is `03 ff 19 06` — first byte the media
+        // type, second the star flag — but the handle sits at marker−8 either way. This once asserted
+        // 0 on the belief that photos had no handle; they do, and matching only the video marker made
+        // the scan run past it into the next record's, handing the photo another file's handle.
+        assertEquals(0x400400F0L, photo.handle)
+        assertTrue("photo is deletable", photo.deletable)
+        assertTrue("and its handle is its own, not the video's", photo.handle != video.handle)
         assertEquals(null, photo.resLabel)
     }
 

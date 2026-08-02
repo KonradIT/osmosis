@@ -664,10 +664,19 @@ class DatalinkClient(
                 log("datalink: DELETE(inline) status=0x%04x".format(status))
                 return status
             }
-            log("datalink: DELETE(inline) no reply — fresh-session fallback")
+            // A missing reply does NOT mean a missing delete. Observed on an Xtra Edge Pro: the inline
+            // request landed and the file was removed from the card, only the reply never matched — and
+            // the old fallback then re-sent the same handle to a camera that had already freed it,
+            // which answered 0xd6 ("no such handle") and made a completed delete report as a failure.
+            //
+            // Re-issuing is not merely wrong, it is dangerous: these cameras REUSE file numbers, and a
+            // handle is a function of the number, so the same handle can address a *different, newer*
+            // file minutes later. Verify by listing instead — reading is safe, deleting twice is not.
+            log("datalink: DELETE(inline) no reply — the delete may still have landed; verifying by re-listing")
+            return verifyDeleted(handles)
         }
 
-        // Fallback: fresh registered session (pre-#12 path).
+        // No live session to go inline on: a fresh registered session is the only route (pre-#12 path).
         val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return null
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its current recv and exit
@@ -676,6 +685,36 @@ class DatalinkClient(
             .getOrElse { log("datalink: delete session error: ${it.message}"); null }
         if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
         return status
+    }
+
+    /**
+     * Did [handles] actually go? Re-lists in a fresh session and looks for them.
+     *
+     * `0` (the camera's own OK status) when none of them come back, `null` — "no confirmation" — when
+     * any still does or the listing fails. Deliberately never re-sends the delete; see [deleteFiles].
+     *
+     * Caveat worth knowing: the list is the newest page, so a handle that was already off it reads as
+     * absent. The cost of that is a grid cell disappearing for a file that survived, which a refresh
+     * corrects — as against re-issuing a delete, whose cost is a destroyed file.
+     */
+    private fun verifyDeleted(handles: List<Long>): Int? {
+        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return null
+        keepAliveOn = false
+        Thread.sleep(600)
+        runCatching { sock.close() }
+        val files = runCatching { fetchFileList(ip) }.getOrElse {
+            log("datalink: delete verify — listing failed: ${it.message}"); emptyList()
+        }
+        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (files.isEmpty()) { log("datalink: delete verify — no list, cannot confirm"); return null }
+        val survivors = handles.filter { h -> files.any { it.handle == h } }
+        return if (survivors.isEmpty()) {
+            log("datalink: delete verify — handle(s) gone from the list; the delete landed")
+            0
+        } else {
+            log("datalink: delete verify — %d handle(s) still listed; NOT re-issuing".format(survivors.size))
+            null
+        }
     }
 
     /**
@@ -887,12 +926,34 @@ class DatalinkClient(
      * different list format — reaches [parseFlat]'s loose scrape, and we dump the bytes so that
      * unknown layout can be cracked (paths/filenames only — no credentials or coordinates).
      */
+    /**
+     * Shout if two files claim the same delete handle.
+     *
+     * `0x00/0x28` addresses a file by handle, not by path, so a duplicated handle does not fail — it
+     * deletes the *other* file and the grid then drops the cell that was asked for, which reads as
+     * success. That is precisely what a photo inheriting the next video's handle used to do, so this is
+     * the one invariant worth asserting at runtime rather than only in a test.
+     *
+     * Silent when healthy. Small lists are dumped in full: on a controlled 4-file card the handles are
+     * the whole point, and the volume is trivial.
+     */
+    private fun warnOnHandleCollisions(files: List<CameraFile>) {
+        val dupes = files.filter { it.handle != 0L }.groupBy { it.handle }.filter { it.value.size > 1 }
+        for ((h, group) in dupes) {
+            log("datalink: ⚠ HANDLE COLLISION 0x%08x shared by %s".format(h, group.joinToString { it.name }))
+        }
+        if (files.size <= 12) {
+            for (f in files) log("datalink:   %-44s handle=0x%08x".format(f.name.take(44), f.handle))
+        }
+    }
+
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
         val comp = decodeComposite(bytes)
         if (comp.isNotEmpty()) {
             log("datalink: decoded ${comp.size} CompositePack records " +
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
+            warnOnHandleCollisions(comp)
             return comp
         }
         log("datalink: no CompositePack records — dumping manifest, falling back to flat scrape")
@@ -1051,13 +1112,22 @@ class DatalinkClient(
             n++
         }
 
-        // Video handle/size hang off the marker `03 ff 19 06` (at head+8) within the record; photos
-        // have none → handle 0 / size 0, matching the legacy decoder.
+        // Every record — photo as well as video — hangs its handle off a marker at head+8. The marker's
+        // first byte is the media type (`03` video, `00` photo) and its second is the star flag
+        // (`ff` clear, `fe` set), so the four bytes run `[03|00] [ff|fe] 19 06`.
+        //
+        // This used to match `03 ff 19 06` only, on the belief that photos carried no handle. They do —
+        // and because the scan runs forward, failing to match a photo's own marker meant running past it
+        // into the NEXT record's, so a photo was handed a neighbouring file's handle. `0x00/0x28` takes
+        // a handle rather than a path, so that does not fail: it deletes the wrong file. Verified
+        // against Mimo manifests from a real Nano and Xtra — see PhotoHandleTest.
         var head = -1
         var m = lo
         while (m < hi - 4) {
-            if (bytes[m] == 0x03.toByte() && bytes[m + 1] == 0xFF.toByte() &&
-                bytes[m + 2] == 0x19.toByte() && bytes[m + 3] == 0x06.toByte()
+            val kind = bytes[m].toInt() and 0xFF
+            val star = bytes[m + 1].toInt() and 0xFF
+            if ((kind == 0x03 || kind == 0x00) && (star == 0xFF || star == 0xFE) &&
+                bytes[m + 2] == 0x19.toByte() && bytes[m + 3] == 0x06.toByte() && m >= 8
             ) { head = m - 8; break }
             m++
         }
