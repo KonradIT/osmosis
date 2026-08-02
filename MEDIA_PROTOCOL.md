@@ -647,3 +647,187 @@ Mimo does **not** send ConnectToWiFi (#25) anywhere in this flow.
 - Cmd Set / ID: `0x07` / `0x0c`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][6-byte MAC]`
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070ca7cc>
+
+---
+
+## DJI Drone QuickTransfer media offload
+
+> Following is applicable to **Mavic 3, Mavic 3 Classic, Mavic 3 Pro** for now. Other drones to be confirmed.
+
+A drone runs the same DUML stack as an Osmo, with four differences that break a camera client outright:
+
+| | Osmo camera | DJI drone |
+|---|---|---|
+| Pairing token | `osmo` | **`DJI FLY`** — any other token pairs but yields **no WiFi creds** |
+| Datalink | UDP `9004` + TCP-7001 poke (Xtra: `10004`) | **UDP `9003`, no poke**, bind local port `9003` (symmetric) |
+| Session | handshake → registration → commands | handshake → **`0x51` session-open** ([§27](#27-session-open-0x51--required-before-anything-else)) |
+| Media addressing | paths, `/v2?storage=N&path=…` | **DCF indices**, `/v1?file_index=…` ([§29](#29-http-media-api-v1--dcf-indexed)) |
+| Registration | `0x00/0x81`, `0x00/0x88`, `0x03/0xda`, param subs | **none** — go straight to commands |
+
+Addressing byte is unchanged: App `0x02`, Camera `0x01`. The `0x51` channel uses its own endpoints
+(`0xee` app, `0xe9` drone) outside the `(id<<5)|type` scheme.
+
+### 27. Session open (`0x51`) — required before anything else
+
+A drone answers **no command at all** until this completes. Before it, it emits ~2 DUML frames/s of empty
+keepalive; one second after, ~1200 frames/s and every command works.
+
+- Cmd Set: `0x51`
+- Cmd ID: `0x02` open · `0x08` challenge · `0x06` identity · `0x13` beacon
+- Dir / transport: App(`0xee`) ⇄ Drone(`0xe9`), datalink
+- Wrapper: every `0x51` frame is an **inner DUML frame + 22 trailing bytes**, carried as the payload of an outer `0x51/0x01` frame (target `0xe93b`)
+
+| step | dir | frame | flags | inner payload |
+|---|---|---|---|---|
+| 1 | → | `0x51/0x13` | `0x00` | app identity (answers the beacon) |
+| 2 | → | `0x51/0x02` | `0x40` | `05 01 04 01 00` |
+| 3 | ← | `0x51/0x08` | `0x40` | drone serial + app id (challenge) |
+| 4 | → | `0x51/0x08` | `0xC0` | `00 00 11 <serial:20> 00` |
+| 5 | → | `0x51/0x06` | `0x40` | `04 02 00 <appid:19> 00 00 00 11 <serial:20> 00` |
+| 6 | ←→ | `0x51/0x06` | `0xC0` | serial echo, both directions |
+
+- **Serial** = 20 ASCII bytes after the `0x11` tag in the drone's own `0x51/0x13` beacon.
+- **Trailing bytes** `39fdb2ae 02 <ctr> 00 00 00 79102e9b 01 00×8` — **`ctr` (byte 5) must increase on every `0x51` frame sent**. A repeated or decreasing value is dropped as a replay, with no reply at all.
+- **Outer DUML message id** is a per-frame counter from `1`, not a constant.
+- DUML example (`0x51/0x02` open, outer frame): <https://b3yond.d3vl.com/duml/#553504683be90100005101551204c7eee97c004051020501040100619639fdb2ae020100000079102e9b010000000000000000f340>
+
+Two fields that look like flow control but are not: the routing header's `r0-1` on a **received** packet
+is not a running ack (it repeats the handshake channel and only moves when a reply lands), and the
+sequence window is not enforced — the reference app runs ~1600 packets ahead of it.
+
+### 28. Get media list (drone)
+
+- Cmd Set: `0x00`
+- Cmd ID: `0x26`  (response `0x00/0x27`)
+- Dir / transport: App → Camera(`0x01`), datalink
+- Payload (newest page): `4a002110 0c00 00000000 01000000 2d 000d0100 ffffffffffffffff 000100000000`
+- Response: chunked `0x00/0x27` frames, subtype `0x01`
+- DUML example: <https://b3yond.d3vl.com/duml/#552e04a7020177c94000264a0021100c0000000000010000002d000d0100ffffffffffffffff000100000000c085>
+
+The `0x4a` envelope (both directions, all subtypes):
+
+| off | size | field |
+|---:|---|---|
+| +0 | u8 | `0x4a` |
+| +1 | u8 | subtype — `0x00` list query · `0x01` list reply · `0x20` thumb query · `0x21` thumb reply |
+| +2 | u16 | low 12 bits = this frame's payload length; bit `0x1000` = **final chunk** |
+| +4 | u16 | seq (reply echoes the query's) |
+| +6 | u32 | chunk index |
+| +10 | u32 | *(list reply chunk 0 only)* total file count |
+| +14 | u32 | *(list reply chunk 0 only)* total manifest bytes |
+
+Reading `+2` as a `u8` parses short frames and silently corrupts every long one.
+
+**Reassembly.** A reply spans several 1472-byte packets and single frames straddle packet boundaries.
+The manifest rides `pktType 0x03`; strip each packet's **8-byte transport + 12-byte routing header**
+before concatenating, or every straddling chunk fails CRC and disappears.
+
+- Query byte 14 (`0x2d` = 45) is the page size.
+- **Paging cursor** = query bytes 10–13, `u32-LE`. `1` = newest page; an older page passes the **oldest `file_index` of the page just received**, which the drone replays as that page's first record — dedup by index. No playback mode, no fresh session.
+
+#### Record — fixed 94 bytes, newest first
+
+| off | size | field |
+|---:|---|---|
+| +0 | u32 | mtime, **FAT/DOS packed** (not unix) |
+| +4 | u32 | file size, bytes |
+| +8 | u32 | **`file_index`** — packed, see [§29](#29-http-media-api-v1--dcf-indexed) |
+| +12 | u16 | duration, whole seconds (`0` = still) |
+
+No filename is transmitted; it is reconstructed from the index. Fields past `+14` are unmapped.
+
+```python
+import struct, datetime
+
+def fat_to_datetime(v):                      # +0 is FAT, not unix
+    date, time = v >> 16, v & 0xFFFF
+    return datetime.datetime(
+        1980 + (date >> 9), (date >> 5) & 0x0F, date & 0x1F,
+        time >> 11, (time >> 5) & 0x3F, (time & 0x1F) * 2)   # seconds stored /2
+
+def decode_manifest(blob):                   # blob = chunks concatenated, envelopes stripped
+    for off in range(0, len(blob) - 93, 94):
+        mtime, size, index, dur = struct.unpack_from("<IIIH", blob, off)
+        storage, dir_index, file_no = index >> 30, (index >> 16) & 0x3FFF, index & 0xFFFF
+        if not (100 <= dir_index <= 999 and file_no):
+            continue                         # phase lost — a chunk is missing
+        yield dict(index=index, storage=storage,
+                   name="DJI_%04d.%s" % (file_no, "MP4" if dur else "JPG"),
+                   path="DCIM/%dMEDIA/DJI_%04d" % (dir_index, file_no),
+                   size=size, duration=dur, mtime=fat_to_datetime(mtime))
+```
+
+### 29. HTTP media API (`/v1`) — DCF indexed
+
+`lighttpd/1.4.55`, TCP **80**, no auth. Response carries `Accept-Ranges: bytes`, `Content-Range` and a
+`Last-Modified` that matches the manifest's FAT mtime.
+
+```
+GET /v1?file_index=<u32>&file_subtype=<S>&file_seg_subindex=<G>
+```
+
+All three parameters are expected — some models close the connection when one is missing.
+`file_seg_subindex` selects a part of a segmented recording; `0` = whole file.
+
+**`file_index` is a packed 32-bit field**, not a flat number:
+
+| bits | width | field |
+|---|---|---|
+| 31:30 | 2 | storage id |
+| 29:16 | 14 | DCF directory (`100` → `100MEDIA`) |
+| 15:0 | 16 | DCF file number (`554` → `DJI_0554`) |
+
+| storage id | medium |
+|---:|---|
+| 0 | SD card |
+| 1 | internal eMMC |
+| 2 | NVMe SSD |
+| 3 | reserved / unset |
+
+| `file_subtype` | name | content | on-card path |
+|---:|---|---|---|
+| 0 | ORG | original full-res | `DCIM/<dir>MEDIA/DJI_<n>` |
+| 1 | THM | thumbnail | `MISC/THM/<dir>/DJI_<n>` |
+| 2 | SCR | screen-res render | `MISC/THM/<dir>/DJI_<n>` |
+| 17 | AIS | sensor data | `MISC/THM/<dir>/DJI_<n>` |
+| 18 | LRF | low-res proxy video | `DCIM/<dir>MEDIA/DJI_<n>` |
+
+Extensions are probed in order (`.JPG .jpg .MP4 .mp4 .MOV .mov .DNG .dng` for ORG; `.LRF/.lrf`,
+`.THM/.thm`, `.SCR/.scr` for the rest), so the URL carries no extension.
+
+The LRF proxy is ~7× smaller than the original (38.8 MB vs 273 MB on a 30 s clip) and decodes at
+1280×720 — use it for preview and scrubbing, ORG only for download.
+
+```python
+def pack_file_index(storage, dir_index, file_no):
+    return (storage << 30) | (dir_index << 16) | file_no
+
+ORG, THM, SCR, AIS, LRF = 0, 1, 2, 17, 18
+
+def url(index, subtype=ORG, seg=0):
+    return "/v1?file_index=%d&file_subtype=%d&file_seg_subindex=%d" % (index, subtype, seg)
+
+url(pack_file_index(0, 100, 554), LRF)   # /v1?file_index=6554154&file_subtype=18&file_seg_subindex=0
+```
+
+### 30. Drone status pushes
+
+Pushes are wrapped inside `0x51/0x01` tunnel frames — a top-level frame scan steps over them; scan
+byte-at-a-time with both CRCs verified. Field layouts are **identical to the camera frames**
+([§19](#19-sd--storage-both-stores-in-one-frame), [§20](#20-battery--power-also-the-only-place-the-dock-reports-in)):
+
+| Cmd Set / ID | field | offset |
+|---|---|---|
+| `0x0d`/`0x02` | battery percent | `u8 @ 20` |
+| `0x0d`/`0x02` | pack voltage, mV | `u16-LE @ 1` |
+| `0x0d`/`0x02` | current, mA (signed, −ve = discharging) | `i32-LE @ 5` |
+| `0x0d`/`0x03` | per-cell voltages, mV | `u16-LE × 4 @ 2` |
+| `0x02`/`0xdc` | SD total / free, MiB | `u32-LE @ 6` / `@ 10` |
+| `0x02`/`0xdc` | internal total / free, MiB | `u32-LE @ 24` / `@ 28` |
+| `0x02`/`0x80` | active store total / free, MiB | `u32-LE @ 5` / `@ 9` |
+
+### 31. Drone uplink stream
+
+The reference app sends `0x02/0x82` (42 B), `0x02/0xdc` (40 B) and `0x04/0x1c` (`38`) at ~860/s for the
+whole session — 95% of its uplink — addressed to `0x1c01`/`0x1c04` with sender `0x01`. Not required to
+open the session or to browse media.
