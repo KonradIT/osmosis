@@ -6,18 +6,16 @@ import dev.konraditurbe.osmosis.drone.DroneManifest
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.duml.DjiMessage
 import dev.konraditurbe.osmosis.duml.OsmoCommands
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
-import kotlin.random.Random
 
 /**
- * DUML-over-UDP datalink client. Handshakes, registers, requests the media file list (0x00/0x26),
- * and parses the DJI_/CAM_ paths out of the 0x00/0x27 response (ported from osmo-download's
- * file_list.py). Wire layers per packet: [8B udp hdr][12B routing hdr][DUML frame]; the app's UDP
- * sequence must start at (camera_channel + 8), learned from the camera's heartbeat routing header.
+ * The DUML session: handshake, registration, the media file list (`0x00/0x26`) and every per-file
+ * command, for both an Osmo camera and a DJI drone.
+ *
+ * **This class decides what to say; [DumlTransport] owns how it goes over the wire** — socket, session
+ * id, sequencing and framing. The `sendDuml`/`recvAll`/`scanFrames` members here are thin pass-throughs
+ * to it, so the protocol call sites below read as protocol rather than as plumbing.
  *
  * The datalink UDP [port] differs by camera family:
  *  - Osmo 360 / Nano / Pocket 3 = 9004, and need a TCP-7001 poke to arm it ([tcpPoke] = true).
@@ -44,14 +42,12 @@ class DatalinkClient(
 
     private val VIDEO_EXTS = setOf("MP4", "MOV", "OSV", "INSV")
 
-    private var sessionId = 0
-    private var udpSeq = 0
-    private var dumlSeq = 0xA000
-    private var cmdCounter = 0
-    private var lastCamSeq = 0xB887
+    /**
+     * The datalink itself — socket, session, sequencing, framing. This class owns *what to say*; the
+     * transport owns *how it goes over the wire*. See [DumlTransport].
+     */
+    private val tx = DumlTransport(log, port, bindLocalPort = isDrone, droneRouting = isDrone)
 
-    private lateinit var sock: DatagramSocket
-    private lateinit var cam: InetAddress
     @Volatile private var keepAliveOn = false
 
     /** Set to receive live camera status (battery/storage/firmware) parsed from status pushes. */
@@ -91,25 +87,13 @@ class DatalinkClient(
      */
     private fun openAndRegister(ip: String, subscribe: Boolean = true): Boolean {
         handshakeOk = false
-        cam = InetAddress.getByName(ip)
-        // DJI Fly talks to the drone SYMMETRICALLY — every one of the 138k packets in the Mavic capture
-        // is 9003→9003, i.e. it binds the same port it sends to. A camera answers an ephemeral source
-        // port happily, so we never needed this; if the drone instead routes command replies by port,
-        // ours land nowhere. That matches the symptom exactly: the session comes up and streams beacons
-        // (which follow the datagram back) while every command goes unanswered.
-        sock = if (isDrone) {
-            runCatching { DatagramSocket(port) }
-                .onFailure { log("datalink: local udp/$port unavailable (${it.message}) — falling back") }
-                .getOrElse { DatagramSocket() }
-        } else DatagramSocket()
-        sock.soTimeout = 200
-        if (isDrone) log("datalink: local port ${sock.localPort} (drone expects $port)")
-        sessionId = Random.nextInt(0x1000, 0xFFFE)
+        tx.open(ip)
+        if (isDrone) log("datalink: local port ${tx.localPort} (drone expects $port)")
 
         if (tcpPoke) {
             runCatching {
                 Socket().use { s ->
-                    s.connect(InetSocketAddress(cam, 7001), 1200)
+                    s.connect(InetSocketAddress(tx.peerAddress, 7001), 1200)
                     s.getOutputStream().write(OsmoCommands.setPairingPin("osmo"))
                     s.getOutputStream().flush()
                     Thread.sleep(400)
@@ -117,22 +101,14 @@ class DatalinkClient(
             }
         }
 
-        var ok = false
-        for (attempt in 0 until 20) {
-            sendRaw(0x00, handshake)
-            for (r in recvAll(350)) if (r.size >= 8 && (r[6].toInt() and 0xFF) == 0x00) {
-                ok = true
-                // We only ever checked that *something* typed 0x00 came back, never what it said. On a
-                // drone that is too weak: if it answers with a session id other than the one we chose,
-                // we would keep stamping ours on every packet and it would drop them all — which is
-                // exactly the observed failure (handshake fine, beacons flowing, no command accepted).
-                if (isDrone) log("datalink: handshake reply ${r.copyOfRange(0, minOf(16, r.size))
-                    .joinToString("") { "%02x".format(it) }} (we sent session=0x%04x)".format(sessionId))
-                break
-            }
-            if (ok) break
-        }
-        if (!ok) { log("datalink: handshake FAILED on udp/$port"); runCatching { sock.close() }; return false }
+        val reply = tx.handshake(handshake)
+        if (reply == null) { log("datalink: handshake FAILED on udp/$port"); tx.close(); return false }
+        // Log what the drone actually said, not just that *something* typed 0x00 came back: if it answers
+        // with a session id other than the one we chose, we would keep stamping ours on every packet and
+        // it would drop them all — which looks exactly like the observed failure (handshake fine, beacons
+        // flowing, no command accepted).
+        if (isDrone) log("datalink: handshake reply ${reply.copyOfRange(0, minOf(16, reply.size))
+            .joinToString("") { "%02x".format(it) }} (we sent session=0x%04x)".format(tx.sessionId))
         handshakeOk = true
         log("datalink: handshake OK on udp/$port")
         onFetchProgress?.invoke(8)
@@ -147,9 +123,9 @@ class DatalinkClient(
             }
             sendAck()
         }
-        udpSeq = (lastCamSeq + 8) and 0xFFFF
+        tx.syncSeqToPeerChannel()
         onFetchProgress?.invoke(16)
-        log("datalink: session=0x%04x channel=0x%04x udpSeq=0x%04x".format(sessionId, lastCamSeq, udpSeq))
+        log("datalink: session=0x%04x channel=0x%04x".format(tx.sessionId, tx.cameraChannel))
 
         // A drone gets NO camera registration: DJI Fly never sends 0x00/0x81, 0x00/0x88, 0x03/0xda or
         // the param subscriptions to a Mavic — after the handshake it goes straight to real commands.
@@ -327,14 +303,14 @@ class DatalinkClient(
      * moves means we're being heard, and one that sits still means every command is being dropped.
      */
     private fun runDronePrelude() {
-        val before = lastCamSeq
+        val before = tx.cameraChannel
         for (c in dronePrelude) {
             sendDuml(c.set, c.cmd, hex(c.payload), receiverType = c.rType, receiverId = c.rId)
             dronePump(110)   // the uplink must not stall while we walk the prelude
         }
         sendAck()
         log("datalink: drone prelude — %d cmds, r0-1 0x%04x → 0x%04x".format(
-            dronePrelude.size, before, lastCamSeq))
+            dronePrelude.size, before, tx.cameraChannel))
     }
 
     /**
@@ -483,38 +459,6 @@ class DatalinkClient(
      * id, and the drone had every reason to treat the session-open as a replay and drop it. It answered
      * only beacons and never once challenged us back.
      */
-    private var msgId51 = 0
-    private var seq51 = 0
-
-    /**
-     * Send a `0x51`-channel frame, stamping BOTH of its sequence fields fresh.
-     *
-     * The outer wrapper carries 22 trailing bytes after the inner frame, and `trailing[5]` is a counter
-     * (`…39fdb2ae 02 NN …`). We replay captured frames verbatim, so those counters arrive frozen at
-     * whatever DJI Fly used — the identity beacon at `0x0a`, the session-open at `0x01`. Sent in our
-     * order that counter goes BACKWARDS, which is exactly the shape a replay check rejects, and the
-     * drone never once challenged our open. Re-stamping it monotonically costs nothing and removes the
-     * doubt. It sits outside the inner frame, so the inner CRC is untouched.
-     */
-    private fun sendDumlRaw(target: Int, set: Int, cmd: Int, payload: ByteArray, cmdType: Int = 0) {
-        cmdCounter++
-        reseqForDrone()
-        var pl = payload
-        if (set == 0x51 && pl.size >= 13 && (pl[0].toInt() and 0xFF) == 0x55) {
-            val innerLen = (pl[1].toInt() and 0xFF) or ((pl[2].toInt() and 0x03) shl 8)
-            if (innerLen in 13..pl.size && pl.size >= innerLen + 6) {
-                pl = pl.copyOf()
-                pl[innerLen + 5] = (++seq51 and 0xFF).toByte()
-            }
-        }
-        val rt = routingHeader()
-        val type = (cmdType shl 5) or (set shl 8) or (cmd shl 16)
-        val id = if (set == 0x51) (++msgId51 and 0xFFFF) else 0x000A
-        val duml = DjiMessage(target, id, type, pl).encode()
-        val pkt = udpHeader(0x05, rt.size + duml.size) + rt + duml
-        if (sendPacket(pkt)) advance()
-    }
-
     /** Handshake + register + list, for a DJI drone. Socket stays open on success, as for a camera. */
     fun fetchDroneFileList(ip: String): List<CameraFile> {
         if (!openAndRegister(ip)) return emptyList()
@@ -565,7 +509,7 @@ class DatalinkClient(
         sendDuml(0x00, 0x26, DroneManifest.listQuery(seq, cursor), receiverType = 0x01, receiverId = 0)
         // Verbatim, so it can be diffed against DJI Fly's working query (capture f2229):
         //   4280ea9d701505d5 4815701500000000c601604d 552e04a7020177c94000264a0021…
-        log("datalink: drone query pkt ${lastSent?.joinToString("") { "%02x".format(it) }}")
+        log("datalink: drone query pkt ${tx.lastSentPacket?.joinToString("") { "%02x".format(it) }}")
         for (batch in 0 until 14) {
             dronePump(600, blob, manifestStream = true)  // uplink alive + reassembled data stream
             sendAck()
@@ -611,37 +555,6 @@ class DatalinkClient(
     }
 
     /**
-     * Every DUML frame in [raw] as `(cmdSet, cmdId, payload)`, both CRCs verified.
-     *
-     * Two things this must get right that a naive scan doesn't. **Length is 10 bits + a 6-bit version**
-     * packed LE into bytes 1–2, so a frame over 255 bytes has byte2 `0x05`/`0x06`/`0x07`, not `0x04` —
-     * matching only `0x04` hides every long frame, which is precisely where the drone manifest lives.
-     * And it advances **one byte at a time, not by the frame length**: the drone wraps some replies
-     * inside a `0x51/0x01` tunnel frame, and skipping the outer frame skips the payload with it.
-     * Verifying both CRCs is what makes byte-at-a-time scanning safe from false positives.
-     */
-    private fun scanFrames(raw: ByteArray): List<Triple<Int, Int, ByteArray>> {
-        val out = ArrayList<Triple<Int, Int, ByteArray>>()
-        var i = 0
-        while (i + 13 <= raw.size) {
-            if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
-            val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-            val ver = (raw[i + 2].toInt() and 0xFF) shr 2
-            if (ver != 1 || len < 13 || i + len > raw.size) { i++; continue }
-            if (DjiCrc.computeCrc8(raw.copyOfRange(i, i + 3)) != (raw[i + 3].toInt() and 0xFF)) { i++; continue }
-            val body = raw.copyOfRange(i, i + len - 2)
-            val want = (raw[i + len - 2].toInt() and 0xFF) or ((raw[i + len - 1].toInt() and 0xFF) shl 8)
-            if (DjiCrc.computeCrc16(body) != want) { i++; continue }
-            out.add(Triple(
-                raw[i + 9].toInt() and 0xFF, raw[i + 10].toInt() and 0xFF,
-                raw.copyOfRange(i + 11, i + len - 2),
-            ))
-            i++
-        }
-        return out
-    }
-
-    /**
      * Fetch the next OLDER page for the grid's infinite scroll, returning ONLY the newly-seen files
      * (empty when exhausted). Pagination (from a DJI-Mimo pcap): enter PLAYBACK MODE (0x02/0x0c=01 01 00
      * 01), then per page query(cursor=1) → trigger → query(cursor=[oldest video handle], 4-byte LE at
@@ -670,13 +583,13 @@ class DatalinkClient(
         }
 
         // Fallback: fresh registered session (pre-#12 path).
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return emptyList()
+        val ip = tx.peerIp ?: return emptyList()
         keepAliveOn = false
         Thread.sleep(600)                 // let the keep-alive loop finish its current recv and exit
-        runCatching { sock.close() }      // free udp/$port for the fresh session
+        tx.close()                        // free udp/$port for the fresh session
         val fresh = runCatching { freshSessionPage(ip) }
             .getOrElse { log("datalink: next-page session error: ${it.message}"); emptyList() }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return fresh
     }
 
@@ -714,7 +627,7 @@ class DatalinkClient(
      */
     fun expandBurstGroup(lead: CameraFile): List<CameraFile> {
         val base = lead.groupKey ?: return listOf(lead)
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return listOf(lead)
+        val ip = tx.peerIp ?: return listOf(lead)
         // Handle namespace differs per camera AND per store, so use the manifest-fitted handle (see
         // withCmdHandles) — a hardcoded Nano formula returned 0 frames on the Xtra.
         val handle = lead.cmdHandle.takeIf { it != 0L } ?: return listOf(lead)
@@ -733,10 +646,10 @@ class DatalinkClient(
         // Fallback: fresh registered session (pre-#12 path).
         keepAliveOn = false
         Thread.sleep(600)                 // let the keep-alive loop exit before we take the socket
-        runCatching { sock.close() }
+        tx.close()
         val frames = runCatching { freshSessionExpand(ip, handle, base) }
             .getOrElse { log("datalink: group-expand error: ${it.message}"); emptyList() }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return frames.takeIf { it.size > 1 } ?: listOf(lead)
     }
 
@@ -800,13 +713,13 @@ class DatalinkClient(
             }
             log("datalink: highlights(inline) 0x${handle.toString(16)} — no reply, retrying in a fresh session")
         }
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return emptyList()
+        val ip = tx.peerIp ?: return emptyList()
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its recv and exit
-        runCatching { sock.close() }     // free udp/$port for the fresh session
+        tx.close()                       // free udp/$port for the fresh session
         val marks = runCatching { freshSessionHighlights(ip, handle) }
             .getOrElse { log("datalink: highlights session error: ${it.message}"); emptyList() }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return marks
     }
 
@@ -912,29 +825,6 @@ class DatalinkClient(
         cmdQueue.add(c)
         while (!c.done && System.currentTimeMillis() < c.deadlineMs + 600) runCatching { Thread.sleep(30) }
         return c.reply
-    }
-
-    /**
-     * First CRC-valid DUML **reply** frame with the given cmdset/cmd across [datagrams] → its payload,
-     * else null. Skips the empty-payload transport ACK the camera sends before the real reply (that ACK
-     * is what a naive "first frame" match grabs, making a landed command look like a failure).
-     */
-    private fun findReply(datagrams: List<ByteArray>, set: Int, cmd: Int): ByteArray? {
-        for (d in datagrams) {
-            var i = 0
-            while (i + 11 <= d.size) {
-                if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
-                val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-                if (len < 13 || i + len > d.size) { i++; continue }
-                if (DjiCrc.computeCrc8(d.copyOfRange(i, i + 3)) != (d[i + 3].toInt() and 0xFF)) { i++; continue }
-                if ((d[i + 9].toInt() and 0xFF) == set && (d[i + 10].toInt() and 0xFF) == cmd) {
-                    val payload = d.copyOfRange(i + 11, i + len - 2)
-                    if (payload.isNotEmpty()) return payload   // skip the empty transport ACK
-                }
-                i += len
-            }
-        }
-        return null
     }
 
     /**
@@ -1251,13 +1141,13 @@ class DatalinkClient(
         }
 
         // No live session to go inline on: a fresh registered session is the only route (pre-#12 path).
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return null
+        val ip = tx.peerIp ?: return null
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its current recv and exit
-        runCatching { sock.close() }     // free udp/$port for the fresh session
+        tx.close()                       // free udp/$port for the fresh session
         val status = runCatching { freshSessionDelete(ip, payload) }
             .getOrElse { log("datalink: delete session error: ${it.message}"); null }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return status
     }
 
@@ -1272,14 +1162,14 @@ class DatalinkClient(
      * corrects — as against re-issuing a delete, whose cost is a destroyed file.
      */
     private fun verifyDeleted(handles: List<Long>): Int? {
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return null
+        val ip = tx.peerIp ?: return null
         keepAliveOn = false
         Thread.sleep(600)
-        runCatching { sock.close() }
+        tx.close()
         val files = runCatching { fetchFileList(ip) }.getOrElse {
             log("datalink: delete verify — listing failed: ${it.message}"); emptyList()
         }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         if (files.isEmpty()) { log("datalink: delete verify — no list, cannot confirm"); return null }
         val survivors = handles.filter { h -> files.any { it.handle == h } }
         return if (survivors.isEmpty()) {
@@ -1357,13 +1247,13 @@ class DatalinkClient(
         }
 
         // Fallback: fresh registered session (the pre-#12 path), kept until inline is proven everywhere.
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return false
+        val ip = tx.peerIp ?: return false
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its recv and exit
-        runCatching { sock.close() }     // free udp/$port for the fresh session
+        tx.close()                       // free udp/$port for the fresh session
         val ok = runCatching { freshSessionFavorite(ip, handle, on) }
             .getOrElse { log("datalink: favorite session error: ${it.message}"); false }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return ok
     }
 
@@ -1392,29 +1282,9 @@ class DatalinkClient(
         return status == 0
     }
 
-    /** Scan a datagram for a DUML response frame with [set]/[id] and return its leading status word. */
-    private fun findRespStatus(d: ByteArray, set: Int, id: Int): Int? {
-        var i = 0
-        while (i + 13 <= d.size) {
-            if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
-            val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-            if (len < 13 || i + len > d.size) { i++; continue }
-            if ((d[i + 9].toInt() and 0xFF) == set && (d[i + 10].toInt() and 0xFF) == id) {
-                val ps = i + 11; val pe = i + len - 2
-                return when {
-                    pe - ps >= 2 -> (d[ps].toInt() and 0xFF) or ((d[ps + 1].toInt() and 0xFF) shl 8)
-                    pe - ps >= 1 -> d[ps].toInt() and 0xFF
-                    else -> 0
-                }
-            }
-            i += len
-        }
-        return null
-    }
-
     fun close() {
         keepAliveOn = false
-        runCatching { sock.close() }
+        tx.close()
     }
 
     /**
@@ -1933,64 +1803,6 @@ class DatalinkClient(
         return -1
     }
 
-    // ---- packet builders (mirror file_list.py) ------------------------------
-
-    private fun udpHeader(pktType: Int, payloadLen: Int): ByteArray {
-        val total = 8 + payloadLen
-        val w0 = (1 shl 15) or (total and 0x3FFF)
-        val b = byteArrayOf(
-            (w0 and 0xFF).toByte(), ((w0 shr 8) and 0xFF).toByte(),
-            (sessionId and 0xFF).toByte(), ((sessionId shr 8) and 0xFF).toByte(),
-            (udpSeq and 0xFF).toByte(), ((udpSeq shr 8) and 0xFF).toByte(),
-            pktType.toByte(),
-        )
-        var xor = 0
-        for (x in b) xor = xor xor (x.toInt() and 0xFF)
-        return b + xor.toByte()
-    }
-
-    // Command routing header (pkt 0x05). The datalink is a sliding-window transport: every packet carries
-    // `[r8-9 = ack of the peer's seq][r10-11 = my own seq]`, uhSeq = my own seq. Both fields for a COMMAND
-    // live in OUR OWN command-seq space — r10-11 is this command's seq, r8-9 is the previous one (the last
-    // seq the camera has echoed back, since we recvAll between sends). Ground-truthed from Mimo/Xtra pcaps.
-    //
-    // The old code put `lastCamSeq` in r8-9 — the camera's TELEMETRY seq, which recvAll refreshes from every
-    // received packet. Telemetry runs ~10× faster than our commands and wraps to a different phase, so r8-9
-    // drifted far from r10-11 and the receiver window silently dropped our WRITES (reads were lenient).
-    // That single divergence is what forced a fresh registered session for every delete/favorite/page/burst.
-    //
-    // DRONES INVERT THIS. On a camera, r8-9 of a *received* packet is the camera's own telemetry seq,
-    // which is why leaking it into our ack was the #12 bug. On a Mavic those same bytes carry the drone's
-    // ECHO OF OUR SEQ, so the correct ack is exactly that echo — and it can lag by several packets:
-    // DJI Fly's media query went out with seq=0x1570 against ack=0x1548, i.e. five outstanding, where the
-    // camera's fixed `-8` would have said 0x1568. A wrong ack is silently fatal in the same asymmetric way
-    // as #12 — reads and keepalive keep flowing, WRITES get dropped by the receive window — which is
-    // exactly what the drone did to us: a healthy session that answered no command at all.
-    // Byte 10 is 0x60 on the commands DJI Fly sends the Mavic (it also uses 0x00/0x40 elsewhere).
-    private fun routingHeader(): ByteArray {
-        // CORRECTION: an earlier revision set the drone ack to `lastCamSeq`, on the theory that a drone
-        // echoes our seq back in r0-1. It does not — it repeats the handshake CHANNEL forever, so the
-        // ack froze at 0x87b8 while our seq ran away with the uplink stream: measured 564 packets stale
-        // against DJI Fly's 2. Both camera and drone want OUR OWN previous seq here.
-        val ack = (udpSeq - 8) and 0xFFFF
-        return byteArrayOf(
-            (ack and 0xFF).toByte(), ((ack shr 8) and 0xFF).toByte(),
-            (udpSeq and 0xFF).toByte(), ((udpSeq shr 8) and 0xFF).toByte(),
-            0, 0, 0, 0, (cmdCounter and 0xFF).toByte(), 0x01,
-            (if (isDrone) 0x60 else 0x00).toByte(), 0x00,
-        )
-    }
-
-    private fun advance() { udpSeq = (udpSeq + 8) and 0xFFFF }
-
-    /**
-     * No-op now. This used to pin our seq to `lastCamSeq + 8`, from the same wrong premise as the ack
-     * above — that the drone's r0-1 tracks us. It doesn't, so pinning to it would peg every packet to
-     * the handshake channel forever. DJI Fly free-runs its seq (its ack simply trails by a couple of
-     * packets), so we do too, and the window is not enforced regardless.
-     */
-    private fun reseqForDrone() = Unit
-
     @Volatile private var uplinkRunning = false
 
     /**
@@ -2070,72 +1882,34 @@ class DatalinkClient(
         }
     }
 
-    /** Send a UDP packet, swallowing a send failure. When the camera AP drops or the WiFi network is
-     *  unbound mid-session (e.g. teardown, or the phone losing the AP) sock.send throws ENETUNREACH —
-     *  that's expected on a dying link and must NEVER crash the keep-alive thread (it once did). */
-    private fun sendPacket(pkt: ByteArray): Boolean {
-        lastSent = pkt   // kept so the drone path can log a query verbatim and diff it against DJI Fly's
-        return runCatching { sock.send(DatagramPacket(pkt, pkt.size, cam, port)) }.isSuccess
-    }
+    // ---- transport delegates -----------------------------------------------------------------------
+    // Thin pass-throughs to [tx]. They keep the ~150 protocol call sites in this file reading as they
+    // did while the wire logic itself lives in DumlTransport — a rename here would be a wire change.
 
-    private var lastSent: ByteArray? = null
+    private fun sendRaw(pktType: Int, payload: ByteArray) = tx.sendRaw(pktType, payload)
 
-    private fun sendRaw(pktType: Int, payload: ByteArray) {
-        val pkt = udpHeader(pktType, payload.size) + payload
-        if (sendPacket(pkt)) advance()
-    }
-
-    private fun sendAck() {
-        val grp = byteArrayOf(
-            (lastCamSeq and 0xFF).toByte(), ((lastCamSeq shr 8) and 0xFF).toByte(),
-            (lastCamSeq and 0xFF).toByte(), ((lastCamSeq shr 8) and 0xFF).toByte(),
-            0, 0, 0, 0,
-        )
-        val payload = grp + grp + grp + byteArrayOf(0, 0)
-        val old = udpSeq; udpSeq = 0
-        val hdr = udpHeader(0x04, payload.size)
-        udpSeq = old
-        val pkt = hdr + payload
-        sendPacket(pkt)
-    }
+    private fun sendAck() = tx.sendAck()
 
     private fun sendDuml(
         set: Int, cmd: Int, payload: ByteArray,
         receiverType: Int, receiverId: Int, cmdType: Int = 2,
-    ) {
-        cmdCounter++
-        reseqForDrone()
-        val rt = routingHeader()
-        val target = 0x02 or (((receiverId shl 5) or receiverType) shl 8)
-        val type = (cmdType shl 5) or (set shl 8) or (cmd shl 16)
-        val duml = DjiMessage(target, dumlSeq, type, payload).encode()
-        dumlSeq = (dumlSeq + 1) and 0xFFFF
-        val pkt = udpHeader(0x05, rt.size + duml.size) + rt + duml
-        if (sendPacket(pkt)) advance()
-    }
+    ) = tx.sendDuml(set, cmd, payload, receiverType, receiverId, cmdType)
 
-    private fun recvAll(durationMs: Long): List<ByteArray> {
-        val out = ArrayList<ByteArray>()
-        val deadline = System.nanoTime() + durationMs * 1_000_000
-        val buf = ByteArray(65536)
-        while (System.nanoTime() < deadline) {
-            try {
-                val p = DatagramPacket(buf, buf.size)
-                sock.receive(p)
-                val data = p.data.copyOf(p.length)
-                out.add(data)
-                if (data.size >= 10) {
-                    val camCh = (data[8].toInt() and 0xFF) or ((data[9].toInt() and 0xFF) shl 8)
-                    if (camCh != 0) lastCamSeq = camCh
-                }
-            } catch (_: java.net.SocketTimeoutException) {
-                // keep polling until the deadline
-            } catch (_: Exception) {
-                break
-            }
-        }
-        return out
-    }
+    private fun sendDumlRaw(target: Int, set: Int, cmd: Int, payload: ByteArray, cmdType: Int = 0) =
+        tx.sendDumlRaw(target, set, cmd, payload, cmdType)
+
+    private fun recvAll(durationMs: Long): List<ByteArray> = tx.recvAll(durationMs)
+
+    private fun scanFrames(raw: ByteArray) = DumlTransport.scanFrames(raw)
+
+    private fun findReply(datagrams: List<ByteArray>, set: Int, cmd: Int) =
+        DumlTransport.findReply(datagrams, set, cmd)
+
+    private fun findRespStatus(d: ByteArray, set: Int, id: Int) = DumlTransport.findRespStatus(d, set, id)
+
+    private fun hex(s: String) = DumlTransport.hex(s)
+
+    private fun le32(v: Int) = DumlTransport.le32(v)
 
     private fun appDeviceInfo(): ByteArray {
         // "\x00APP" + 37*00 + 02 + 8*00 + 02 08 + 10*00  (62 bytes) — mirrors file_list.py.
@@ -2180,15 +1954,4 @@ class DatalinkClient(
             padded + byteArrayOf(0, 0, 0, 0)
     }
 
-    private fun le32(v: Int) = byteArrayOf(
-        (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
-        ((v shr 16) and 0xFF).toByte(), ((v shr 24) and 0xFF).toByte(),
-    )
-
-    private fun hex(s: String): ByteArray {
-        val clean = s.filter { !it.isWhitespace() }
-        return ByteArray(clean.length / 2) {
-            ((clean[it * 2].digitToInt(16) shl 4) or clean[it * 2 + 1].digitToInt(16)).toByte()
-        }
-    }
 }
