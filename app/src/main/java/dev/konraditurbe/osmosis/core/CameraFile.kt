@@ -43,7 +43,25 @@ data class CameraFile(
     val name: String get() = path.substringAfterLast('/')
     val ext: String get() = name.substringAfterLast('.', "").uppercase()
     val timestamp: String get() = Regex("""_(\d{14})_""").find(name)?.groupValues?.get(1) ?: ""
-    val seq: Int get() = Regex("""_(\d{4})_D""").find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    /**
+     * The short per-file number shown on a grid cell. Cameras carry it in the name (`…_0211_D.MP4`);
+     * a drone's name has no such field (`DJI_0554.MP4`), so take the DCF file number straight out of
+     * the packed index — the low 16 bits — instead of showing every cell as `0000`.
+     */
+    val seq: Int get() = if (isIndexed) (fileIndex and 0xFFFF).toInt()
+    else Regex("""_(\d{4})_D""").find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+    /**
+     * `YYYYMMDD` for date grouping, or empty if genuinely unknown.
+     *
+     * Cameras encode it in the filename; a drone doesn't, so fall back to the manifest mtime — the same
+     * value [dateTaken] shows. Without this the grid keys grouping off an empty string and files up
+     * under a single unknown-date header even though the preview screen shows the right date.
+     */
+    val ymd: String get() = timestamp.takeIf { it.length >= 8 }?.substring(0, 8)
+        ?: mtimeEpoch.takeIf { it > 0 }?.let {
+            java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(java.util.Date(it * 1000L))
+        } ?: ""
 
     /** 3-digit burst/interval sub-index (`…_0286_D_001.JPG` → 1), or 0 if this isn't a group frame. */
     val subIndex: Int get() = Regex("""_(\d{3})\.\w+$""").find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 0

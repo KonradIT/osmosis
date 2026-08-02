@@ -77,7 +77,7 @@ class MediaGridAdapter(
         var lastYmd: String? = null
         for (f in all) {
             if (!passesFilter(f)) continue
-            val ymd = f.timestamp.takeIf { it.length >= 8 }?.substring(0, 8) ?: ""
+            val ymd = f.ymd
             if (ymd != lastYmd) { out.add(Row.Header(headerLabel(ymd))); lastYmd = ymd }
             out.add(Row.Item(f))
         }
