@@ -11,6 +11,7 @@ import android.net.Uri
 import android.provider.MediaStore
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
+import dev.konraditurbe.osmosis.core.urlPath
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 

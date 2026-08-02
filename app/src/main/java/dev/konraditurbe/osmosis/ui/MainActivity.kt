@@ -29,6 +29,7 @@ import dev.konraditurbe.osmosis.ble.Brand
 import dev.konraditurbe.osmosis.ble.CameraModel
 import dev.konraditurbe.osmosis.ble.GattClient
 import dev.konraditurbe.osmosis.ble.OsmoScanner
+import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.CameraStatus
 import dev.konraditurbe.osmosis.core.FileLog
@@ -1103,8 +1104,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         return storageForBit.getOrPut(bit) {
             val other = 1 - bit
             when {
-                http.headCode("/v2?storage=$bit&path=${f.path}") == 200 -> bit
-                http.headCode("/v2?storage=$other&path=${f.path}") == 200 -> other
+                http.headCode(PathAddressing.byPath(bit, f.path)) == 200 -> bit
+                http.headCode(PathAddressing.byPath(other, f.path)) == 200 -> other
                 else -> bit
             }
         }
@@ -1112,7 +1113,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** Blind mount probe for a file with no handle at all (e.g. a photos-only list, no fittable handle). */
     private fun probeStorage(f: CameraFile): Int {
-        for (s in intArrayOf(1, 0)) if (http.headCode("/v2?storage=$s&path=${f.path}") == 200) return s
+        for (s in intArrayOf(1, 0)) if (http.headCode(PathAddressing.byPath(s, f.path)) == 200) return s
         return 0
     }
 
