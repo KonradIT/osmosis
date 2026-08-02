@@ -543,8 +543,13 @@ Not a bug fix (previews already work) — a UX layer the proxy's small size + ra
 
 ## 14. Drone offload support — ✅ WORKING on a Mavic 3 (2026-08-01)
 
-**End to end on real hardware:** BLE pair → WiFi creds → AP join → `udp/9003` session-open → 45-file
-grid with thumbnails → proxy preview → full-res download, plus battery + storage in the status pill.
+**End to end on real hardware:** BLE pair → WiFi creds → AP join → `udp/9003` session-open → **the whole
+library, paged to the oldest file, with thumbnails on every cell** → proxy preview → full-res and
+partial download, plus battery + storage in the status pill.
+
+Verified 2026-08-02 on a Mavic 3: ten pages, 373 files, terminating cleanly on the last page, using ten
+datalink transfers in total — one per page. Two bugs stood between the first 45 files and that: the
+`0x51` session lapsing after ~30 s, and thumbnails leasing a transfer slot each.
 
 **The gate was a session-open handshake on the `0x51` channel.** A drone answers *nothing* until the app
 sends `0x51/0x02` and completes a mutual challenge (`0x51/0x08`, `0x51/0x06`, carrying its serial and an
