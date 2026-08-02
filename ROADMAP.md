@@ -602,6 +602,33 @@ gets starved — that broke pagination (a page fetch received *zero bytes*) and 
 part-way down the grid. Thumbnails and paging queue via `onDroneThread`, and status is decoded inside
 the pump so the pill updates during long transfers rather than only between them.
 
+### 🐞 Open: paging stops after page 2
+
+Two pages land (89 of 187 files on the card); the third gets nothing. Reproduced on five separate
+sessions and bisected against `e4a6353` — it predates the camera/drone refactor and is not caused by it.
+
+The failure is **not** "the drone reports an empty list". It answers page 2 in 0.6 s and then, for the
+page-3 query, sends *nothing at all* for the full 8.6 s window:
+
+```
+drone list — nothing for seq=0x1d cursor=6554066 after 0B; heard (no valid DUML at all)
+```
+
+`no valid DUML at all` means the drone's entire ~1000 frame/s telemetry stream went quiet, not merely
+the manifest reply — and it recovers afterwards. So this is closer to "that query wedges the link" than
+to "the library ends here", and the 187-vs-89 gap is probably not a protocol limit.
+
+What is ruled out:
+
+- **Our cursor.** `6554066` = storage 0, dir 100, file 466 — exactly the oldest `file_index` of page 2,
+  which is the rule that made page 2 work. The query bytes are otherwise identical to page 2's.
+- **The sequence number.** Failed at `0x17`, `0x1b` and `0x1d` across sessions.
+- **HTTP contention.** One failing run overlapped a preview stream; another had no HTTP traffic at all.
+
+Next step is the pcaps: find whether DJI Fly pages deeper than two on this card, and if so what it sends
+that we don't — a re-issued `0x4a04` ack, a different page size (byte 14 = `0x2d`), or a mode change
+between pages.
+
 ---
 
 ## Historical: how it got here (was 🟡 PROTOCOL CRACKED, awaiting a hardware run)
