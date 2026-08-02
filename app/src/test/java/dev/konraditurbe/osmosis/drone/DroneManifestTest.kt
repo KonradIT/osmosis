@@ -84,43 +84,11 @@ class DroneManifestTest {
     }
 
     @Test
-    fun `indexed files address media over v1, never by path`() {
+    fun `decoded records are index-addressed, never path-addressed`() {
         val f = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD))).first()
         assertTrue(f.isIndexed)
-        assertEquals("/v1?file_index=6553777&file_subtype=0&file_seg_subindex=0", f.urlPath())
-        // No sidecar-path proxy on a drone — the proxy is a subtype of the same index instead, so it
-        // surfaces through previewCandidates() rather than proxyUrlPath(). See the subtype-18 test.
-        assertNull(f.proxyUrlPath())
-        assertTrue(f.previewCandidates().last() == f.urlPath())
-    }
-
-    @Test
-    fun `video preview prefers the subtype-18 proxy, stills use the original`() {
-        // Pinned to a capture of DJI Fly playing + scrubbing videos: every playback fetch was
-        // `file_subtype=18` with Range requests, and the single `file_subtype=0` fetch was the download.
-        val files = DroneManifest.decode(DroneManifest.assemble(chunksFor(0xDD)))
-        val video = files.single { it.fileIndex == 6553777L }
-        assertTrue(video.isVideo)
-        assertEquals(
-            listOf(
-                "/v1?file_index=6553777&file_subtype=18&file_seg_subindex=0",
-                "/v1?file_index=6553777&file_subtype=0&file_seg_subindex=0",
-            ),
-            video.previewCandidates(),
-        )
-        // A still gets the screen-res render first, then the original.
-        val photo = files.single { it.fileIndex == 6553771L }
-        assertEquals(
-            listOf(
-                "/v1?file_index=6553771&file_subtype=2&file_seg_subindex=0",
-                "/v1?file_index=6553771&file_subtype=0&file_seg_subindex=0",
-            ),
-            photo.previewCandidates(),
-        )
-        // Downloads always take the original, never a proxy or render.
-        assertEquals("/v1?file_index=6553777&file_subtype=0&file_seg_subindex=0", video.urlPath())
-        // Thumbnails come from subtype 1 (THM) over plain HTTP.
-        assertEquals("/v1?file_index=6553777&file_subtype=1&file_seg_subindex=0", video.thumbUrlPath())
+        assertEquals(6553777L, f.fileIndex)
+        // Which URLs that produces is MediaAddressingTest's business, not the wire format's.
     }
 
     @Test

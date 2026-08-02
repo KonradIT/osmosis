@@ -12,6 +12,7 @@ import androidx.recyclerview.widget.RecyclerView
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
+import dev.konraditurbe.osmosis.core.thumbUrlPath
 import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MetaLoader
 import java.util.Calendar

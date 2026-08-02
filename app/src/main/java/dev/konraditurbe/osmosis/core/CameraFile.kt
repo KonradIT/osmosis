@@ -1,9 +1,13 @@
 package dev.konraditurbe.osmosis.core
 
 import dev.konraditurbe.osmosis.dcf.DcfIndex
-import dev.konraditurbe.osmosis.dcf.DcfUrls
 
-/** One media item on the camera, with its media path and derived thumbnail path. */
+/**
+ * One media item, as the app models it regardless of which device listed it.
+ *
+ * Pure data: how it is actually *fetched* — `/v2` by path or `/v1` by DCF index — lives behind
+ * [MediaAddressing], not here.
+ */
 data class CameraFile(
     val path: String,        // e.g. DCIM/DJI_001/DJI_20260329115359_0211_D.MP4
     val thumbPath: String,   // e.g. MISC/THM/DJI_001/DJI_20260329115359_0211_D.scr
@@ -84,62 +88,12 @@ data class CameraFile(
             .format(java.util.Date(it * 1000L))
     } ?: ""
 
-    fun urlPath(): String =
-        if (isIndexed) DcfUrls.of(fileIndex, DcfUrls.ORG) else "/v2?storage=$storage&path=$path"
-
-    /**
-     * Where to get this file's thumbnail — `/v2` by path on a camera, `/v1?file_subtype=1` on a
-     * DCF-indexed device. The [DUML_THUMB] pseudo-URL is the fallback for hardware that serves no
-     * thumbnail over HTTP at all; `ImageLoader` routes it to the datalink instead. See ROADMAP #14.
-     */
-    fun thumbUrlPath(): String =
-        if (isIndexed) DcfUrls.of(fileIndex, DcfUrls.THM) else "/v2?storage=$storage&path=$thumbPath"
-
-    companion object {
-        /** Scheme marking a thumbnail fetched over DUML — the fallback when HTTP has no `.THM`. */
-        const val DUML_THUMB = "duml://thumb/"
-    }
-
-    /** URL of the low-res proxy for preview, or null if the camera doesn't provide one. */
-    fun proxyUrlPath(): String? =
-        if (isIndexed) null else proxyPath?.let { "/v2?storage=$storage&path=$it" }
-
-    /**
-     * Low-res proxy extension pinned by camera family, read from the file-naming prefix (which is the
-     * family tell): the **Action family** (`CAM_` — Xtra / Action 5 Pro, and the 360) writes an
-     * **unlisted `.XRF`** sidecar; **DJI-proper** (`DJI_` — Nano) uses `.LRF`. Null for an unknown
-     * convention → no derived proxy, just stream the full-res file.
-     */
-    private fun proxyExt(): String? = when {
-        name.startsWith("CAM_") -> "XRF"
-        name.startsWith("DJI_") -> "LRF"
-        else -> null
-    }
-
-    /**
-     * Ordered URLs to try when streaming a *preview*, cheapest (smallest) first:
-     *  1. the manifest-listed proxy (the Nano/360 list their `.LRF`/`.LRV`);
-     *  2. else the **derived** sidecar proxy for this camera family — the Xtra / Action 5 Pro writes a
-     *     low-res `.XRF` next to each clip (same base name + folder) but does NOT list it in the
-     *     manifest, so we derive the path directly instead of probing several extensions;
-     *  3. the full-resolution file, as a last resort.
-     * Streaming the small proxy also dodges hardware-decoder limits (full-res 4:3 4K HEVC won't decode
-     * on weaker devices). Duplicates collapse, so this is normally just [proxy, full-res].
-     */
-    fun previewCandidates(): List<String> {
-        // A DCF device's proxy is a SUBTYPE of the same index, not a sidecar path. Videos: the low-res
-        // LRF proxy first, original as fallback. Stills: the screen-res render before the full-size
-        // original, which on a 14 MP frame is the difference between a snappy preview and decoding
-        // ~14 MB. See [DcfUrls] for the size measurements behind the ordering.
-        if (isIndexed) return if (isVideo) listOf(DcfUrls.of(fileIndex, DcfUrls.LRF), urlPath())
-        else listOf(DcfUrls.of(fileIndex, DcfUrls.SCR), urlPath())
-        val urls = LinkedHashSet<String>()
-        proxyUrlPath()?.let { urls.add(it) }
-        proxyExt()?.let { urls.add("/v2?storage=$storage&path=${path.substringBeforeLast('.', path)}.$it") }
-        urls.add(urlPath())
-        return urls.toList()
-    }
-
     val isVideo: Boolean get() = ext in setOf("MP4", "MOV", "OSV", "INSV", "LRF", "LRV", "XRF")
     val isImage: Boolean get() = ext in setOf("JPG", "JPEG", "DNG", "HEIC", "RAW")
+
+    companion object {
+        /** Scheme marking a thumbnail fetched over DUML — the fallback for hardware that serves no
+         *  thumbnail over HTTP at all; `ImageLoader` routes it to the datalink. See ROADMAP #14. */
+        const val DUML_THUMB = "duml://thumb/"
+    }
 }

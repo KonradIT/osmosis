@@ -24,8 +24,11 @@ import android.widget.VideoView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import dev.konraditurbe.osmosis.R
+import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
+import dev.konraditurbe.osmosis.core.previewCandidates
+import dev.konraditurbe.osmosis.core.urlPath
 import dev.konraditurbe.osmosis.net.Highlights
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.net.ImageLoader
@@ -265,7 +268,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 setOnClickListener { selectFrame(i) }
             }
             burstRow.addView(iv)
-            imageLoader.load("/v2?storage=${file.storage}&path=$thumbPath", iv)
+            imageLoader.load(PathAddressing.byPath(file.storage, thumbPath), iv)
         }
         updateBurstSelection()
     }
@@ -286,9 +289,14 @@ class MediaPreviewActivity : AppCompatActivity() {
         }
     }
 
-    /** URL of the frame currently shown — a group's selected frame, or the single file. */
+    /**
+     * URL of the frame currently shown — a group's selected frame, or the single file. Burst frames are
+     * addressed by path because they are enumerated after the manifest, and burst groups only exist on
+     * the path-based cameras.
+     */
     private fun currentUrl(): String =
-        if (groupPaths.isNotEmpty()) "/v2?storage=${file.storage}&path=${groupPaths[selectedFrame]}" else file.urlPath()
+        if (groupPaths.isNotEmpty()) PathAddressing.byPath(file.storage, groupPaths[selectedFrame])
+        else file.urlPath()
 
     private fun hasTrim() = trimStartMs >= 0 && trimEndMs > trimStartMs
 
