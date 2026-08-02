@@ -92,8 +92,11 @@ data class CameraFile(
     val isImage: Boolean get() = ext in setOf("JPG", "JPEG", "DNG", "HEIC", "RAW")
 
     companion object {
-        /** Scheme marking a thumbnail fetched over DUML — the fallback for hardware that serves no
-         *  thumbnail over HTTP at all; `ImageLoader` routes it to the datalink. See ROADMAP #14. */
-        const val DUML_THUMB = "duml://thumb/"
+        /**
+         * Marks a thumbnail that has to be lifted out of the original's EXIF block rather than fetched
+         * as its own file — the suffix is the original's URL. Used for stills on a DCF device, which
+         * carry no thumbnail rendition at all. `ImageLoader` ranges the head and calls [EmbeddedJpeg].
+         */
+        const val EXIF_THUMB = "exif:"
     }
 }

@@ -19,20 +19,19 @@ object DcfAddressing : MediaAddressing {
     override fun original(f: CameraFile): String = DcfUrls.of(f.fileIndex, DcfUrls.ORG)
 
     /**
-     * A video's thumbnail is its [THM][DcfUrls.THM] over HTTP. **A still has no rendition on the card
-     * at all** — no THM, no SCR, no AIS, no LRF — so it can only come over the datalink, and is
-     * addressed with the [DUML_THUMB][CameraFile.DUML_THUMB] pseudo-URL that `ImageLoader` routes there.
+     * A video's thumbnail is its [THM][DcfUrls.THM]. **A still has no rendition on the card at all** —
+     * probed on a Mavic 3, only `file_subtype=0` answers for a photo index; every other subtype makes
+     * the server close the connection, which is how this firmware reports a missing file (there is no
+     * 404 — a failed lookup returns HANDLER_ERROR and the connection dies). So a still's thumbnail is
+     * taken from the EXIF block inside the original, via one ranged request for its first 64 kB.
      *
-     * Probed against a Mavic 3: for a photo index, only `file_subtype=0` answers; every other subtype
-     * makes the server close the connection with no response, which is how this firmware reports a
-     * missing file (there is no 404 — a failed lookup returns HANDLER_ERROR and the connection dies).
-     * The reference app fetches *every* thumbnail, video and still alike, over the datalink and never
-     * requests subtype 1 or 2 over HTTP at all; keeping HTTP for videos is a deliberate deviation,
-     * because it parallelises where the datalink is one-at-a-time.
+     * Both are plain HTTP and parallelise across the loader's pool. The reference app instead pulls
+     * every thumbnail over the datalink, which is strictly one-at-a-time and leases a transfer slot per
+     * image — the source of a long-running stall in the grid. This is a deliberate deviation.
      */
     override fun thumbnail(f: CameraFile): String =
         if (f.isVideo) DcfUrls.of(f.fileIndex, DcfUrls.THM)
-        else CameraFile.DUML_THUMB + f.fileIndex
+        else CameraFile.EXIF_THUMB + DcfUrls.of(f.fileIndex, DcfUrls.ORG)
 
     /**
      * Videos take the low-res [LRF][DcfUrls.LRF] proxy — measured ~7× smaller than the original and the

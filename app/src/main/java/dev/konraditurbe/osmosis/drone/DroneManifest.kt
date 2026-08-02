@@ -22,7 +22,7 @@ import dev.konraditurbe.osmosis.dcf.DcfRecords
  * ### `0x4a` envelope (both directions)
  * ```
  * +0  u8   0x4a
- * +1  u8   subtype — 0x00 list query, 0x01 list reply, 0x20 thumb query, 0x21 thumb reply
+ * +1  u8   subtype — 0x00 query, 0x01 reply, 0x02 proceed, 0x03 state, 0x04 release
  * +2  u16  low 12 bits = this frame's payload length; bit 0x1000 = FINAL chunk
  * +4  u16  seq — the reply echoes the query's
  * +6  u32  chunk index (a reply over ~1 kB is split; DUML frames cap at 1023 bytes)
@@ -44,10 +44,6 @@ object DroneManifest {
 
     /** Subtype 0x01 — a file-list reply. */
     const val SUB_LIST_REPLY = 0x01
-
-    /** Subtype 0x21 — a thumbnail reply: the same chunked envelope, carrying JPEG bytes. */
-    const val SUB_THUMB_REPLY = 0x21
-
     /** One `0x00/0x27` reply frame. [data] is the record bytes only, envelope stripped. */
     data class Chunk(
         val seq: Int,
@@ -147,53 +143,6 @@ object DroneManifest {
         return p
     }
 
-    /**
-     * Thumbnail request for one [fileIndex] — subtype `0x20`, replied to as chunked subtype `0x21`.
-     * Captured verbatim from DJI Fly (48 bytes); only [seq] and the index vary.
-     *
-     * Kept as a fallback: `/v1?file_subtype=1` serves the same thumbnail over plain HTTP and
-     * parallelises, whereas this path is one request at a time on the session thread.
-     */
-    fun thumbQuery(seq: Int, fileIndex: Long): ByteArray {
-        val p = ByteArray(48)
-        p[0] = 0x4A; p[1] = 0x20
-        p[2] = 0x30; p[3] = 0x10                       // len 48 | FINAL
-        p[4] = (seq and 0xFF).toByte(); p[5] = ((seq shr 8) and 0xFF).toByte()
-        // +6 chunk = 0 (already zero)
-        p[10] = (fileIndex and 0xFF).toByte()
-        p[11] = ((fileIndex shr 8) and 0xFF).toByte()
-        p[12] = ((fileIndex shr 16) and 0xFF).toByte()
-        p[13] = ((fileIndex shr 24) and 0xFF).toByte()
-        p[14] = 0x01; p[16] = 0x01                     // request params
-        p[22] = -1; p[23] = -1; p[24] = -1; p[25] = -1 // ffffffff
-        return p
-    }
-
-    /**
-     * Pull the JPEG out of a reassembled thumbnail stream, or null if there isn't one.
-     *
-     * The payload opens with a 13-byte prefix (`00000000`, `u32` total length, `u32` file index, `00`)
-     * before the image, so rather than trust that offset we just locate the JPEG markers — robust if a
-     * model ever prefixes differently.
-     */
-    fun extractJpeg(data: ByteArray): ByteArray? {
-        var soi = -1
-        for (i in 0 until data.size - 1) {
-            if (u8(data, i) == 0xFF && u8(data, i + 1) == 0xD8) { soi = i; break }
-        }
-        if (soi < 0) return null
-        var eoi = -1
-        for (i in data.size - 2 downTo soi) {
-            if (u8(data, i) == 0xFF && u8(data, i + 1) == 0xD9) { eoi = i + 2; break }
-        }
-        return if (eoi > soi) data.copyOfRange(soi, eoi) else null
-    }
-
-    /**
-     * The follow-up frame that closes out a list reply. DJI Fly sends it *after* the chunks land (not
-     * before — it does not trigger the transfer), and it is byte-identical to the one the camera path
-     * already emits mid-stream, so the same frame serves both.
-     */
     fun listAck(seq: Int, subtype: Int = SUB_LIST_ACK): ByteArray {
         val p = byteArrayOf(0x4A, 0x04, 0x0E, 0x10, 0x00, 0x00, 0, 0, 0, 0, 0x01, 0, 0, 0)
         p[1] = subtype.toByte()
@@ -203,9 +152,12 @@ object DroneManifest {
 
     /**
      * The `0x4a` subtypes run as a family per transfer kind: `+0` query, `+1` reply, `+2` proceed,
-     * `+3` state, `+4` release. A media list is `0x00`–`0x04`, a thumbnail `0x20`–`0x24`.
+     * `+3` state, `+4` release. A media list is `0x00`–`0x04`; a thumbnail would be `0x20`–`0x24`, but
+     * this app fetches thumbnails over HTTP instead — see `DcfAddressing`.
      *
-     * All four in use, captured from the reference app:
+     * **A transfer holds a slot on the drone until it is released, and there are few of them.** Leak
+     * them and it stops answering media queries while telemetry streams on, so the link looks healthy
+     * and serves nothing. Captured from the reference app:
      * ```
      * -> 4a sub=00 seq=0005   query
      * <- 4a sub=03 seq=0005   drone: state (arrives before the data, and again after it)
@@ -217,8 +169,6 @@ object DroneManifest {
     const val SUB_LIST_GO = 0x02
     const val SUB_LIST_STATE = 0x03
     const val SUB_LIST_ACK = 0x04
-    const val SUB_THUMB_STATE = 0x23
-    const val SUB_THUMB_ACK = 0x24
 
     /**
      * The "proceed" frame answering a [SUB_LIST_STATE] the drone raises before it starts sending.

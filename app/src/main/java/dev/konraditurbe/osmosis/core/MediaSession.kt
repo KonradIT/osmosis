@@ -54,7 +54,4 @@ interface MediaSession {
 
     /** Toggle the ⭐ flag. Path-based cameras only. */
     fun setFavorite(handle: Long, on: Boolean): Boolean = false
-
-    /** A thumbnail fetched over the datalink, for hardware that serves none over HTTP. */
-    fun thumbnail(fileIndex: Long): ByteArray? = null
 }

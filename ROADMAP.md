@@ -627,12 +627,22 @@ five sessions, every query at t ≤ 28.5 s worked and every one at t ≥ 28.9 s 
 Probed against a Mavic 3 for a photo index: only `file_subtype=0` answers. Every other subtype makes the
 server close the connection with no response — which is how this firmware reports a missing file, not a
 404. A failed lookup returns `HANDLER_ERROR` and the connection dies, which is also why `GET /` returns
-an empty reply. So a still has **no THM, SCR, AIS or LRF**, and its thumbnail can only come over the
-datalink.
+an empty reply. So a still has **no THM, SCR, AIS or LRF** — nothing but the original.
 
-The reference app fetches *every* thumbnail that way — across three captures it never once requests
-subtype 1 or 2 over HTTP, only subtype 0 (downloads) and 18 (playback). Keeping videos on HTTP is a
-deliberate deviation: their THM does exist, and HTTP parallelises where the datalink is one-at-a-time.
+The reference app solves this by pulling *every* thumbnail over the datalink; across three captures it
+never once requests subtype 1 or 2 over HTTP, only subtype 0 (downloads) and 18 (playback). We don't,
+because that path is strictly one-at-a-time and leases a slot per image — a gridful of stills either
+crawls or exhausts the budget.
+
+Instead a still's thumbnail is lifted from the **EXIF block inside the original**: one ranged request
+for the first 64 kB (EXIF's `APP1` is a u16 length, so it cannot be larger), then `EmbeddedJpeg` walks
+the segments to `APP1` and extracts the JPEG within. Measured on a Mavic 3, the embedded thumbnail
+starts 1502 bytes in. Videos keep their THM. Both are plain HTTP and parallelise, and **the datalink now
+carries nothing but the page queries themselves** — one transfer per page, so browsing cannot exhaust
+the slots however far it scrolls.
+
+Deliberately not "find the second `FFD8`": a 14 MP frame's entropy-coded data contains those bytes by
+chance, so the search is confined to `APP1` and stops at `SOS`.
 
 ### Reading a capture with our own decoder
 
