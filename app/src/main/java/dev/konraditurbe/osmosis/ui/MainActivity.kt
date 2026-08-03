@@ -157,6 +157,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** `--ez nojoin true` — skip the WiFi join/bind and talk over whatever network is already default. */
     private var noJoin = false
     private var pinOverride: String? = null // `--es pin <v>` test hook; wins over the per-model token
+    // `--es appid <v>` — the app *identity* half of SetPairingPIN, overridable without a rebuild.
+    // A device remembers the (identity, token) pair it approved and re-pairs it silently (0x45 -> 0x01);
+    // present an identity it has never seen and it must ask the user again (0x45 -> 0x02), which on a
+    // drone means the power-button hold. That makes this the switch for *testing* the first-run path on
+    // hardware that is already paired.
+    private var appIdOverride: String? = null
 
     // Shown while the camera/drone is waiting for the user to confirm pairing (0x07/45 → 0x02).
     // A camera confirms on its own screen; a drone (e.g. Mavic) needs a ~2 s press of its power button.
@@ -279,6 +285,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // Test hooks: `--es pin <v>` overrides the pairing PIN; `--ez autoscan true` auto-starts
         // a scan (perms permitting) so device testing doesn't depend on tapping. Dormant otherwise.
         intent?.getStringExtra("pin")?.let { pinOverride = it; pairPin = it; logLine("pairPin set to \"$it\"") }
+        intent?.getStringExtra("appid")?.let { appIdOverride = it; logLine("app identity set to \"$it\"") }
         // `--ez nojoin true`: phone is already on the AP via Android WiFi settings, so skip the join +
         // bindProcessToNetwork. Needed to capture our own session — see maybeStartOffload.
         if (intent?.getBooleanExtra("nojoin", false) == true) {
@@ -673,23 +680,82 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * entry is needed. The replies land in [onNotification] and drive the join. If the model doesn't
      * answer (older cameras), a fallback timer uses the saved password or prompts. Called once.
      */
-    /** Prompt the user to confirm the pairing on the device (camera screen, or a drone's power button). */
+    /**
+     * The identity half of SetPairingPIN: DJI Fly's for a drone, the generic one for a camera, unless
+     * `--es appid <v>` overrides it. Both call sites (first write + retry) must agree — a device keys
+     * its remembered approval on this string, so two writes with different identities read as two
+     * different apps asking to pair.
+     */
+    private fun pairIdentity(): String = appIdOverride
+        ?: if (currentModel.isDrone) DronePairing.identifier(getSharedPreferences("osmosis", MODE_PRIVATE))
+        else dev.konraditurbe.osmosis.duml.DjiPairMessagePayload.DEFAULT_IDENTIFIER
+
+    /**
+     * Prompt the user to confirm the pairing on the device.
+     *
+     * A camera says so on its own screen, so words are enough. A drone has no screen — the user has to
+     * find one unlabelled button on the back of an aircraft they may have just unboxed — so it gets the
+     * illustration, with the button blinking the same blue the aircraft's own lights use.
+     */
     private fun showPairingApproval() {
         if (isFinishing || isDestroyed) return
-        val msg = if (currentModel.isDrone) DronePairing.APPROVAL_MESSAGE
-        else "Approve the pairing on the camera's screen."
         pairingAlert?.dismiss()
-        pairingAlert = AlertDialog.Builder(this)
+        val b = AlertDialog.Builder(this)
             .setTitle("Confirm pairing on ${currentModel.name}")
-            .setMessage(msg)
             .setCancelable(false)
             .setNegativeButton("Cancel") { _, _ -> gattClient?.disconnect() }
-            .show()
+        if (currentModel.isDrone) {
+            val view = layoutInflater.inflate(R.layout.dialog_drone_approval, null)
+            view.findViewById<TextView>(R.id.approvalText).text = DronePairing.APPROVAL_MESSAGE
+            startPowerBlink(view.findViewById(R.id.powerBlink))
+            b.setView(view)
+        } else {
+            b.setMessage("Approve the pairing on the camera's screen.")
+        }
+        pairingAlert = b.show()
     }
 
-    private fun dismissPairingApproval() { pairingAlert?.dismiss(); pairingAlert = null }
+    /**
+     * Pulse the blue power-button overlay while the dialog is up: a slow fade in/out that reads as the
+     * button waiting to be pressed, matching the aircraft's own LEDs.
+     *
+     * Held so [dismissPairingApproval] can cancel it — an infinite animator on a detached view keeps
+     * the view (and this Activity) reachable, and would otherwise outlive the dialog.
+     */
+    private var powerBlink: android.animation.Animator? = null
+
+    private fun startPowerBlink(target: View) {
+        powerBlink?.cancel()
+        powerBlink = android.animation.ObjectAnimator.ofFloat(target, View.ALPHA, 1f, 0.15f).apply {
+            duration = 900
+            repeatMode = android.animation.ValueAnimator.REVERSE
+            repeatCount = android.animation.ValueAnimator.INFINITE
+            interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+            start()
+        }
+    }
+
+    private fun dismissPairingApproval() {
+        powerBlink?.cancel(); powerBlink = null
+        pairingAlert?.dismiss(); pairingAlert = null
+    }
 
     private fun onPaired() {
+        // GATT notifications are dispatched straight off the BluetoothGattCallback, which is not
+        // guaranteed to be the main thread — GattClient says as much, and `showPairingApproval` is
+        // already posted for that reason. Everything below touches dialogs, animators and Activity
+        // state, so hop first.
+        //
+        // This was load-bearing, not hygiene: `dismissPairingApproval` cancels the blink animator, and
+        // ValueAnimator.cancel() throws AndroidRuntimeException outright on a thread with no Looper.
+        // It threw before the dismiss AND before the credentials request, so a drone that had just
+        // been approved sat with the dialog still up and the flow dead — recoverable only by
+        // cancelling and reconnecting, which then took the silent already-paired path.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            logLine("onPaired: hopping to main from \"${Thread.currentThread().name}\"")
+            main.post { onPaired() }
+            return
+        }
         dismissPairingApproval()
         if (!offloadMode || credsRequested) return
         credsRequested = true
@@ -1389,11 +1455,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         )
         logLine("READY — sent session wake 0x00/0x2b[04 00] ok=$woke")
         main.postDelayed({
-            val ident = if (currentModel.isDrone) DronePairing.IDENTIFIER
-            else dev.konraditurbe.osmosis.duml.DjiPairMessagePayload.DEFAULT_IDENTIFIER
-            val frame = dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin, identifier = ident)
+            val frame = dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin, identifier = pairIdentity())
             val ok = gattClient?.writeCommand(frame) ?: false
-            logLine("sent SetPairingPIN(pin=\"$pairPin\" id=\"${ident.take(8)}…\") ok=$ok")
+            logLine("sent SetPairingPIN(pin=\"$pairPin\" id=\"${pairIdentity().take(8)}…\") ok=$ok")
         }, 120)
         // The keepalive used to re-send SetPairingPIN every 2 s, which doubled as a retry if the
         // first write dropped (fff5 is write-without-response). Now that it pings 0x00/0x2b instead,
@@ -1402,7 +1466,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             main.postDelayed({
                 if (!credsRequested && lastPairStatus == -99 && gattClient != null) {
                     logLine("pairing: no reply yet — re-sending SetPairingPIN")
-                    gattClient?.writeCommand(dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin))
+                    // Must carry the SAME identity as the first attempt. This retry used to omit it and
+                    // fall back to the camera default, so a dropped first write silently re-paired a
+                    // drone under the wrong identity — and, for the rotation test, quietly undid it.
+                    gattClient?.writeCommand(
+                        dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin, identifier = pairIdentity())
+                    )
                 }
             }, delay)
         }
