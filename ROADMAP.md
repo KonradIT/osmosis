@@ -12,6 +12,12 @@ fps, **byte size**, **resolution**, **duration** and **⭐ starred** all come fr
 (long-press → confirm, DUML `0x00/0x28` — #4) and **R-SDK GPS sync** (🛰️ toggle, streams the phone's
 GPS into the camera over BLE — #9, hardware-verified on an Action 5 Pro).
 
+**Drones work too — Mavic 3, hardware-verified (#14):** BLE pair with the `"DJI FLY"` token → creds →
+AP → a `0x51/0x02` session-open the cameras don't need → the whole library paged to the oldest file,
+with thumbnails, preview and download. The manifest is flat 94-byte **DCF records** rather than
+CompositePack, and media is addressed by packed `file_index` over **`/v1`** rather than by path over
+`/v2` — one `MediaAddressing` seam picks between them. Delete and favourite are camera-only.
+
 **Still open:** the **Action 4** (pairs and hands out BLE creds, but its AP never comes up — an OA4-only
 `0x07/0x39` probe is on the `osmo-action-4-debugging` branch awaiting a test) and the **Osmo 360**
 (parked — never reaches the datalink, and its files are 360-format that needs Mimo to view anyway).
@@ -73,7 +79,7 @@ Status per model:
 - **✅ Media list cracked line-wide (2026-07-24):** the `0x00/0x27` payload is DJI's **CompositePack**
   TLV (not protobuf, and no reference repo decodes it — they all regex the paths). Rewrote the decoder
   to read each record's fields by **tag → length → value**
-  ([decodeComposite](app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt), reverse-engineered
+  ([decodeComposite](app/src/main/java/dev/konraditurbe/osmosis/camera/CameraSession.kt), reverse-engineered
   from real Nano/Xtra/OA5/OA6/Pocket 3 manifests): media path `1a [len] 00 00 00 01`, thumb `…02`,
   filename `0d [len]`, delete handle + video size off the `03 ff 19 06` marker. No filename regex at
   all, so the camera's **Naming Management** custom Folder/File prefixes (`_A01`, `_DOA5`, `_OP3`) and
@@ -187,7 +193,7 @@ byte is **cmdId `0x28`** (list = `0x00/0x26`, delete = `0x00/0x28`).
   works for both layouts: Nano (`DJI_`, 361-byte records, handles step `0x40`) and Xtra/Action (`CAM_`,
   272-byte records, handles step `0x10`). A `0x40`-alignment heuristic worked on the Nano but grabbed a
   stray dword on the Xtra → `0xd6` "no such handle"; the marker anchor fixed it.
-  ([DatalinkClient.recordStart / deleteFiles](app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt))
+  ([DatalinkClient.recordStart / deleteFiles](app/src/main/java/dev/konraditurbe/osmosis/camera/CameraSession.kt))
 - **The catch — writes need a fresh session.** The browse keep-alive loop advances our `udpSeq` past the
   window the camera accepts; reads still get answered but writes are silently dropped, and re-registration
   itself seems to grant write access. So a delete tears the keep-alive session down and re-opens +
@@ -341,7 +347,7 @@ photo, switch mode. Two halves:
   sessions where we're offloading rather than in GPS mode:
 - **Read (media-path status/settings).** We already subscribe to the camera-capability params over the datalink
   (`camcap_mode_profile`, `camcap_video_format`, `camcap_fov`, `camcap_iso`, `cam_status`, … — see the
-  subscribe list in [`DatalinkClient`](app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt)),
+  subscribe list in [`DatalinkClient`](app/src/main/java/dev/konraditurbe/osmosis/camera/CameraSession.kt)),
   and the `0x02/0x80` push carries live status. What's missing is the **exact field decode**: which bytes
   give the current mode / resolution / frame rate. (The old `mode` guess — low nibble of `0x02/0x80`
   byte 0 — was wrong and was removed; the real values live in the `camcap_*` params or a different offset,
@@ -671,13 +677,18 @@ against those captured bytes.
 
 ---
 
-## Historical: how it got here (was 🟡 PROTOCOL CRACKED, awaiting a hardware run)
+## Historical: how it got here
 
-DJI drones speak the **same DUML framing** over BLE/WiFi as the Osmo line. As of **2026-08-01 the whole
-chain is solved end to end** — BLE pair (token `"DJI FLY"`) → WiFi creds → AP join → datalink on
-`udp/9003` → **media list** → **download** — cracked from a PCAPdroid capture of DJI Fly ↔ a real
-**Mavic 3** browsing its gallery (`reference/captures/wifi/mavic3_media_browse.pcap`, gitignored).
-Implemented and unit-tested against the captured bytes; **not yet run against the drone itself.**
+**⚠️ Everything below this line is a record of the investigation, not a description of the current
+state.** Several sections were written while the feature was still blocked and say so in the present
+tense — "the drone won't serve US", "not yet run against the drone itself". Those were true when
+written and are not true now; they are kept because the eliminations in them are expensive to redo.
+
+DJI drones speak the **same DUML framing** over BLE/WiFi as the Osmo line. The chain was cracked on
+**2026-08-01** — BLE pair (token `"DJI FLY"`) → WiFi creds → AP join → datalink on `udp/9003` →
+**media list** → **download** — from a PCAPdroid capture of DJI Fly ↔ a real **Mavic 3** browsing its
+gallery (`reference/captures/wifi/mavic3_media_browse.pcap`, gitignored), then implemented and
+unit-tested against those bytes before it ever met an aircraft.
 
 ### The media API (cracked 2026-08-01)
 
@@ -709,7 +720,7 @@ convention (`DCIM/100MEDIA/DJI_0554.MP4`) from the index, picking `.MP4`/`.JPG` 
 server returned `Content-Length` **14168064** and **9494528** — byte-exact matches for the sizes decoded
 out of the manifest, which is what pins the size field and the 94-byte stride. Both were `dur = 0` and
 came back `image/jpeg`, confirming the still-vs-video signal. Pinned by
-[DroneManifestTest](app/src/test/java/dev/konraditurbe/osmosis/core/DroneManifestTest.kt) against the
+[DroneManifestTest](app/src/test/java/dev/konraditurbe/osmosis/drone/DroneManifestTest.kt) against the
 real captured frames (fixture `manifests/mavic3_manifest.txt`).
 
 **Pagination — also solved, and simpler than the camera's.** `cursor = 1` (bytes 10–13 of the query)
@@ -760,18 +771,26 @@ on-device.
 
 ### Still open
 
-- **The drone refuses our datalink commands** — see above. This is the blocker for the whole feature.
-- **Thumbnails aren't wired.** The frames are decoded (187 JPEGs recovered from the capture: query
-  subtype `0x20` carrying the `file_index`, reply subtype `0x21` streaming chunked JPEG) but the grid's
-  loader is HTTP-only. Until that's bridged, drone cells render a **placeholder** —
-  `CameraFile.thumbUrlPath()` deliberately returns empty for indexed media, because pointing it at `/v1`
-  would pull a full 14 MB frame per cell. This is the obvious next increment.
-- **No hardware run yet.** Everything above is from the capture plus unit tests; the live path
-  (`fetchDroneFileList` → grid → download) has never touched a drone.
-- **Unmapped record fields** past `+14`, and whether `file_subtype` exposes a cheaper rendition (DJI Fly
-  only ever used `0`).
-- **Delete / favourite on a drone** are untested; `0x02/0xbf` (favourite) *does* appear in the capture.
-- **Neo 2 (`0x007e`)** shares the drone defaults but its port is unconfirmed.
+*(Everything the old version of this list called a blocker — the datalink refusing commands, thumbnails
+being unwired, no hardware run — is done. See the top of this item. What's genuinely left:)*
+
+- **Delete and favourite are not implemented on a drone.** `DroneSession` takes the `MediaSession`
+  no-op defaults (`deleteFiles` → `null`, `setFavorite` → `false`), and drone records carry no manifest
+  handle, so `CameraFile.deletable` is false and the long-press menu correctly offers neither. The
+  camera commands exist (`0x00/0x28`, `0x02/0xbf` — the latter does appear in a drone capture), but the
+  handle they address is a camera-manifest field with no equivalent in the 94-byte DCF record. Wiring
+  this means finding what a drone deletes *by* — plausibly the packed `file_index` itself.
+- **`/v2?storage=N&path=…` on a drone** — believed to work, never exercised. Everything drone-side goes
+  through `/v1`, because `DcfAddressing` is chosen for any file with a `fileIndex`.
+- **Record fields past `+14`** are unmapped. The decoder reads mtime `@0`, size `@4`, index `@8` and
+  duration `@12` out of the 94-byte stride and ignores the rest — resolution and fps are in there
+  somewhere (see the new item #18).
+- **`PROXY_MOOV` / `ORIGIN_MOOV`** (`file_subtype` 15/16) serve an MP4's `moov` atom alone and would
+  replace the range request preview currently pays to find it. Untested on any aircraft.
+- **Neo 2 (`0x007e`)** shares the drone defaults but has never been offloaded — its datalink port is
+  unconfirmed and a tester's scan showed it refusing `0x07/0x0e`.
+- **Any drone that isn't a Mavic 3.** Model ids at or above `0x40` fall back to the drone defaults on a
+  documented guess (`CameraModel.DRONE_ID_FLOOR`); the Mini 3's real model byte is still unknown.
 
 ### History (how it got here)
 
@@ -781,9 +800,13 @@ on-device.
   `mfr[cid=08aa 7000…]` → model **`0x0070`**. `Brand.of` now treats "carries cid `0x08AA`" ⇒ `DJI`
   (more robust than OUI/name — a renamed drone still shows it), so it labels `[DJI]` instead of
   `[UNKNOWN]`.
-- **TODO — a drone model-id → name table.** Right now only the confirmed ids are known (`0x0070` Mavic 3,
-  `0x007e` Neo 2); both print `unknown(0x00xx)`. Konrad to source a fuller **DJI drone model-id list** so
-  they resolve by name (and can be tagged "drone" vs "camera"). Add to `BleConstants.MODEL_NAMES`.
+- **A drone model-id → name table — partly done.** Both confirmed ids now resolve by name in
+  `BleConstants.MODEL_NAMES` (`0x0070` Mavic 3, `0x007e` Neo 2) and carry `isDrone` in `CameraModel`;
+  anything else at or above `0x40` falls back to drone defaults by the `DRONE_ID_FLOOR` guess. A fuller
+  list is still wanted so unknown aircraft resolve by name rather than by threshold. **Dead end worth
+  recording:** the `LctProductType` enum in a decompiled DJI-derived app is *not* this table — its
+  `0x70` is a Matrice-class aircraft where ours is the Mavic 3, and our Nano's `0x19` is absent
+  entirely. Two schemes that look interchangeable and aren't.
 - **Seen already — DJI Neo 2 (`0x007e`).** In a tester's scan it **pairs over the same BLE DUML**, but
   returns **no WiFi password** to `0x07/0x0e` (the getter that works on every Osmo) — the app correctly
   falls back to the manual-password prompt, which the tester didn't complete. So the credential path
@@ -844,5 +867,70 @@ on-device.
   of this item; the guess that drones "may not use CompositePack" was right.
 - **Scope note (updated):** this started as "see how far the existing DUML stack reaches". It reaches
   all the way — list, paging and download are the same stack with a different manifest body and a `/v1`
-  URL, so drone support is now a real feature rather than an experiment. Thumbnails are the one piece
-  that genuinely needs new plumbing (DUML-delivered, not HTTP).
+  URL, so drone support is now a real feature rather than an experiment. Thumbnails turned out **not**
+  to need the DUML plumbing this note once predicted: video cells use the `/v1` THM rendition and stills
+  come out of the original's EXIF, both over plain HTTP.
+
+---
+
+## 15. Background downloads with a progress notification — ⬜ TODO
+
+**Where it stands now:** a download queue runs on a bare `Thread` started by the Activity
+([MainActivity](app/src/main/java/dev/konraditurbe/osmosis/ui/MainActivity.kt): `Thread { MediaDownloader(…).run(jobs, listener) }`),
+with progress rendered only into the in-app UI. The one foreground service in the manifest is
+`rsdk.GpsService`. So leaving the app puts a multi-gigabyte transfer at the mercy of process death,
+and there is nothing in the shade to show it is alive.
+
+**Wanted:** move the queue into a foreground service with an ongoing notification — determinate
+progress bar, current filename and *n of m*, plus pause/cancel actions.
+
+Worth thinking about before writing it:
+- **The network binding is the hard part, not the notification.** Downloads only work because the
+  process is bound to the camera AP (`bindProcessToNetwork`); a service must own or share that binding,
+  and must react when the AP drops (the BLE link is torn down at handoff, and the camera can sleep
+  mid-queue).
+- Android 14+ wants a declared `foregroundServiceType` — `dataSync` is the fit — and posting the
+  notification needs `POST_NOTIFICATIONS`.
+- Resumable range requests already exist in `MediaDownloader`, so a killed transfer should resume
+  rather than restart; that is most of the value of doing this at all.
+- The drone path holds a **leased transfer slot** per datalink operation (#14). Downloads themselves are
+  plain HTTP and unaffected, but a background queue that outlives the foreground session must not keep
+  a lease alive behind the user's back.
+
+## 16. Per-file shooting details (ISO, shutter, EV…) like Mimo — ⬜ TODO
+
+Mimo's playback screen shows what the camera was *set to* when the file was shot. We show duration, fps,
+resolution and size — all manifest fields — but nothing about exposure.
+
+Note this is **per-file capture metadata**, distinct from #8, which is about the camera's *live* settings.
+
+Three candidate sources, cheapest first:
+- **Stills: already on the wire.** The EXIF thumbnail path fetches the original's first 64 kB
+  ([EmbeddedJpeg.HEAD_BYTES](app/src/main/java/dev/konraditurbe/osmosis/core/EmbeddedJpeg.kt)), and the
+  same `APP1` block carries the standard EXIF tags — ISO, exposure time, aperture, focal length. The
+  bytes are being downloaded and thrown away today; reading them costs one extra parse and **zero extra
+  requests**. This is the obvious first increment.
+- **Video: the `djmd` track.** DJI clips carry an in-file metadata track that is **protobuf, not
+  encrypted** — decodable, and it also carries GPS. Needs a range read of the right atom rather than the
+  whole clip.
+- **Drone: `file_subtype` 11 `PHOTO_METADATA` / 13 `JSON`.** Named in a decompiled DJI-derived app but
+  never requested against an aircraft; the firmware may serve them per index, in which case it is a
+  single small `/v1` fetch. Untested — subtypes 3–16 were refused on a Neo 2.
+
+## 17. Mavic 3: resolution + fps in the preview — ⬜ TODO
+
+Drone cells show duration and size but no resolution, because the 94-byte DCF record is only decoded as
+far as `+14` (mtime `@0`, size `@4`, index `@8`, duration `@12` — see
+[DcfRecords](app/src/main/java/dev/konraditurbe/osmosis/dcf/DcfRecords.kt)). The remaining ~80 bytes are
+unmapped and are the likely home of the format fields.
+
+**Do it the way the camera one was done, because that worked:** the camera's `resolution` byte is a
+DJI-wide format index (`10`=1080p, `16`=4K 16:9, `95`=2.7K 4:3, …) that was pinned by ground-truthing
+manifest bytes against `ffprobe` output on files pulled off the card. Same method here — download a
+handful of Mavic 3 clips at deliberately different resolutions and frame rates, then diff their records.
+
+Two cautions from that exercise:
+- **Table the enum, never compute it.** The camera's codes are sparse and unordered, and there is no
+  reason to expect the drone's to be denser.
+- **Don't assume the camera's table transfers.** It may well be the same DJI-wide index — worth testing
+  first, since it would make this nearly free — but a wrong shared assumption would mislabel every clip.

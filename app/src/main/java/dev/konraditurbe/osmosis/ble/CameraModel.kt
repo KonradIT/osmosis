@@ -60,12 +60,14 @@ data class CameraModel(
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
             0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
             0x0021 to CameraModel("Osmo Pocket 4"),
-            // Drones (offload exploratory — see ROADMAP #14). BLE pair + WiFi creds work with the
-            // "DJI FLY" token. The datalink is the SAME handshake as a camera but on **udp/9003** with
-            // NO tcp-7001 poke (from a QuickTransfer PCAP of a Mavic 3: the phone sends the identical
-            // handshake to 192.168.2.1:9003; TCP-6001 probes were all RST'd). Media *download* channel
-            // still TBD. Port unconfirmed on the Neo 2 — shares the drone default until tested.
-            ID_MAVIC_3 to CameraModel("Mavic 3", datalinkPort = 9003, tcpPoke = false, isDrone = true),
+            // Drones (see ROADMAP #14). The datalink is the SAME handshake as a camera but on
+            // **udp/9003** with NO tcp-7001 poke — plus a `0x51/0x02` session-open the cameras don't
+            // need, before which the aircraft answers nothing at all.
+            //
+            // The Mavic 3 is verified end-to-end on hardware: pair, creds, AP, the full paged library
+            // with thumbnails, preview and download. The Neo 2 is a tester scan only — never offloaded,
+            // port unconfirmed, sharing the drone default until someone tests one.
+            ID_MAVIC_3 to CameraModel("Mavic 3", datalinkPort = 9003, tcpPoke = false, isDrone = true, verified = true),
             ID_NEO_2 to CameraModel("DJI Neo 2", datalinkPort = 9003, tcpPoke = false, isDrone = true),
         )
 

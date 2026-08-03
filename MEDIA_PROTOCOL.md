@@ -622,8 +622,30 @@ Mimo does **not** send ConnectToWiFi (#25) anywhere in this flow.
 
 ### 22. SetPairingPIN
 - Cmd Set / ID: `0x07` / `0x45`  ·  App → WiFi(`0x07`), BLE
-- Payload: `PackString(identifier)` + `PackString(token)` (`PackString` = `[len:u8][utf8]`; token `"osmo"`)
-- Response: `0x07/0x45` payload `00 01` = already paired · `00 02` = approval popup on camera; approval then arrives as a **`0x07/0x46` request** (flags `0x40`), which is the "go" signal.
+- Payload: `PackString(identifier)` + `PackString(token)` (`PackString` = `[len:u8][utf8]`)
+- Response: `0x07/0x45` payload `00 01` = already paired · `00 02` = approval required. Approval then arrives as a **`0x07/0x46` request** (flags `0x40`), not a response — it must be ACKed like any other request, and it is the "go" signal.
+
+**Both fields matter, and they gate different things.**
+
+| field | camera | drone |
+|---|---|---|
+| token | `"osmo"` — any value pairs | **`"DJI FLY"`** — anything else pairs but the WiFi getters return nothing |
+| identifier | 32 chars; the generic one is accepted | 32 chars; **this is what the device remembers** |
+
+The **identifier is the key a device stores its approval under** — proven on a Mavic 3 by rotating it: the same aircraft that had been re-pairing silently (`0x45` → `0x01`) for days answered `0x45` → `0x02` and demanded confirmation the moment it saw a string it hadn't approved. Present a known identifier and it skips the approval entirely.
+
+Two consequences:
+- An app should mint **one identifier per install and persist it**, as DJI Fly does. A constant shared across installs is silent only for whoever's device already approved it; a fresh one per launch prompts every time and burns a remembered slot each time.
+- **Send the same identifier on retries.** `fff5` is write-without-response, so a first write can drop; a retry carrying a different identifier reads as a second app asking to pair.
+
+**Confirming, on hardware without a screen.** A camera prompts on its own display. A drone flashes its LEDs and waits for a power-button hold — 2 s on most models, 3 s on the newest, while the **Mini 3** has no hold at all and instead needs three quick presses to enter QuickTransfer mode. Full sequence measured on a Mavic 3:
+
+```
+11:44:50.447  -> 0x07/0x45  SetPairingPIN(token="DJI FLY", id="c7f10a83…")
+11:44:51.894  <- 0x07/0x45  [00 02]   approval required — LEDs start chasing
+11:45:01.886  <- 0x07/0x46  [01]      (request, flags 0x40) — after the button hold
+11:45:03.497  <- 0x07/0x0e            passphrase released
+```
 - DUML example: <https://b3yond.d3vl.com/duml/#553304c2020700a0400745203238346165356238643736623333373561303461363431376164373162656133046f736d6f8c02>
 
 ### 23. ConnectToWiFi (AP bring-up — fallback only)
