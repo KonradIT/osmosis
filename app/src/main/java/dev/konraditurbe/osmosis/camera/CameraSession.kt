@@ -2,6 +2,7 @@ package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.StorageRules
+import dev.konraditurbe.osmosis.dcf.DcfRecords
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.net.DumlSession
 import dev.konraditurbe.osmosis.net.DumlTransport
@@ -1888,6 +1889,15 @@ class CameraSession(
     }
 
     private fun decodeManifest(bytes: ByteArray, store: String = ""): List<CameraFile> {
+        // The older Osmo Action generation answers with a flat DCF record array instead of
+        // CompositePack — no paths, no filenames, files addressed by packed index. Its header is
+        // self-describing ([u32 count][u32 totalBytes] where totalBytes covers itself), so this can be
+        // tried first without risking a CompositePack manifest being misread as one.
+        val dcf = DcfRecords.decodeAction1(bytes)
+        if (dcf.isNotEmpty()) {
+            log("datalink: decoded ${dcf.size} DCF index records${storeTag(store)} (older Osmo Action generation)")
+            return dcf.map { it.toCameraFile() }
+        }
         val comp = decodeComposite(bytes, store)
         if (comp.isNotEmpty()) {
             log("datalink: decoded ${comp.size} CompositePack records${storeTag(store)} " +
