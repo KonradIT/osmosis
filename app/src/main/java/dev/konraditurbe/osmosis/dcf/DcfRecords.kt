@@ -51,12 +51,11 @@ object DcfRecords {
     /** Drone (Mavic 3 family) record stride. */
     const val DRONE_STRIDE = 94
 
-    /**
-     * Osmo Action 1 record stride — its list is `[u32 count][u32 totalBytes]` then fixed 65-byte records
-     * carrying **unix** seconds at `+0` (not FAT) and the packed index at `+8`. Decoder lands with the
-     * `add-osmo-action-support` branch, which has the fixture to test it against; see ROADMAP #6.
-     */
+    /** Osmo Action 1 record stride. See [decodeAction1]. */
     const val ACTION1_STRIDE = 65
+
+    /** Header on an Action 1 list: `[u32 count][u32 totalBytes]`, where totalBytes covers the header. */
+    private const val ACTION1_HEADER = 8
 
     /**
      * Decode a drone's reassembled record bytes.
@@ -83,6 +82,61 @@ object DcfRecords {
             val duration = u16(blob, off + 12)
             if (!DcfIndex.isPlausible(index) || size == 0L) continue
             out.add(DcfRecord(index, size, duration, DcfIndex.fatToEpoch(mtime)))
+        }
+        return out
+    }
+
+    /**
+     * Decode an Osmo Action 1 list: `[u32 count][u32 totalBytes]` then fixed 65-byte records.
+     *
+     * **The first 14 bytes are laid out exactly like [decodeDrone]'s** — same fields, same offsets,
+     * despite the different stride and a decade between the two firmwares:
+     * ```
+     * +0  u32  mtime, **unix seconds** — unlike the drone, which packs FAT/DOS here
+     * +4  u32  file size in bytes
+     * +8  u32  file_index, packed     — see [DcfIndex]
+     * +12 u16  duration, whole seconds (truncated)
+     * +19 u32  Amba video UUID        — matches `DjiMovDmx` in the camera's own log; not surfaced
+     * +38 u32  duration in **milliseconds**
+     * ```
+     * Fields past `+42` are unmapped.
+     *
+     * `+12` and `+38` identify each other: across all seven fixture records the millisecond value is
+     * exactly the second value × 1000 plus a sub-second remainder (117 ↔ 117550, 174 ↔ 174941,
+     * 306 ↔ 306606). That also retires an older guess that `+38` was a file size — the "0.6 MB" once
+     * read there is 667 **ms**.
+     *
+     * **Milliseconds are what decides still-vs-video, not seconds.** The fixture contains a 0.667 s
+     * clip whose `+12` is therefore `0`, which the drone's `durationSec == 0` rule would call a photo;
+     * the camera's own log lists its UUID among the `DjiMovDmx` videos. Sub-second durations are
+     * rounded up to 1 s so that rule still holds downstream.
+     *
+     * Two fields were previously read wrong, and both mattered. `+12` was taken for the DCF *file
+     * number* and used to synthesise filenames, so a clip whose real name is `DJI_0593.MP4` appeared as
+     * `…_0117_…`; and `+10` was read as the DCF directory, which is really the **high half of the u32
+     * index** — the same mis-slicing that hides internal storage on a drone. The DCF directory and file
+     * number come out of [DcfIndex], never off raw offsets.
+     *
+     * Returns an empty list when the bytes are not this format, so a caller can fall through to the
+     * path-based decoder.
+     */
+    fun decodeAction1(blob: ByteArray): List<DcfRecord> {
+        if (blob.size < ACTION1_HEADER + ACTION1_STRIDE) return emptyList()
+        val count = u32(blob, 0).toInt()
+        val total = u32(blob, 4).toInt()
+        // The header is self-describing: reject anything that doesn't account for itself exactly.
+        if (count !in 1..100_000 || total != blob.size) return emptyList()
+        if (ACTION1_HEADER + count * ACTION1_STRIDE != total) return emptyList()
+
+        val out = ArrayList<DcfRecord>(count)
+        for (k in 0 until count) {
+            val off = ACTION1_HEADER + k * ACTION1_STRIDE
+            val index = u32(blob, off + 8)
+            if (!DcfIndex.isPlausible(index)) continue
+            val ms = u32(blob, off + 38)
+            // Round a sub-second clip up rather than to zero: zero means "still" everywhere downstream.
+            val seconds = if (ms in 1..999) 1 else (ms / 1000).toInt()
+            out.add(DcfRecord(index, u32(blob, off + 4), seconds, u32(blob, off)))
         }
         return out
     }
