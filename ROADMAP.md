@@ -787,8 +787,24 @@ being unwired, no hardware run — is done. See the top of this item. What's gen
   somewhere (see the new item #18).
 - **`PROXY_MOOV` / `ORIGIN_MOOV`** (`file_subtype` 15/16) serve an MP4's `moov` atom alone and would
   replace the range request preview currently pays to find it. Untested on any aircraft.
-- **Neo 2 (`0x007e`)** shares the drone defaults but has never been offloaded — its datalink port is
-  unconfirmed and a tester's scan showed it refusing `0x07/0x0e`.
+- **Neo 2 (`0x007e`) — reaches the datalink, then stalls at the `0x51` session-open.** A tester run
+  (2026-08-03) got much further than the earlier scan suggested, and corrects two things previously
+  recorded here: it **does** hand over WiFi credentials (`0x07/0x07` → `DJI-NEO2-168D`, `0x07/0x0e` →
+  a 12-char passphrase), and its **datalink port really is 9003** — the handshake lands and the channel
+  is learned (`session=0x7b46 channel=0x87b8`).
+
+  What fails is one step later: `no drone serial seen in a beacon — cannot open the session`. The
+  session-open has to echo the aircraft's serial back at it, and the serial is read out of its own
+  `0x51/0x13` beacon. Without it there is no session, so the list query draws `rx [NOTHING]` and the
+  grid is empty. This is **not** a `/v1`-vs-`/v2` question — no manifest is reached at all.
+
+  Two candidate causes, now instrumented rather than guessed: the parser required a serial of
+  **exactly 20 characters** (a Mavic 3's length), which would silently reject any other; or the Neo 2
+  never emits the beacon. A failed open now logs every `0x51` inner command seen and dumps a `0x13`
+  payload if one arrived, so the next run distinguishes them.
+
+  Also seen, and secondary until the above is fixed: the **AP dropped after ~16 s**, 112 ms *before*
+  the list query went out — so that query never left the phone regardless.
 - **Any drone that isn't a Mavic 3.** Model ids at or above `0x40` fall back to the drone defaults on a
   documented guess (`CameraModel.DRONE_ID_FLOOR`); the Mini 3's real model byte is still unknown.
 
@@ -808,10 +824,10 @@ being unwired, no hardware run — is done. See the top of this item. What's gen
   `0x70` is a Matrice-class aircraft where ours is the Mavic 3, and our Nano's `0x19` is absent
   entirely. Two schemes that look interchangeable and aren't.
 - **Seen already — DJI Neo 2 (`0x007e`).** In a tester's scan it **pairs over the same BLE DUML**, but
-  returns **no WiFi password** to `0x07/0x0e` (the getter that works on every Osmo) — the app correctly
-  falls back to the manual-password prompt, which the tester didn't complete. So the credential path
-  differs on the drone side; whether it exposes creds via a different cmd, or expects the AP set up
-  another way, is unknown.
+  returned **no WiFi password** to `0x07/0x0e` — so the credential path looked like it differed on the
+  drone side. **Superseded (2026-08-03):** with the `DJI FLY` token it hands over both SSID and
+  passphrase exactly like a camera. The earlier refusal was the token, not the model. See the Neo 2
+  entry under "Still open" for where it actually stops.
 - **Mavic 3 (`0x0070`) — BLE snoop findings (2026-07-25).** An HCI snoop of **DJI Fly** then Osmosis,
   back to back (same method as #3/#10), on a real Mavic 3:
   - **Pairing is identical to a camera.** Both apps use `0x07/0x45 SetPairingPIN` — DJI Fly with token
