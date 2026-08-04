@@ -324,19 +324,37 @@ class DroneSession(
     /** Common 22-byte wrapper tail; byte 5 is the counter `sendDumlRaw` re-stamps per frame. */
     private val trailing51 = hex("39fdb2ae020100000079102e9b010000000000000000")
 
-    /** The drone's 20-char serial, read from its own `0x51/0x13` beacon. */
+    /** The drone's serial, read from its own `0x51/0x13` beacon. Length varies by model. */
     @Volatile private var droneSerial: ByteArray? = null
 
+    /** Plausible serial lengths. A Mavic 3's is 20; the bound exists to reject a coincidental `0x11`. */
+    private val MIN_SERIAL = 8
+    private val MAX_SERIAL = 32
+
+    /** Every `0x51` sub-command seen, so a drone that never beacons is distinguishable from one whose
+     *  beacon we failed to parse. Those need completely different fixes. */
+    private val seen51 = LinkedHashMap<Int, Int>()
+    /** First `0x51/0x13` payload seen, kept verbatim for the log when the serial can't be read out. */
+    @Volatile private var beacon13: ByteArray? = null
+
     /**
-     * Pull the serial out of a `0x51/0x13` beacon payload: a `0x11` tag followed by 20 printable ASCII
-     * bytes (`1581F45T8241200EA1TA`). Parsing it is what makes the session-open work on *any* drone
-     * rather than only the one that was captured.
+     * Pull the serial out of a `0x51/0x13` beacon payload: a `0x11` tag followed by a run of printable
+     * ASCII. Parsing it is what makes the session-open work on *any* drone rather than only the one
+     * that was captured.
+     *
+     * The length is **measured, not assumed**. It was fixed at 20 because that is what a Mavic 3 emits
+     * (`1581F45T8241200EA1TA`), which silently rejects any aircraft whose serial is a different length —
+     * the tag would be found, the fixed-width slice would fail its printable check, and the session
+     * could never open. [MIN_SERIAL] is what keeps a stray `0x11` byte followed by a couple of ASCII
+     * characters from being mistaken for one.
      */
     private fun parseDroneSerial(payload: ByteArray): ByteArray? {
-        for (i in 0..payload.size - 21) {
+        for (i in payload.indices) {
             if ((payload[i].toInt() and 0xFF) != 0x11) continue
-            val s = payload.copyOfRange(i + 1, i + 21)
-            if (s.all { it >= 0x20 && it < 0x7F }) return s
+            var end = i + 1
+            while (end < payload.size && payload[end] >= 0x20 && payload[end] < 0x7F) end++
+            val len = end - (i + 1)
+            if (len in MIN_SERIAL..MAX_SERIAL) return payload.copyOfRange(i + 1, end)
         }
         return null
     }
@@ -347,11 +365,27 @@ class DroneSession(
         for ((set, cmd, pl) in scanFrames(raw)) {
             if (set != 0x51 || cmd != 0x01 || pl.size < 13 || (pl[0].toInt() and 0xFF) != 0x55) continue
             val ln = (pl[1].toInt() and 0xFF) or ((pl[2].toInt() and 0x03) shl 8)
-            if (ln > pl.size || (pl[10].toInt() and 0xFF) != 0x13) continue
-            parseDroneSerial(pl.copyOfRange(11, ln - 2))?.let {
+            if (ln > pl.size) continue
+            val inner = pl[10].toInt() and 0xFF
+            seen51[inner] = (seen51[inner] ?: 0) + 1
+            if (inner != 0x13) continue
+            val body = pl.copyOfRange(11, ln - 2)
+            if (beacon13 == null) beacon13 = body
+            parseDroneSerial(body)?.let {
                 droneSerial = it
-                log("datalink: drone serial ${String(it, Charsets.US_ASCII)}")
+                log("datalink: drone serial ${String(it, Charsets.US_ASCII)} (${it.size} chars)")
             }
+        }
+    }
+
+    /** What the drone was actually saying when we failed to find a serial — the difference between
+     *  "never beaconed" and "beaconed in a shape we don't parse". */
+    private fun logBeaconDiagnostics() {
+        val inner = seen51.entries.joinToString(", ") { "0x%02x×%d".format(it.key, it.value) }
+        log("datalink: 0x51 inner cmds seen: ${if (inner.isEmpty()) "NONE" else inner}")
+        beacon13?.let {
+            log("datalink: a 0x51/0x13 beacon DID arrive but carried no readable serial — payload " +
+                it.copyOfRange(0, minOf(64, it.size)).joinToString("") { b -> "%02x".format(b) })
         }
     }
 
@@ -399,6 +433,7 @@ class DroneSession(
         }
         val serial = droneSerial ?: run {
             log("datalink: no drone serial seen in a beacon — cannot open the session")
+            logBeaconDiagnostics()
             return
         }
         for ((i, frame) in droneOpenFrames(serial).withIndex()) {
