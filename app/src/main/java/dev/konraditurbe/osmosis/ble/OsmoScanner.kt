@@ -79,8 +79,9 @@ class OsmoScanner(
                 }
             }
 
-            // Recognize DJI *and* Xtra (rebrand): by OUI (EC:9E:EA)/name via Brand, or DJI mfr data.
-            val brand = Brand.of(dev.address, name)
+            // Recognize DJI *and* Xtra (rebrand): by OUI (EC:9E:EA)/name via Brand, or — most robustly
+            // — the DJI company id in the mfr data (mfrHex is only set when that cid matched).
+            val brand = Brand.of(dev.address, name, djiCid = mfrHex != null)
             val looksCamera = brand != Brand.UNKNOWN || modelGuess != null
 
             val key = dev.address

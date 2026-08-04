@@ -33,7 +33,7 @@ class CameraListAdapter(private val rows: List<CamRow>) : BaseAdapter() {
             .inflate(R.layout.item_camera, parent, false)
         val r = rows[position]
         v.findViewById<TextView>(R.id.camType).text =
-            r.model.name + if (!r.model.verified) "  ~experimental" else ""
+            r.model.name + if (!r.model.verified) "  🧪" else ""
         v.findViewById<TextView>(R.id.camName).text = r.name ?: r.mac
         v.findViewById<TextView>(R.id.camStatus).text = if (r.inRange) "📶" else "🚫"
         v.findViewById<TextView>(R.id.camTag).visibility = if (r.saved) View.GONE else View.VISIBLE

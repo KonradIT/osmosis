@@ -452,7 +452,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val savedRows = saved.map { e ->
             val c = byMac[e.mac]
             CamRow(e.mac, c?.name ?: e.name,
-                c?.model ?: CameraModel.resolve(e.modelId.takeIf { it >= 0 }, e.name, Brand.of(e.mac, e.name)),
+                c?.model ?: CameraModel.resolve(e.modelId.takeIf { it >= 0 }, e.name, Brand.of(e.mac, e.name, djiCid = e.modelId >= 0)),
                 inRange = c != null, saved = true, device = c?.device)
         }
         val newRows = scanned.filter { it.device.address !in savedMacs }.map { c ->
@@ -562,7 +562,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             return
         }
         val cam = discovered[device.address]
-        currentBrand = Brand.of(device.address, cam?.name ?: safeName(device))
+        currentBrand = Brand.of(device.address, cam?.name ?: safeName(device), djiCid = cam?.modelId != null)
         currentModel = cam?.model ?: CameraModel.resolve(null, safeName(device), currentBrand)
         currentModelId = cam?.modelId
         currentAddress = device.address
@@ -1290,10 +1290,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val addr = device.address
         // Brand matters, not just the model id: the Xtra rebrand shares model 0x0015 with the DJI
         // Osmo Action 5 Pro but uses a different datalink port. Its OUI gives it away.
-        val model = CameraModel.resolve(modelId, name, Brand.of(addr, name))
-        if (discovered.put(addr, Cam(device, name, Brand.of(addr, name), rssi, modelId, model)) == null) {
-            logLine("found ${model.name} [${Brand.of(addr, name)}] (${name ?: addr}) rssi=$rssi" +
-                if (!model.verified) "  ~experimental" else "")
+        val model = CameraModel.resolve(modelId, name, Brand.of(addr, name, djiCid = modelId != null))
+        if (discovered.put(addr, Cam(device, name, Brand.of(addr, name, djiCid = modelId != null), rssi, modelId, model)) == null) {
+            logLine("found ${model.name} [${Brand.of(addr, name, djiCid = modelId != null)}] (${name ?: addr}) rssi=$rssi" +
+                if (!model.verified) "  🧪" else "")
             main.post { rebuildCameraList() }
         }
     }
