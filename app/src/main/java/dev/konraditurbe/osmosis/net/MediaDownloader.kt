@@ -1,5 +1,6 @@
 package dev.konraditurbe.osmosis.net
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.media.MediaCodec
@@ -225,7 +226,16 @@ class MediaDownloader(
          * whose manifest/HEAD size disagreed slightly with the stored bytes, re-saving them as duplicates
          * every run.) Used by the preview to gray out the download button for a *whole* (untrimmed) file.
          */
-        fun isDownloaded(context: Context, file: CameraFile): Boolean {
+        fun isDownloaded(context: Context, file: CameraFile): Boolean = downloadedUri(context, file) != null
+
+        /**
+         * The saved copy's `content://` Uri, or null if it isn't in the gallery yet.
+         *
+         * Same match as [isDownloaded] — completed row, by unique capture name — but keeping the row id
+         * instead of discarding it, so the file can be handed to another app (share / edit). A MediaStore
+         * Uri is directly grantable, which a raw path would not be.
+         */
+        fun downloadedUri(context: Context, file: CameraFile): Uri? {
             val collection = when {
                 file.isVideo -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
                 file.isImage -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -234,9 +244,17 @@ class MediaDownloader(
             val proj = arrayOf(MediaStore.MediaColumns._ID)
             val sel = "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.IS_PENDING}=0"
             return runCatching {
-                context.contentResolver.query(collection, proj, sel, arrayOf(file.name), null)?.use { it.count > 0 }
-                    ?: false
-            }.getOrDefault(false)
+                context.contentResolver.query(collection, proj, sel, arrayOf(file.name), null)?.use { c ->
+                    if (c.moveToFirst()) ContentUris.withAppendedId(collection, c.getLong(0)) else null
+                }
+            }.getOrNull()
+        }
+
+        /** MIME for a saved copy, matching what the download wrote. */
+        fun mimeOf(file: CameraFile): String = when {
+            file.isVideo -> "video/mp4"
+            file.isImage -> "image/jpeg"
+            else -> "application/octet-stream"
         }
     }
 

@@ -47,6 +47,10 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private lateinit var videoView: VideoView
     private lateinit var photoView: ImageView
+    private var photoZoom: PhotoZoom? = null
+    private lateinit var savedActions: View
+    /** Uri of the current item's saved copy, or null when it isn't in the gallery yet. */
+    private var savedUri: android.net.Uri? = null
     private lateinit var spinner: ProgressBar
     private lateinit var statusText: TextView
     private lateinit var topInfo: TextView
@@ -110,6 +114,9 @@ class MediaPreviewActivity : AppCompatActivity() {
         spinner = findViewById(R.id.spinner)
         statusText = findViewById(R.id.statusText)
         topInfo = findViewById(R.id.topInfo)
+        savedActions = findViewById(R.id.savedActions)
+        findViewById<View>(R.id.btnShare).setOnClickListener { sendSavedCopy(Intent.ACTION_SEND) }
+        findViewById<View>(R.id.btnEdit).setOnClickListener { sendSavedCopy(Intent.ACTION_EDIT) }
         btnQueue = findViewById(R.id.btnQueue)
         btnMarkIn = findViewById(R.id.btnMarkIn)
         btnMarkOut = findViewById(R.id.btnMarkOut)
@@ -150,14 +157,21 @@ class MediaPreviewActivity : AppCompatActivity() {
         resolution = intent.getStringExtra(EXTRA_RESOLUTION))
 
     /** Tap the media to toggle overlays; a horizontal fling moves to the prev/next item — but only when
-     *  paused (photos are always swipeable). Swipe **left = next**, **right = previous**. */
+     *  paused (photos are always swipeable). Swipe **left = next**, **right = previous**. A photo also
+     *  pinch-zooms, and while it is zoomed the fling is suppressed so a drag pans instead of navigating. */
     private fun installSwipeAndTap() {
         val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             // MUST return true so the detector consumes the DOWN and keeps getting MOVE/UP — otherwise
             // the view never forwards the rest of the gesture and onFling/onSingleTap never fire.
             override fun onDown(e: MotionEvent): Boolean = true
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean { toggleControls(); return true }
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (file.isVideo) return false
+                photoZoom?.toggle(e.x, e.y)
+                return true
+            }
             override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                if (photoZoom?.isZoomed == true) return false   // panning a magnified photo, not navigating
                 if (kotlin.math.abs(vx) < kotlin.math.abs(vy) || kotlin.math.abs(vx) < 800f) return false
                 if (navItems.isEmpty() || (file.isVideo && videoView.isPlaying)) return false
                 loadItem(navIndex + if (vx < 0) 1 else -1)   // swipe left = next, swipe right = previous
@@ -167,7 +181,18 @@ class MediaPreviewActivity : AppCompatActivity() {
         @Suppress("ClickableViewAccessibility")
         val touch = View.OnTouchListener { _, ev -> gd.onTouchEvent(ev) }
         videoView.setOnTouchListener(touch)
-        photoView.setOnTouchListener(touch)
+
+        val zoom = PhotoZoom(photoView)
+        photoZoom = zoom
+        @Suppress("ClickableViewAccessibility")
+        photoView.setOnTouchListener { _, ev ->
+            // Both get every event: zoom claims only pinches and pans, while the detector still needs
+            // the full stream for single- and double-tap. Always consume, or the view stops delivering
+            // MOVE/UP after the DOWN and every gesture here dies half-way.
+            zoom.onTouch(ev)
+            gd.onTouchEvent(ev)
+            true
+        }
     }
 
     /** Move to a different item in the filtered list: reset per-item state and (re)load the media. */
@@ -196,8 +221,10 @@ class MediaPreviewActivity : AppCompatActivity() {
         photoView.visibility = View.GONE
         statusText.visibility = View.GONE
         spinner.visibility = ProgressBar.VISIBLE
+        // `controls` is the whole bottom overlay — it holds Add-to-Queue and the burst strip as well as
+        // the transport, so it must stay up for stills. Only the transport/trim row is video-only.
         trimRow.visibility = if (file.isVideo) View.VISIBLE else View.GONE
-        controls.visibility = if (file.isVideo) View.VISIBLE else View.GONE
+        controls.visibility = View.VISIBLE
         topInfo.visibility = View.VISIBLE
 
         renderTop()
@@ -273,6 +300,7 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     // Name -> "already fully saved" — checked off the UI thread, cached (per burst frame / the single file).
     private val downloadedCache = HashMap<String, Boolean>()
+    private val savedUriCache = HashMap<String, android.net.Uri?>()
 
     /** The item the download button acts on: the selected burst frame, or the single file. Per-frame size
      *  is only known for the lead (frame 0), so other frames fall back to a name-only match. */
@@ -290,14 +318,51 @@ class MediaPreviewActivity : AppCompatActivity() {
         val name = f.name
         if (!hasTrim() && !downloadedCache.containsKey(name)) {
             Thread {
-                val done = dev.konraditurbe.osmosis.net.MediaDownloader.isDownloaded(this, f)
-                main.post { downloadedCache[name] = done; refreshQueueButton() }
+                // One query answers both questions — the row's existence grays out Download, and its id
+                // is the Uri that Share/Edit hand to the other app.
+                val uri = dev.konraditurbe.osmosis.net.MediaDownloader.downloadedUri(this, f)
+                main.post {
+                    downloadedCache[name] = uri != null
+                    savedUriCache[name] = uri
+                    refreshQueueButton()
+                }
             }.start()
         }
         val alreadySaved = !hasTrim() && downloadedCache[name] == true
         btnQueue.isEnabled = !alreadySaved
         btnQueue.alpha = if (alreadySaved) 0.5f else 1f
         btnQueue.text = if (alreadySaved) "Already downloaded" else queueLabel()
+
+        // Share/Edit act on the saved copy, so they only exist once there is one — and they follow the
+        // title overlay, since a tap-to-hide should clear the frame completely.
+        savedUri = savedUriCache[name]
+        savedActions.visibility =
+            if (savedUri != null && topInfo.visibility == View.VISIBLE) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Hand the saved copy to another app: [Intent.ACTION_SEND] for the share sheet, [Intent.ACTION_EDIT]
+     * for editors (Snapseed and friends register for it).
+     *
+     * Both go through a chooser rather than a default, and both grant read — plus write for EDIT, since
+     * an editor saving in place needs it. Only ever a MediaStore Uri, which is grantable as-is.
+     */
+    private fun sendSavedCopy(action: String) {
+        val uri = savedUri ?: return
+        val mime = dev.konraditurbe.osmosis.net.MediaDownloader.mimeOf(currentCheckFile())
+        val intent = Intent(action).apply {
+            if (action == Intent.ACTION_SEND) {
+                type = mime
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } else {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+        }
+        val title = if (action == Intent.ACTION_SEND) "Share" else "Edit with"
+        runCatching { startActivity(Intent.createChooser(intent, title)) }
+            .onFailure { toast("No app available to ${title.lowercase()}") }
     }
 
     /** Wire the custom player (transport + scrubber) and trim buttons — once. Trim *values* are (re)set
@@ -358,13 +423,14 @@ class MediaPreviewActivity : AppCompatActivity() {
     )
 
     /** Tap the media to hide the title + controls for a full-frame view; tap again to bring them back.
-     *  The play/scrubber + trim rows only exist for video, so a photo just toggles the title. */
+     *  Only the transport/trim row is video-only — `controls` itself carries Add-to-Queue and the burst
+     *  strip, so it toggles for stills too. */
     private fun toggleControls() {
         val show = topInfo.visibility != View.VISIBLE
         topInfo.visibility = if (show) View.VISIBLE else View.GONE
-        val v = if (show && file.isVideo) View.VISIBLE else View.GONE
-        controls.visibility = v
-        trimRow.visibility = v
+        savedActions.visibility = if (show && savedUri != null) View.VISIBLE else View.GONE
+        controls.visibility = if (show) View.VISIBLE else View.GONE
+        trimRow.visibility = if (show && file.isVideo) View.VISIBLE else View.GONE
     }
 
     /** Keep the scrubber + current-time in sync while playing (skipped while the user is dragging). */
@@ -505,6 +571,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 renderTop()
                 if (bmp != null) {
                     photoView.setImageBitmap(bmp)
+                    photoZoom?.reset()   // a new bitmap starts fitted, never inheriting the last one's zoom
                     spinner.visibility = ProgressBar.GONE
                     photoView.visibility = ImageView.VISIBLE
                 } else showStatus("Preview unavailable")

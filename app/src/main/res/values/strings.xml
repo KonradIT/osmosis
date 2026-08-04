@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Osmosis</string>
+    <string name="action_share">Share the downloaded file</string>
+    <string name="action_edit">Edit the downloaded file in another app</string>
 </resources>
