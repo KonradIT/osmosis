@@ -511,7 +511,7 @@ session warm with a constant `0x02/0x8e` heartbeat — so *its* pagination is ef
 - **Payoff:** near-instant infinite scroll instead of ~15 s/page — a much nicer feel on 100s-of-clips
   libraries. See `DatalinkClient.fetchNextPage` and [[pagination-index-first]] in memory.
 
-## 13. Improve previews by byte-range-streaming the LRF — 🔬 IDEA
+## 13. Improve previews by byte-range-streaming the LRF — ✅ SCRUB PREVIEW SHIPPED (2026-08-04)
 
 We already stream the low-res `.lrf`/`.lrv` proxy for preview (`MediaPreviewActivity`: `VideoView` +
 native MediaPlayer, which does its own HTTP range requests over the camera's `/v2` endpoint) and it
@@ -519,12 +519,24 @@ plays cleanly. A DJI-Mimo capture shows *how small and range-addressable* the pr
 MP4 header (`bytes 0-4095`) + the `moov` atom at the tail, then progressive ~5 MB chunks — a whole
 clip's proxy is only ~17 MB. That cheap random access opens some nice polish on top of what we have:
 
-- **YouTube-style scrub preview** — a small snapshot window floating above the seek bar while you drag,
-  showing the frame under the cursor. Because the `.lrf` is tiny + range-seekable, decode frames on the
-  fly with `MediaMetadataRetriever.getFrameAtTime` (against the proxy URL or a cached copy), or
-  pre-extract a sparse keyframe filmstrip once.
+- ✅ **YouTube-style scrub preview** — a snapshot window floats above the seek bar while you drag,
+  showing the frame under your thumb. `ScrubFrames` decodes straight off the camera with
+  `MediaMetadataRetriever.getScaledFrameAtTime` + `OPTION_CLOSEST_SYNC` (keyframes only — an exact
+  seek would drag every P-frame back to the previous I-frame over the AP), pointed at whichever
+  preview candidate the player actually opened. Two tiers behind one `nearest(ms)`: a 12-cell grid
+  prefetched in the background so the bubble is never empty, plus on-demand frames that jump the
+  queue as the thumb settles (140 ms debounce, stale requests dropped, newest 16 kept). Dragging no
+  longer seeks the player — the clip jumps once, on release, instead of a range fetch per pixel.
+- ✅ **Measured on hardware** (2026-08-04, Nano `.LRF` + Xtra derived `.XRF`, 41+ frames, 0 failures):
+  **~260 ms/frame on the Xtra, ~420 ms on the Nano, and flat regardless of seek distance** — frame
+  @14 s and frame @325 s of the same clip cost the same. That's the range-seek behaviour confirmed
+  empirically: cost is one keyframe fetch + decode, wherever it lives. A 12-cell grid fills in ~6 s.
+  Repeat hits near the same spot get cheaper (~250 ms) — that region is already warm.
 - **Cache the proxy locally on open** — ~17 MB, so one background fetch gives *instant* seeking/scrubbing
-  (no re-buffer on jumps) and feeds the scrub thumbnails with zero extra range round-trips.
-- **Filmstrip / storyboard strip** under the player for quick visual navigation of long clips.
+  (no re-buffer on jumps) and feeds the scrub thumbnails with zero extra range round-trips. Still open,
+  and now less pressing: the measured per-frame cost above is low enough that on-demand holds up.
+- **Filmstrip / storyboard strip** under the player — *built and hardware-tested, then replaced* by the
+  scrub preview above (the two answer the same question, and the bubble reads better on a phone). Its
+  cell placement lives on in `ScrubFrames.gridTimes`; the row UI is in git history if we want it back.
 
 Not a bug fix (previews already work) — a UX layer the proxy's small size + range access make cheap.

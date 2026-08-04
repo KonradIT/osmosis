@@ -90,6 +90,13 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var highlightStrip: View
     private val imageLoader by lazy { ImageLoader(http) { Log.i("Osmosis", it) } }
 
+    // Scrub preview: the frame under the thumb, floated above the seek bar during a drag.
+    private lateinit var previewRoot: View
+    private lateinit var scrubPreview: View
+    private lateinit var scrubImage: ImageView
+    private lateinit var scrubTime: TextView
+    private val scrubFrames by lazy { ScrubFrames { Log.i("Osmosis", it) } }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_preview)
@@ -132,6 +139,10 @@ class MediaPreviewActivity : AppCompatActivity() {
         burstStrip = findViewById(R.id.burstStrip)
         highlightRow = findViewById(R.id.highlightRow)
         highlightStrip = findViewById(R.id.highlightStrip)
+        previewRoot = findViewById(R.id.previewRoot)
+        scrubPreview = findViewById(R.id.scrubPreview)
+        scrubImage = findViewById(R.id.scrubImage)
+        scrubTime = findViewById(R.id.scrubTime)
 
         // One-time wiring; the media itself is (re)loaded per item in loadCurrent().
         setupTrimListeners()
@@ -205,6 +216,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         burstRow.removeAllViews(); burstStrip.visibility = View.GONE
         main.removeCallbacks(highlightsRunnable)
         highlightRow.removeAllViews(); highlightStrip.visibility = View.GONE
+        scrubFrames.close()
+        hideScrubPreview()
         runCatching { videoView.stopPlayback() }
         main.removeCallbacks(tick)
         loadCurrent()
@@ -371,12 +384,26 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnPlay.setOnClickListener { togglePlay() }
         btnRew.setOnClickListener { seekBy(-5000) }
         btnFf.setOnClickListener { seekBy(5000) }
+        // Dragging moves the *preview*, not the player: the frame under the thumb shows in a bubble
+        // over the bar and the clip jumps once, on release. Seeking live used to fire a seek per
+        // pixel of travel, each one a fresh range fetch over the camera's AP.
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) { videoView.seekTo(progress); txtCur.text = mmss(progress.toLong()) }
+                if (!fromUser) return
+                txtCur.text = mmss(progress.toLong())
+                showScrubPreview(progress)
+                main.removeCallbacks(scrubRefine)
+                main.postDelayed(scrubRefine, 140)   // sharpen only once the thumb settles
             }
-            override fun onStartTrackingTouch(sb: SeekBar) { scrubbing = true }
-            override fun onStopTrackingTouch(sb: SeekBar) { scrubbing = false }
+            override fun onStartTrackingTouch(sb: SeekBar) {
+                scrubbing = true
+                showScrubPreview(sb.progress)
+            }
+            override fun onStopTrackingTouch(sb: SeekBar) {
+                scrubbing = false
+                hideScrubPreview()
+                seekToMs(sb.progress.toLong())
+            }
         })
 
         btnMarkIn.setOnClickListener {
@@ -487,14 +514,87 @@ class MediaPreviewActivity : AppCompatActivity() {
                 ).apply { setMargins((4 * d).toInt(), 0, (4 * d).toInt(), 0) }
                 setBackgroundColor(accent)
                 setOnClickListener {
-                    videoView.seekTo(ms)
-                    seekBar.progress = ms
-                    txtCur.text = mmss(ms.toLong())
+                    seekToMs(ms.toLong())
                     if (controls.visibility != View.VISIBLE) toggleControls()
                 }
             }
             highlightRow.addView(chip)
         }
+    }
+
+    /**
+     * Start decoding preview frames for the clip we're actually streaming (see [ScrubFrames]): a
+     * coarse grid up front so the bubble is never empty, then sharper frames on demand as the thumb
+     * settles. Short clips get none — the whole thing fits in a flick of the bar.
+     *
+     * Deliberately *after* the player is prepared, and delayed on top of that, so the extra decoder
+     * isn't competing with the player's initial buffering for the camera's link.
+     */
+    private fun startScrubFrames(streamPath: String) {
+        scrubFrames.close()
+        val durMs = videoView.duration.toLong()
+        if (durMs < MIN_SCRUB_MS) return
+        val at = navIndex
+        val cellW = scrubImage.layoutParams.width
+        val cellH = scrubImage.layoutParams.height
+        main.postDelayed({
+            if (isFinishing || navIndex != at) return@postDelayed
+            scrubFrames.open("http://$ip$streamPath", cellW, cellH) { ms, bmp ->
+                // Only the frame for where the thumb *is* right now — anything else has been
+                // overtaken by the drag, and the grid arriving mid-playback isn't shown at all.
+                if (scrubbing && ms == seekBar.progress.toLong()) showScrubFrame(bmp)
+            }
+            scrubFrames.prefetch(durMs, SCRUB_GRID_CELLS)
+        }, 600)
+    }
+
+    /** Float the bubble over the seekbar thumb at [posMs] with the closest frame we have so far. */
+    private fun showScrubPreview(posMs: Int) {
+        scrubTime.text = mmss(posMs.toLong())
+        showScrubFrame(scrubFrames.nearest(posMs.toLong()))
+        scrubPreview.visibility = View.VISIBLE
+        positionScrubPreview(posMs)
+    }
+
+    /** Null (nothing decoded yet, or the source never opened) collapses the bubble to a time chip
+     *  rather than leaving an empty grey rectangle hanging over the bar. */
+    private fun showScrubFrame(bmp: Bitmap?) {
+        scrubImage.setImageBitmap(bmp)
+        scrubImage.visibility = if (bmp != null) View.VISIBLE else View.GONE
+    }
+
+    private fun hideScrubPreview() {
+        main.removeCallbacks(scrubRefine)
+        scrubPreview.visibility = View.GONE
+        scrubImage.setImageBitmap(null)
+    }
+
+    /** Centre the bubble on the seekbar thumb, clamped inside the screen, sitting just above the bar.
+     *  Measured against the root because the bar is nested a few layouts deep in the bottom overlay. */
+    private fun positionScrubPreview(posMs: Int) {
+        val bar = IntArray(2).also { seekBar.getLocationInWindow(it) }
+        val root = IntArray(2).also { previewRoot.getLocationInWindow(it) }
+        val track = seekBar.width - seekBar.paddingLeft - seekBar.paddingRight
+        val frac = if (seekBar.max > 0) posMs.toFloat() / seekBar.max else 0f
+        val thumbX = bar[0] - root[0] + seekBar.paddingLeft + track * frac
+
+        if (scrubPreview.width == 0) scrubPreview.measure(0, 0)   // first show, never laid out yet
+        val w = scrubPreview.width.takeIf { it > 0 } ?: scrubPreview.measuredWidth
+        val h = scrubPreview.height.takeIf { it > 0 } ?: scrubPreview.measuredHeight
+        val margin = 8 * resources.displayMetrics.density
+        val maxX = (previewRoot.width - w - margin).coerceAtLeast(margin)
+        scrubPreview.translationX = (thumbX - w / 2f).coerceIn(margin, maxX)
+        scrubPreview.translationY = (bar[1] - root[1] - h - margin).coerceAtLeast(0f)
+    }
+
+    /** Once the thumb stops moving, pull the keyframe actually under it (debounced from the drag). */
+    private val scrubRefine = Runnable { if (scrubbing) scrubFrames.request(seekBar.progress.toLong()) }
+
+    private fun seekToMs(ms: Long) {
+        val t = ms.toInt()
+        videoView.seekTo(t)
+        seekBar.progress = t
+        txtCur.text = mmss(ms)
     }
 
     private fun loadVideo() {
@@ -529,6 +629,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             updatePlayIcon()
             main.removeCallbacks(tick)
             main.post(tick)
+            startScrubFrames(path)   // the candidate that actually opened, so previews match the stream
         }
         videoView.setOnErrorListener { _, what, extra ->
             Log.i("Osmosis", "preview ERROR what=$what extra=$extra (candidate ${streamIdx + 1}/${streamCandidates.size}: $path)")
@@ -607,10 +708,17 @@ class MediaPreviewActivity : AppCompatActivity() {
         main.removeCallbacks(tick)
         main.removeCallbacks(highlightsRunnable)
         runCatching { videoView.stopPlayback() }
+        scrubFrames.close()
         imageLoader.shutdown()
     }
 
     companion object {
+        /** Below this the whole clip fits in a flick of the bar, so a scrub preview earns nothing. */
+        private const val MIN_SCRUB_MS = 6_000L
+        /** Coarse grid decoded up front — enough that any thumb position has a frame within a few
+         *  percent of the clip, without a long stall on the camera's link before the first drag. */
+        private const val SCRUB_GRID_CELLS = 12
+
         const val EXTRA_PATH = "path"
         private const val EXTRA_STORAGE = "storage"
         private const val EXTRA_SIZE = "size"    // full manifest byte size → already-downloaded check

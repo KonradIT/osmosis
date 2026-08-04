@@ -7,6 +7,7 @@
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/previewRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000">
@@ -260,5 +261,41 @@
             app:icon="@drawable/ic_download"
             app:iconGravity="textStart"
             app:iconTint="@color/osmo_on_accent" />
+    </LinearLayout>
+
+    <!--
+      Scrub preview: the frame under your thumb, floated above the seek bar while you drag. Frames are
+      decoded straight off the camera by range request (see ScrubFrames) — nothing is downloaded. Last
+      child so it draws over the controls; positioned in code (translationX/Y follow the seekbar thumb).
+      Degrades to a bare time readout when no frame has arrived yet.
+    -->
+    <LinearLayout
+        android:id="@+id/scrubPreview"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:background="#E6000000"
+        android:orientation="vertical"
+        android:padding="2dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/scrubImage"
+            android:layout_width="140dp"
+            android:layout_height="79dp"
+            android:background="#FF1E1E1E"
+            android:contentDescription="scrub preview"
+            android:scaleType="centerCrop" />
+
+        <TextView
+            android:id="@+id/scrubTime"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="3dp"
+            android:text="0:00"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
     </LinearLayout>
 </FrameLayout>
