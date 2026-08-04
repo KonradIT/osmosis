@@ -43,9 +43,20 @@ abstract class DumlSession(
     private var lastSig = ""          // last display signature fired to onStatus (throttles UI updates)
     private var lastBattSig = ""      // dock-relevant bytes of 0x0d/02; log only on change (#5)
 
-    private val handshakeFrame = hex(
-        "b88764006400c005140000640000019001c005140000640014006400c00514000064000101040102"
-    )
+    /**
+     * The handshake (SYN) payload: our proposed **base sequence** followed by the window/MTU parameters
+     * the official app offers — window 100, MTU 1472 (`c0 05`), and the rest replayed verbatim.
+     *
+     * Only the first two bytes vary. They used to be a hardcoded `b8 87`, i.e. every session this app
+     * ever opened proposed the same base; it is now drawn fresh per connect by the transport, because a
+     * reused base can leave the peer's session state wedged. See [DumlTransport.baseSeq].
+     */
+    private fun handshakeFrame(): ByteArray = hex(
+        "000064006400c005140000640000019001c005140000640014006400c00514000064000101040102"
+    ).also {
+        it[0] = (tx.baseSeq and 0xFF).toByte()
+        it[1] = ((tx.baseSeq shr 8) and 0xFF).toByte()
+    }
 
     /**
      * Bring the datalink up to the point the device is talking to us: optional TCP poke, handshake
@@ -68,7 +79,7 @@ abstract class DumlSession(
             }
         }
 
-        val reply = tx.handshake(handshakeFrame)
+        val reply = tx.handshake(handshakeFrame())
         if (reply == null) { log("datalink: handshake FAILED on udp/$port"); tx.close(); return false }
         onHandshakeReply(reply)
         handshakeOk = true
@@ -83,7 +94,11 @@ abstract class DumlSession(
         }
         tx.syncSeqToPeerChannel()
         onFetchProgress?.invoke(16)
-        log("datalink: session=0x%04x channel=0x%04x".format(tx.sessionId, tx.cameraChannel))
+        // baseSeq is logged alongside the channel because the peer echoes it: seeing them equal is
+        // expected, and seeing the channel differ from a base we now randomise is the first real
+        // evidence that the peer has a sequence space of its own.
+        log("datalink: session=0x%04x base=0x%04x channel=0x%04x"
+            .format(tx.sessionId, tx.baseSeq, tx.cameraChannel))
         return true
     }
 

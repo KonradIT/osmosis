@@ -42,6 +42,30 @@ class DumlTransport(
     private var dumlSeq = 0xA000
     private var cmdCounter = 0
     private var camChannel = 0xB887
+
+    /**
+     * The base sequence proposed in the handshake, and the start of our own send-seq space.
+     *
+     * **Randomised per session, and it matters.** This was a constant (`0x87b8`) baked into the
+     * handshake payload, so every session on every device opened with the same base — and an
+     * independent reverse-engineering of this transport reports that reusing a fixed base across
+     * connects can leave the peer's session state wedged, which looks exactly like a link that
+     * handshakes and then answers nothing. The official app draws a fresh one each connect.
+     *
+     * Kept 8-aligned because the send seq advances in steps of 8.
+     *
+     * It also explains a red herring: the peer echoes this value back, so the "channel" we appeared
+     * to learn from it was only ever our own constant coming home. With a random base, a log showing
+     * the same number for both really does mean the echo, not a coincidence.
+     */
+    var baseSeq = 0xB887
+        private set
+
+    /**
+     * The peer's reliable-downlink cursor, from `[10:12]` of its 34-byte pktType-`0x01` status frames.
+     * Echoed back in [sendAck]; the peer holds off streaming until its window is being acknowledged.
+     */
+    private var peerCursor = 0
     private var msgId51 = 0
     private var seq51 = 0
 
@@ -77,6 +101,11 @@ class DumlTransport(
         } else DatagramSocket()
         sock.soTimeout = 200
         sessionId = Random.nextInt(0x1000, 0xFFFE)
+        // Fresh base per connect, 8-aligned — see [baseSeq]. camChannel starts here because until the
+        // peer says otherwise, the only sequence space either side knows about is the one we proposed.
+        baseSeq = Random.nextInt(0x1000, 0xF000) and 0xFFF8
+        camChannel = baseSeq
+        peerCursor = 0
     }
 
     /**
@@ -119,13 +148,30 @@ class DumlTransport(
         if (sendPacket(pkt)) advance()
     }
 
+    /**
+     * The pktType-`0x04` window acknowledgement: a 34-byte frame of three `[u16][u16][u32 zero]` groups
+     * carrying, in order, **the peer's downlink cursor**, **our base seq** and **our current send seq**.
+     *
+     * All three used to be [camChannel] — right for the middle one only by accident, since camChannel
+     * *was* the constant base, while the first never reflected what the peer had actually sent us.
+     *
+     * **The third stays at the base, deliberately.** The reference implementation puts its current send
+     * seq there, and copying that broke drone pagination outright: page 1 fine, page 2 dead with the
+     * drone streaming status and no data. The two quantities are not the same. That implementation
+     * advances its sequence in exactly one place — per data frame — whereas ours advances on *every*
+     * packet, including the ~860/s drone uplink, so within a minute it had raced ahead and wrapped past
+     * `0xFFFF` (`0xdd88` → `0x8e70` between the two pages) and the peer's window stalled. Sending our
+     * seq here would only be equivalent if our sequence meant what theirs does.
+     *
+     * Sent with seq 0, like every other type-`0x04`.
+     */
     fun sendAck() {
-        val grp = byteArrayOf(
-            (camChannel and 0xFF).toByte(), ((camChannel shr 8) and 0xFF).toByte(),
-            (camChannel and 0xFF).toByte(), ((camChannel shr 8) and 0xFF).toByte(),
+        fun grp(v: Int) = byteArrayOf(
+            (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
+            (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
             0, 0, 0, 0,
         )
-        val payload = grp + grp + grp + byteArrayOf(0, 0)
+        val payload = grp(peerCursor) + grp(baseSeq) + grp(baseSeq) + byteArrayOf(0, 0)
         val old = udpSeq; udpSeq = 0
         val hdr = udpHeader(0x04, payload.size)
         udpSeq = old
@@ -190,6 +236,11 @@ class DumlTransport(
                 if (data.size >= 10) {
                     val ch = (data[8].toInt() and 0xFF) or ((data[9].toInt() and 0xFF) shl 8)
                     if (ch != 0) camChannel = ch
+                }
+                // The peer's reliable-downlink cursor rides in its 34-byte pktType-0x01 status frames;
+                // [sendAck] echoes it back, and the peer will not open its downlink until we do.
+                if (data.size == 34 && (data[6].toInt() and 0xFF) == 0x01) {
+                    peerCursor = (data[10].toInt() and 0xFF) or ((data[11].toInt() and 0xFF) shl 8)
                 }
             } catch (_: java.net.SocketTimeoutException) {
                 // keep polling until the deadline
