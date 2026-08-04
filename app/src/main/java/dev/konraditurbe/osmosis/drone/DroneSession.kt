@@ -327,9 +327,12 @@ class DroneSession(
     /** The drone's serial, read from its own `0x51/0x13` beacon. Length varies by model. */
     @Volatile private var droneSerial: ByteArray? = null
 
-    /** Plausible serial lengths. A Mavic 3's is 20; the bound exists to reject a coincidental `0x11`. */
-    private val MIN_SERIAL = 8
-    private val MAX_SERIAL = 32
+    /** Plausible serial lengths — both aircraft seen so far emit exactly 20; the range is slack. */
+    private val MIN_SERIAL = 12
+    private val MAX_SERIAL = 24
+
+    /** The byte this aircraft puts in front of its serial: `0x11` on a Mavic 3, `0x24` on a Neo 2. */
+    @Volatile private var serialTag = 0x11
 
     /** Every `0x51` sub-command seen, so a drone that never beacons is distinguishable from one whose
      *  beacon we failed to parse. Those need completely different fixes. */
@@ -338,25 +341,38 @@ class DroneSession(
     @Volatile private var beacon13: ByteArray? = null
 
     /**
-     * Pull the serial out of a `0x51/0x13` beacon payload: a `0x11` tag followed by a run of printable
-     * ASCII. Parsing it is what makes the session-open work on *any* drone rather than only the one
-     * that was captured.
+     * Pull the serial out of a `0x51/0x13` beacon payload.
      *
-     * The length is **measured, not assumed**. It was fixed at 20 because that is what a Mavic 3 emits
-     * (`1581F45T8241200EA1TA`), which silently rejects any aircraft whose serial is a different length —
-     * the tag would be found, the fixed-width slice would fail its printable check, and the session
-     * could never open. [MIN_SERIAL] is what keeps a stray `0x11` byte followed by a couple of ASCII
-     * characters from being mistaken for one.
+     * Found by **shape, not by tag**. This used to anchor on a `0x11` byte, which is what a Mavic 3 puts
+     * in front of its serial — a Neo 2 uses `0x24`, so the search found nothing and the session could
+     * never open, indistinguishable in the log from an aircraft that never beacons. Both serials are the
+     * same length and the same alphabet; only the tag differs, so the tag is the one thing not to key on.
+     *
+     * A DJI serial is a run of uppercase alphanumerics ([MIN_SERIAL]–[MAX_SERIAL] of them) — long enough
+     * that nothing else in the beacon looks like it. The longest such run wins.
+     *
+     * The preceding byte is returned alongside, because the session-open has to hand the serial back and
+     * the response should carry whatever tag this aircraft used rather than a Mavic's.
      */
-    private fun parseDroneSerial(payload: ByteArray): ByteArray? {
-        for (i in payload.indices) {
-            if ((payload[i].toInt() and 0xFF) != 0x11) continue
-            var end = i + 1
-            while (end < payload.size && payload[end] >= 0x20 && payload[end] < 0x7F) end++
-            val len = end - (i + 1)
-            if (len in MIN_SERIAL..MAX_SERIAL) return payload.copyOfRange(i + 1, end)
+    internal fun parseDroneSerial(payload: ByteArray): Pair<ByteArray, Int>? {
+        fun isSerialChar(b: Byte): Boolean {
+            val c = b.toInt() and 0xFF
+            return (c in 0x30..0x39) || (c in 0x41..0x5A)   // 0-9 A-Z
         }
-        return null
+        var best: Pair<ByteArray, Int>? = null
+        var i = 0
+        while (i < payload.size) {
+            if (!isSerialChar(payload[i])) { i++; continue }
+            var end = i
+            while (end < payload.size && isSerialChar(payload[end])) end++
+            val len = end - i
+            if (len in MIN_SERIAL..MAX_SERIAL && len > (best?.first?.size ?: 0)) {
+                val tag = if (i > 0) payload[i - 1].toInt() and 0xFF else 0x11
+                best = payload.copyOfRange(i, end) to tag
+            }
+            i = end
+        }
+        return best
     }
 
     /** Watch received frames for the beacon and latch the serial. */
@@ -371,9 +387,11 @@ class DroneSession(
             if (inner != 0x13) continue
             val body = pl.copyOfRange(11, ln - 2)
             if (beacon13 == null) beacon13 = body
-            parseDroneSerial(body)?.let {
-                droneSerial = it
-                log("datalink: drone serial ${String(it, Charsets.US_ASCII)} (${it.size} chars)")
+            parseDroneSerial(body)?.let { (serial, tag) ->
+                droneSerial = serial
+                serialTag = tag
+                log("datalink: drone serial ${String(serial, Charsets.US_ASCII)} " +
+                    "(${serial.size} chars, tag 0x%02x)".format(tag))
             }
         }
     }
@@ -393,15 +411,21 @@ class DroneSession(
     private fun frame51(cmd: Int, flags: Int, innerId: Int, payload: ByteArray): ByteArray =
         DjiMessage(0xE9EE, innerId, flags or (0x51 shl 8) or (cmd shl 16), payload).encode() + trailing51
 
-    /** `00 00 11 <serial:20> 00` — the body of both `0x51/0x08` and `0x51/0x06` responses. */
+    /**
+     * `00 00 <tag> <serial> 00` — the body of both `0x51/0x08` and `0x51/0x06` responses.
+     *
+     * The tag is echoed from the aircraft's own beacon rather than fixed at a Mavic's `0x11`, since a
+     * Neo 2 uses `0x24` and a response carrying the wrong one is unlikely to be accepted.
+     */
     private fun serialBody(serial: ByteArray) =
-        byteArrayOf(0, 0, 0x11) + serial + byteArrayOf(0)
+        byteArrayOf(0, 0, serialTag.toByte()) + serial + byteArrayOf(0)
 
     private fun droneOpenFrames(serial: ByteArray) = listOf(
         frame51(0x02, 0x40, 0x007C, hex("0501040100")),                       // 1. open request
         frame51(0x08, 0xC0, 0x0001, serialBody(serial)),                      // 3. answer the challenge
-        frame51(0x06, 0x40, 0x007D,                                           // 4. our id + the serial
-            byteArrayOf(0x04, 0x02, 0x00) + appId51 + byteArrayOf(0, 0, 0, 0x11) + serial + byteArrayOf(0)),
+        // 4. our id + the serial — one extra 00 ahead of the shared `00 00 <tag> <serial> 00` body
+        frame51(0x06, 0x40, 0x007D,
+            byteArrayOf(0x04, 0x02, 0x00) + appId51 + byteArrayOf(0) + serialBody(serial)),
         frame51(0x06, 0xC0, 0x0000, serialBody(serial)),                      // 5. answer its 0x51/0x06
     )
 
