@@ -674,7 +674,24 @@ Two consequences:
 
 ## DJI Drone QuickTransfer media offload
 
-> Following is applicable to **Mavic 3, Mavic 3 Classic, Mavic 3 Pro** for now. Other drones to be confirmed.
+> **Everything below is the Mavic 3 family** (Mavic 3, Classic, Pro) unless a heading says otherwise —
+> that is the only aircraft this has been made to work on end to end.
+
+**"A drone" is not one thing.** A Neo 2 shares the transport and the credential path with a Mavic 3 and
+then diverges completely at the point of unlocking the link, so the two are tracked separately here:
+
+| | Mavic 3 | Neo 2 |
+|---|---|---|
+| BLE pair, `DJI FLY` token | ✅ | ✅ |
+| WiFi creds over `0x07/0x07` + `0x07/0x0e` | ✅ | ✅ |
+| Datalink port | ✅ udp/9003 | ✅ udp/9003 |
+| Handshake | ✅ 9-byte reply | ✅ **15-byte** reply ([§27a](#27a-neo-2--the-same-transport-a-different-unlock)) |
+| Serial in the `0x51/0x13` beacon | ✅ tag `0x11` | ✅ **tag `0x24`** |
+| Answers `0x51/0x02` session-open | ✅ | ❌ **ignores it** |
+| Media list | ✅ | ❌ never reached |
+
+So a Neo 2 gets as far as a live, authenticated link and then serves nothing. It is *not* a `/v1`-vs-`/v2`
+question — no manifest is ever reached, and §29 has never been exercised on one.
 
 A drone runs the same DUML stack as an Osmo, with four differences that break a camera client outright:
 
@@ -682,17 +699,18 @@ A drone runs the same DUML stack as an Osmo, with four differences that break a 
 |---|---|---|
 | Pairing token | `osmo` | **`DJI FLY`** — any other token pairs but yields **no WiFi creds** |
 | Datalink | UDP `9004` + TCP-7001 poke (Xtra: `10004`) | **UDP `9003`, no poke**, bind local port `9003` (symmetric) |
-| Session | handshake → registration → commands | handshake → **`0x51` session-open** ([§27](#27-session-open-0x51--required-before-anything-else)) |
+| Session | handshake → registration → commands | handshake → **`0x51` session-open** ([§27](#27-session-open-0x51--required-before-anything-else-mavic-3)) — Mavic 3 only; a Neo 2 unlocks differently ([§27a](#27a-neo-2--the-same-transport-a-different-unlock)) |
 | Media addressing | paths, `/v2?storage=N&path=…` | **DCF indices**, `/v1?file_index=…` ([§29](#29-http-media-api-v1--dcf-indexed)) |
 | Registration | `0x00/0x81`, `0x00/0x88`, `0x03/0xda`, param subs | **none** — go straight to commands |
 
 Addressing byte is unchanged: App `0x02`, Camera `0x01`. The `0x51` channel uses its own endpoints
 (`0xee` app, `0xe9` drone) outside the `(id<<5)|type` scheme.
 
-### 27. Session open (`0x51`) — required before anything else
+### 27. Session open (`0x51`) — required before anything else *(Mavic 3)*
 
-A drone answers **no command at all** until this completes. Before it, it emits ~2 DUML frames/s of empty
-keepalive; one second after, ~1200 frames/s and every command works.
+A Mavic 3 answers **no command at all** until this completes. Before it, it emits ~2 DUML frames/s of empty
+keepalive; one second after, ~1200 frames/s and every command works. **This exchange is Mavic-specific —
+see [§27a](#27a-neo-2--the-same-transport-a-different-unlock) before assuming it generalises.**
 
 - Cmd Set: `0x51`
 - Cmd ID: `0x02` open · `0x08` challenge · `0x06` identity · `0x13` beacon
@@ -708,7 +726,7 @@ keepalive; one second after, ~1200 frames/s and every command works.
 | 5 | → | `0x51/0x06` | `0x40` | `04 02 00 <appid:19> 00 00 00 11 <serial:20> 00` |
 | 6 | ←→ | `0x51/0x06` | `0xC0` | serial echo, both directions |
 
-- **Serial** = 20 ASCII bytes after the `0x11` tag in the drone's own `0x51/0x13` beacon.
+- **Serial** = a run of uppercase alphanumerics in the drone's own `0x51/0x13` beacon — 20 characters on both aircraft seen so far. **Do not key on the tag byte in front of it:** a Mavic 3 uses `0x11`, a Neo 2 uses `0x24`, and anchoring on `0x11` silently rejects the Neo entirely. Find it by shape, remember the tag, and echo that tag back in steps 4–5 rather than a literal `0x11`.
 - **Trailing bytes** `39fdb2ae 02 <ctr> 00 00 00 79102e9b 01 00×8` — **`ctr` (byte 5) must increase on every `0x51` frame sent**. A repeated or decreasing value is dropped as a replay, with no reply at all.
 - **Outer DUML message id** is a per-frame counter from `1`, not a constant.
 - DUML example (`0x51/0x02` open, outer frame): <https://b3yond.d3vl.com/duml/#553504683be90100005101551204c7eee97c004051020501040100619639fdb2ae020100000079102e9b010000000000000000f340>
@@ -716,6 +734,45 @@ keepalive; one second after, ~1200 frames/s and every command works.
 Two fields that look like flow control but are not: the routing header's `r0-1` on a **received** packet
 is not a running ack (it repeats the handshake channel and only moves when a reply lands), and the
 sequence window is not enforced — the reference app runs ~1600 packets ahead of it.
+
+### 27a. Neo 2 — the same transport, a different unlock
+
+Everything up to and including the datalink works. The aircraft pairs on the `DJI FLY` token, hands over
+SSID and passphrase on `0x07/0x07` / `0x07/0x0e`, joins, and completes the handshake on udp/9003. Its
+serial reads out of its beacon correctly once the tag assumption above is dropped. And then nothing.
+
+```
+datalink: handshake OK on udp/9003
+datalink: session=0xcefb base=0x56f0 channel=0x56f0
+datalink: drone serial 1581FA6QC25BS01CHVJQ (20 chars, tag 0x24)
+datalink: 51/02 open sent, len=40
+datalink: 51-channel replies: 51/13×3            <- beacons only; a Mavic answers 51/08, 51/06, 51/80, 51/82 …
+datalink: drone session-open sent — drone frames/s now 5      <- a Mavic reaches ~268 here
+datalink: drone list FAILED … after 0B data; rx [pkt01×225]
+```
+
+**It does not answer `0x51/0x02` at all** — not an error, not a rejection, just more beacons. The frame
+rate staying at ~5/s is the tell: the Mavic's jump to the hundreds *is* the session opening.
+
+That is consistent with what the official app does. In a full DJI Fly ↔ Neo capture (287 packets from
+cold start to flight), **`0x51/0x02` does not appear once**. What it sends instead is a long init whose
+*repetition* is load-bearing — ~86 `0x00/0x99` capability subscriptions and 14 `0x03/0xcd` upload chunks
+(`01 00` … `01 0d`) — and the aircraft only opens up once the whole thing has landed. A curated
+first-occurrence-of-each subset (which is what a 30-command prelude is) leaves those bursts incomplete
+and the drone withholds. Its `0x51` tunnels carry `51/13`, `51/17`, `03/f9`, `03/cd`; no `51/02`.
+
+Other differences worth recording, none of them yet shown to matter:
+
+- **The handshake reply is 15 bytes, not 9.** Same structure and the same `01` ACK byte, then six extra:
+  `01 0f 00 05 05 40 1f`. **Byte-identical across sessions with different session ids**, so it is a fixed
+  property of the aircraft or firmware — a version or capability descriptor, not a nonce or a challenge.
+  Meaning unknown; we ignore it and the link still comes up.
+- **The AP drops ~16 s after joining**, twice, both times just before the list query went out. Plausibly
+  downstream of the session never opening, but that is a guess.
+
+Unresolved, and the honest state of it: the serial is **necessary but not sufficient**. Whether replaying
+the full init unlocks a Neo 2 is untested, and the reference capture is from a **Neo 1** during a *flight
+control* session rather than a media one — so it may not transfer.
 
 ### 28. Get media list (drone)
 
@@ -893,7 +950,7 @@ url(pack_file_index(0, 100, 554), LRF)   # /v1?file_index=6554154&file_subtype=1
 
 Pushes are wrapped inside `0x51/0x01` tunnel frames — a top-level frame scan steps over them; scan
 byte-at-a-time with both CRCs verified. Field layouts are **identical to the camera frames**
-([§19](#19-sd--storage-both-stores-in-one-frame), [§20](#20-battery--power-also-the-only-place-the-dock-reports-in)):
+([§19](#19-sd--storage--both-stores-in-one-frame), [§20](#20-battery--power-also-the-only-place-the-dock-reports-in)):
 
 | Cmd Set / ID | field | offset |
 |---|---|---|
