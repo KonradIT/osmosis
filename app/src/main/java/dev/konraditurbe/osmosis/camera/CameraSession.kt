@@ -774,6 +774,45 @@ class CameraSession(
     }
 
     /**
+     * Is the Action 1's HTTP server **state-gated behind playback mode**?
+     *
+     * ROADMAP #6's leading hypothesis: `:80` is enabled by the `duss_proxy` plugin and `dji_media_server`
+     * handles `enter_playback` / "switch workmode", so the port should only listen once the camera is in
+     * playback. Every attempt so far has been made with the camera in whatever mode it woke up in, and
+     * `:80` refused — which is consistent with the hypothesis but never actually tested it.
+     *
+     * So: enter playback with the command we **already send to every other Osmo** for pagination
+     * (`0x02/0x0c` `01 01 00 01`), then try to open a socket to `:80` and say what happened. Unlike the
+     * `0x4a` transfer probe this is not a speculative frame — it is a documented command this camera
+     * family accepts, and a TCP connect that either completes or doesn't.
+     *
+     * Read-only, and the result is one line either way.
+     */
+    private fun probeHttpAfterPlayback(ip: String) {
+        log("datalink: entering playback mode, then testing :80 (ROADMAP #6 — is HTTP gated on playback?)")
+        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)
+        recvAll(600); sendAck()
+        for (attempt in 1..3) {
+            val t0 = System.currentTimeMillis()
+            val result = runCatching {
+                java.net.Socket().use { s ->
+                    s.connect(java.net.InetSocketAddress(ip, 80), 2000)
+                    "OPEN"
+                }
+            }.getOrElse { "${it.javaClass.simpleName}: ${it.message}" }
+            val ms = System.currentTimeMillis() - t0
+            log("datalink:   :80 attempt $attempt after playback → $result (${ms}ms)")
+            if (result == "OPEN") {
+                log("datalink: --- :80 IS OPEN once in playback mode — HTTP media is reachable, report this ---")
+                return
+            }
+            recvAll(700); sendAck()   // keep the session alive between tries; the port may open late
+        }
+        log("datalink: --- :80 still refused in playback mode. That weakens the playback-gating theory, " +
+            "though it does not rule out a further activation step ---")
+    }
+
+    /**
      * ROADMAP #6's open question, asked directly: does this camera serve file bytes over the datalink?
      *
      * Runs once per session on an Action-1-style manifest, right after the list lands and while the
@@ -839,6 +878,7 @@ class CameraSession(
         val dcf = DcfRecords.decodeAction1(bytes)
         if (dcf.isNotEmpty()) {
             log("datalink: decoded ${dcf.size} DCF index records (older Osmo Action generation)")
+            tx.peerIp?.let { probeHttpAfterPlayback(it) }
             if (probeTransfers) probeTransferKinds(dcf.first().fileIndex)
             return dcf.map { it.toCameraFile() }
         }
