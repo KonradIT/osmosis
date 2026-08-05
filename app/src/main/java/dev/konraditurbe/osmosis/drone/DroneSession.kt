@@ -35,7 +35,17 @@ class DroneSession(
      * reactive path works — and that is exactly the path we're about to hand a tester as the fix.
      */
     private val ignoreBeaconSerial: Boolean = false,
+    /**
+     * The serial + tag already read off the aircraft's BLE identity beacon, if one arrived while
+     * pairing. Verified on a Mavic 3: the same `0x51/0x13` beacon lands as a GATT notification ~30 s
+     * before the AP exists, so the serial can be in hand before the datalink even opens — no beacon
+     * parsing on the datalink and no dependence on the challenge. See [DroneSerial.inTunnelFrame].
+     */
+    knownSerial: Pair<ByteArray, Int>? = null,
 ) : DumlSession(log, port, tcpPoke = false, isDrone = true) {
+
+    /** The BLE-supplied serial, unless `nobeacon` is forcing it to come off the wire. */
+    private val bleSerial = knownSerial?.takeIf { !ignoreBeaconSerial }
 
     private var droneCursor = 0L
     private val droneSeen = HashSet<Long>()
@@ -335,14 +345,10 @@ class DroneSession(
     private val trailing51 = hex("39fdb2ae020100000079102e9b010000000000000000")
 
     /** The drone's serial, read from its own `0x51/0x13` beacon. Length varies by model. */
-    @Volatile private var droneSerial: ByteArray? = null
-
-    /** Plausible serial lengths — both aircraft seen so far emit exactly 20; the range is slack. */
-    private val MIN_SERIAL = 12
-    private val MAX_SERIAL = 24
+    @Volatile private var droneSerial: ByteArray? = bleSerial?.first
 
     /** The byte this aircraft puts in front of its serial: `0x11` on a Mavic 3, `0x24` on a Neo 2. */
-    @Volatile private var serialTag = 0x11
+    @Volatile private var serialTag = bleSerial?.second ?: 0x11
 
     /** Every `0x51` sub-command seen, so a drone that never beacons is distinguishable from one whose
      *  beacon we failed to parse. Those need completely different fixes. */
@@ -355,40 +361,8 @@ class DroneSession(
      *  printed when the open fails, which is the one time anybody needs it. */
     private val census = DroneFrameCensus { parseDroneSerial(it) }
 
-    /**
-     * Pull the serial out of a `0x51/0x13` beacon payload.
-     *
-     * Found by **shape, not by tag**. This used to anchor on a `0x11` byte, which is what a Mavic 3 puts
-     * in front of its serial — a Neo 2 uses `0x24`, so the search found nothing and the session could
-     * never open, indistinguishable in the log from an aircraft that never beacons. Both serials are the
-     * same length and the same alphabet; only the tag differs, so the tag is the one thing not to key on.
-     *
-     * A DJI serial is a run of uppercase alphanumerics ([MIN_SERIAL]–[MAX_SERIAL] of them) — long enough
-     * that nothing else in the beacon looks like it. The longest such run wins.
-     *
-     * The preceding byte is returned alongside, because the session-open has to hand the serial back and
-     * the response should carry whatever tag this aircraft used rather than a Mavic's.
-     */
-    internal fun parseDroneSerial(payload: ByteArray): Pair<ByteArray, Int>? {
-        fun isSerialChar(b: Byte): Boolean {
-            val c = b.toInt() and 0xFF
-            return (c in 0x30..0x39) || (c in 0x41..0x5A)   // 0-9 A-Z
-        }
-        var best: Pair<ByteArray, Int>? = null
-        var i = 0
-        while (i < payload.size) {
-            if (!isSerialChar(payload[i])) { i++; continue }
-            var end = i
-            while (end < payload.size && isSerialChar(payload[end])) end++
-            val len = end - i
-            if (len in MIN_SERIAL..MAX_SERIAL && len > (best?.first?.size ?: 0)) {
-                val tag = if (i > 0) payload[i - 1].toInt() and 0xFF else 0x11
-                best = payload.copyOfRange(i, end) to tag
-            }
-            i = end
-        }
-        return best
-    }
+    /** The serial-shaped run in a beacon payload — see [DroneSerial] for why it's found by shape. */
+    internal fun parseDroneSerial(payload: ByteArray): Pair<ByteArray, Int>? = DroneSerial.inPayload(payload)
 
     /** Watch received frames for the beacon and latch the serial. */
     private fun latchDroneSerial(raw: ByteArray) {
@@ -421,7 +395,11 @@ class DroneSession(
         val inner = seen51.entries.joinToString(", ") { "0x%02x×%d".format(it.key, it.value) }
         log("datalink: 0x51 inner cmds seen: ${if (inner.isEmpty()) "NONE" else inner}")
         beacon13?.let {
-            log("datalink: a 0x51/0x13 beacon DID arrive but carried no readable serial — payload " +
+            // Don't claim it was unreadable when we're the ones who ignored it — that reads as a
+            // parser bug and sends whoever's debugging this straight down the wrong hole.
+            val why = if (ignoreBeaconSerial) "was ignored on purpose (nobeacon)"
+                      else "carried no readable serial"
+            log("datalink: a 0x51/0x13 beacon DID arrive but $why — payload " +
                 it.copyOfRange(0, minOf(64, it.size)).joinToString("") { b -> "%02x".format(b) })
         }
         // "NONE" only says this airframe isn't a Mavic. The census says what it IS doing.
@@ -482,6 +460,10 @@ class DroneSession(
         // latches per-datagram, which also fixes a straddle bug in the old probe loop — it rescanned
         // whole datagrams concatenated *with their headers*, so a beacon spanning a packet boundary
         // failed CRC and vanished, exactly as documented for manifest chunks.
+        bleSerial?.let { (s, tag) ->
+            log("datalink: drone serial ${String(s, Charsets.US_ASCII)} (${s.size} chars, " +
+                "tag 0x%02x) — already known from BLE, no datalink beacon needed".format(tag))
+        }
         val waitUntil = System.currentTimeMillis() + if (ignoreBeaconSerial) 0 else 3000
         while (droneSerial == null && System.currentTimeMillis() < waitUntil) dronePump(200)
         if (ignoreBeaconSerial) log("datalink: nobeacon — skipping the beacon fast path on purpose")
@@ -491,10 +473,18 @@ class DroneSession(
         // no serial meant no open, and no open meant no challenge to learn the serial from. Every
         // airframe whose beacon we can't parse died on that loop without us ever asking it anything.
         sendDumlRaw(0xE93B, 0x51, 0x01, droneOpenRequest())
-        log("datalink: 51/02 open sent" +
-            if (droneSerial == null) " with no serial known — listening for the challenge to name one"
-            else " (serial already known from the beacon)")
-        dronePump(400, sink)   // latches the serial if the challenge carried one
+        log("datalink: 51/02 open sent" + when {
+            droneSerial == null -> " with no serial known — listening for the challenge to name one"
+            bleSerial != null -> " (serial from BLE)"
+            else -> " (serial from the datalink beacon)"
+        })
+        // Give the challenge real time when it's our only remaining source. Measured on a Mavic 3, no
+        // 0x51/0x08 arrived within 400 ms of the open — the old window was simply too short to tell a
+        // slow challenge apart from an aircraft that never sends one, and those need different fixes.
+        if (droneSerial == null) {
+            val deadline = System.currentTimeMillis() + 2000
+            while (droneSerial == null && System.currentTimeMillis() < deadline) dronePump(150, sink)
+        } else dronePump(400, sink)
 
         val serial = droneSerial ?: run {
             log("datalink: no serial from the beacon OR the 0x51/0x08 challenge — cannot open the session")

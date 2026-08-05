@@ -159,6 +159,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** `--ez nobeacon true` — a drone's serial must come from the 0x51/0x08 challenge, not the beacon. */
     private var noBeaconSerial = false
+
+    /** Serial + tag read off the drone's identity beacon over BLE, handed to the datalink session. */
+    private var bleDroneSerial: Pair<ByteArray, Int>? = null
     private var pinOverride: String? = null // `--es pin <v>` test hook; wins over the per-model token
     // `--es appid <v>` — the app *identity* half of SetPairingPIN, overridable without a rebuild.
     // A device remembers the (identity, token) pair it approved and re-pairs it silently (0x45 -> 0x01);
@@ -899,7 +902,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         // flat DCF records instead of CompositePack, /v1 instead of /v2 (ROADMAP #14).
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
-                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort, noBeaconSerial)
+                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort, noBeaconSerial, bleDroneSerial)
                             else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
@@ -1556,6 +1559,16 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 else -> logLine("CMD07 <- 0x07/%02x  [%s]".format(parsed.cmdId, p.toHex()))
             }
             return
+        }
+
+        // A drone tunnels its identity beacon inside 0x51/0x01 — and sends it over BLE too, long before
+        // its AP exists. Reading the serial here means the datalink never has to hunt for one.
+        if (parsed != null && parsed.cmdSet == 0x51 && parsed.cmdId == 0x01 && bleDroneSerial == null) {
+            dev.konraditurbe.osmosis.drone.DroneSerial.inTunnelFrame(parsed.payload)?.let { (s, tag) ->
+                bleDroneSerial = s to tag
+                logLine("drone serial over BLE: ${String(s, Charsets.US_ASCII)} " +
+                    "(${s.size} chars, tag 0x%02x)".format(tag))
+            }
         }
 
         val key = parsed?.let { (it.flags shl 16) or (it.cmdSet shl 8) or it.cmdId } ?: -1

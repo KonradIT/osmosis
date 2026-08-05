@@ -61,3 +61,38 @@ class DroneSerialTest {
         assertNull(session.parseDroneSerial(ByteArray(40)))
     }
 }
+
+/**
+ * The identity beacon also arrives over **BLE**, as a GATT notification, ~30 s before the drone's AP
+ * exists — so the serial can be known before the datalink opens, on any airframe that beacons at all.
+ * The frame below is verbatim from a Mavic 3 run (2026-08-05).
+ */
+class DroneSerialBleTest {
+
+    private fun bytes(hex: String) = ByteArray(hex.length / 2) {
+        ((hex[it * 2].digitToInt(16) shl 4) or hex[it * 2 + 1].digitToInt(16)).toByte()
+    }
+
+    /** Payload of the BLE `0x51/0x01` notify: a nested 0x55 frame whose inner cmd is 0x13. */
+    private val bleTunnel = bytes(
+        "5544041ae9eed9e000511300000011313538314634355438323431323030454131544105010400" +
+            "000000000501010101010101f0020000000000000000d8420000000000000000000000000000"
+    )
+
+    @Test fun `serial comes out of the BLE tunnel frame`() {
+        val (serial, tag) = DroneSerial.inTunnelFrame(bleTunnel)!!
+        assertEquals("1581F45T8241200EA1TA", String(serial, Charsets.US_ASCII))
+        assertEquals(0x11, tag)
+    }
+
+    @Test fun `a tunnel frame that is not an identity beacon yields nothing`() {
+        // Same wrapper, inner cmd 0x82 (telemetry) instead of 0x13/0x08 — must not be mined for a serial.
+        val telemetry = bleTunnel.copyOf().also { it[10] = 0x82.toByte() }
+        assertNull(DroneSerial.inTunnelFrame(telemetry))
+    }
+
+    @Test fun `junk is rejected rather than guessed at`() {
+        assertNull(DroneSerial.inTunnelFrame(ByteArray(40)))
+        assertNull(DroneSerial.inTunnelFrame(bytes("55")))
+    }
+}
