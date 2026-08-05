@@ -154,6 +154,12 @@ DJI's own official [Osmo-GPS-Controller-Demo](https://github.com/dji-sdk/Osmo-GP
 
 This application couldn't have been built without the work above. That said, much of it didn't work for the Osmo Nano and Edge Pro, so a significant additional reverse-engineering effort went into making Osmosis fully compatible with the DJI Osmo Nano, as well as fully reverse engineering the responses to unsupported DUML commands.
 
+Also, credit where is due to the testers who provided early feedback and helped me develop this for cameras I don't own:
+
+- [Rhoenschrat](https://www.rhoenschrat.de/)
+- [Juan Irache](https://github.com/JuanIrache)
+- [GetHypoxic](https://gethypoxic.com/)
+
 ## License
 
 [MIT](LICENSE.txt).
