@@ -389,14 +389,17 @@ class DroneSession(
             if (ln > pl.size) continue
             val inner = pl[10].toInt() and 0xFF
             seen51[inner] = (seen51[inner] ?: 0) + 1
-            if (inner != 0x13) continue
+            // 0x13 is the unprompted identity beacon; 0x08 is the session-open challenge, which names
+            // the serial too — and unlike the beacon, it arrives on *every* airframe that answers the
+            // open at all, whatever shape its beacon takes.
+            if (inner != 0x13 && inner != 0x08) continue
             val body = pl.copyOfRange(11, ln - 2)
-            if (beacon13 == null) beacon13 = body
+            if (inner == 0x13 && beacon13 == null) beacon13 = body
             parseDroneSerial(body)?.let { (serial, tag) ->
                 droneSerial = serial
                 serialTag = tag
                 log("datalink: drone serial ${String(serial, Charsets.US_ASCII)} " +
-                    "(${serial.size} chars, tag 0x%02x)".format(tag))
+                    "(${serial.size} chars, tag 0x%02x, from 0x51/0x%02x)".format(tag, inner))
             }
         }
     }
@@ -427,8 +430,11 @@ class DroneSession(
     private fun serialBody(serial: ByteArray) =
         byteArrayOf(0, 0, serialTag.toByte()) + serial + byteArrayOf(0)
 
-    private fun droneOpenFrames(serial: ByteArray) = listOf(
-        frame51(0x02, 0x40, 0x007C, hex("0501040100")),                       // 1. open request
+    /** Step 1. **Carries no serial** — which is what makes it safe to send before we know one. */
+    private fun droneOpenRequest() = frame51(0x02, 0x40, 0x007C, hex("0501040100"))
+
+    /** Steps 3–5, all of which do need the serial the drone named in its step-2 challenge. */
+    private fun droneOpenResponses(serial: ByteArray) = listOf(
         frame51(0x08, 0xC0, 0x0001, serialBody(serial)),                      // 3. answer the challenge
         // 4. our id + the serial — one extra 00 ahead of the shared `00 00 <tag> <serial> 00` body
         frame51(0x06, 0x40, 0x007D,
@@ -452,27 +458,41 @@ class DroneSession(
      *
      * We had only ever answered the `0x51/0x13` identity beacon, so step 1 never happened and the drone
      * never challenged us. That is why every command was ignored: there was no session to serve them on.
+     *
+     * **Step 2 is the serial's real source.** Reading it out of the beacon instead is a per-airframe
+     * guess — the beacon's shape differs by model (a Mavic 3 tags it `0x11`, a Neo 2 `0x24`, a Mini 3
+     * apparently doesn't send one we recognise at all), while the challenge names it the same way on
+     * anything that answers step 1. So the beacon is now only a *fast path*: step 1 goes out either
+     * way, and the challenge supplies the serial when the beacon didn't.
      */
     private fun droneSessionOpen() {
         val sink = java.io.ByteArrayOutputStream()
-        // The serial comes off the drone's own beacon; wait for one rather than guessing.
+        // Fast path: a Mavic 3 beacons its serial unprompted, so give it a moment to. [dronePump]
+        // latches per-datagram, which also fixes a straddle bug in the old probe loop — it rescanned
+        // whole datagrams concatenated *with their headers*, so a beacon spanning a packet boundary
+        // failed CRC and vanished, exactly as documented for manifest chunks.
         val waitUntil = System.currentTimeMillis() + 3000
-        while (droneSerial == null && System.currentTimeMillis() < waitUntil) {
-            val probe = java.io.ByteArrayOutputStream()
-            dronePump(200, probe)
-            latchDroneSerial(probe.toByteArray())
-        }
+        while (droneSerial == null && System.currentTimeMillis() < waitUntil) dronePump(200)
+
+        // Send the open request whether or not we know a serial. It carries none — and the drone's
+        // reply to it is the step-2 challenge, which *names the serial*. Bailing here was circular:
+        // no serial meant no open, and no open meant no challenge to learn the serial from. Every
+        // airframe whose beacon we can't parse died on that loop without us ever asking it anything.
+        sendDumlRaw(0xE93B, 0x51, 0x01, droneOpenRequest())
+        log("datalink: 51/02 open sent" +
+            if (droneSerial == null) " with no serial known — listening for the challenge to name one"
+            else " (serial already known from the beacon)")
+        dronePump(400, sink)   // latches the serial if the challenge carried one
+
         val serial = droneSerial ?: run {
-            log("datalink: no drone serial seen in a beacon — cannot open the session")
+            log("datalink: no serial from the beacon OR the 0x51/0x08 challenge — cannot open the session")
             logBeaconDiagnostics()
             return
         }
-        for ((i, frame) in droneOpenFrames(serial).withIndex()) {
+        for (frame in droneOpenResponses(serial)) {
             sendDumlRaw(0xE93B, 0x51, 0x01, frame)
-            if (i == 0) log("datalink: 51/02 open sent, len=${frame.size}")
-            // DJI Fly paces these ~400 ms, ~230 ms, ~2 ms, ~100 ms apart; a uniform gap is close enough
-            // and leaves room for the drone's challenge to arrive in between.
-            dronePump(if (i == 0) 400 else 200, sink)
+            // DJI Fly paces these ~230 ms, ~2 ms, ~100 ms apart; a uniform gap is close enough.
+            dronePump(200, sink)
         }
         sendAck()
         // Did the drone challenge us back? It answers a good 0x51/0x02 with 0x51/0x08 carrying its
