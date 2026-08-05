@@ -25,6 +25,16 @@ import dev.konraditurbe.osmosis.net.DumlSession
 class DroneSession(
     log: (String) -> Unit,
     port: Int = 9003,
+    /**
+     * Test hook (`--ez nobeacon true`): ignore the serial the beacon offers, forcing it to come from
+     * the `0x51/0x08` challenge instead.
+     *
+     * Without this the challenge path is **unreachable on the one aircraft that can verify it**: a
+     * Mavic 3 beacons first, [latchDroneSerial] latches and returns early, and the challenge is never
+     * parsed. So a green Mavic run would prove only "not broken", saying nothing about whether the
+     * reactive path works — and that is exactly the path we're about to hand a tester as the fix.
+     */
+    private val ignoreBeaconSerial: Boolean = false,
 ) : DumlSession(log, port, tcpPoke = false, isDrone = true) {
 
     private var droneCursor = 0L
@@ -395,6 +405,7 @@ class DroneSession(
             if (inner != 0x13 && inner != 0x08) continue
             val body = pl.copyOfRange(11, ln - 2)
             if (inner == 0x13 && beacon13 == null) beacon13 = body
+            if (inner == 0x13 && ignoreBeaconSerial) continue   // --ez nobeacon: force the challenge path
             parseDroneSerial(body)?.let { (serial, tag) ->
                 droneSerial = serial
                 serialTag = tag
@@ -471,8 +482,9 @@ class DroneSession(
         // latches per-datagram, which also fixes a straddle bug in the old probe loop — it rescanned
         // whole datagrams concatenated *with their headers*, so a beacon spanning a packet boundary
         // failed CRC and vanished, exactly as documented for manifest chunks.
-        val waitUntil = System.currentTimeMillis() + 3000
+        val waitUntil = System.currentTimeMillis() + if (ignoreBeaconSerial) 0 else 3000
         while (droneSerial == null && System.currentTimeMillis() < waitUntil) dronePump(200)
+        if (ignoreBeaconSerial) log("datalink: nobeacon — skipping the beacon fast path on purpose")
 
         // Send the open request whether or not we know a serial. It carries none — and the drone's
         // reply to it is the step-2 challenge, which *names the serial*. Bailing here was circular:

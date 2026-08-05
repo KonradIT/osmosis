@@ -156,6 +156,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** `--ez nojoin true` — skip the WiFi join/bind and talk over whatever network is already default. */
     private var noJoin = false
+
+    /** `--ez nobeacon true` — a drone's serial must come from the 0x51/0x08 challenge, not the beacon. */
+    private var noBeaconSerial = false
     private var pinOverride: String? = null // `--es pin <v>` test hook; wins over the per-model token
     // `--es appid <v>` — the app *identity* half of SetPairingPIN, overridable without a rebuild.
     // A device remembers the (identity, token) pair it approved and re-pairs it silently (0x45 -> 0x01);
@@ -290,6 +293,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // bindProcessToNetwork. Needed to capture our own session — see maybeStartOffload.
         if (intent?.getBooleanExtra("nojoin", false) == true) {
             noJoin = true; logLine("nojoin: will use the current default network, no WiFi join")
+        }
+        // `--ez nobeacon true`: make a drone's serial come from the 0x51/0x08 challenge instead of its
+        // beacon. The only way to exercise that path on a Mavic 3, which beacons first and would
+        // otherwise never reach it — see DroneSession.ignoreBeaconSerial.
+        if (intent?.getBooleanExtra("nobeacon", false) == true) {
+            noBeaconSerial = true; logLine("nobeacon: drone serial must come from the 0x51/0x08 challenge")
         }
         if (intent?.getBooleanExtra("autoscan", false) == true) {
             main.postDelayed({ startCameraScan(select = true) }, 500)
@@ -890,7 +899,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         // flat DCF records instead of CompositePack, /v1 instead of /v2 (ROADMAP #14).
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
-                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort)
+                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort, noBeaconSerial)
                             else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
