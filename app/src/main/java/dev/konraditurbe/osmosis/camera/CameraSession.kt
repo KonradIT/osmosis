@@ -2,6 +2,7 @@ package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.dcf.DcfRecords
+import dev.konraditurbe.osmosis.dcf.DcfTransferProbe
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.net.DumlSession
 import dev.konraditurbe.osmosis.net.DumlTransport
@@ -762,6 +763,55 @@ class CameraSession(
         }
     }
 
+    /**
+     * ROADMAP #6's open question, asked directly: does this camera serve file bytes over the datalink?
+     *
+     * Runs once per session on an Action-1-style manifest, right after the list lands and while the
+     * session is provably alive. See [DcfTransferProbe] for the reasoning, what a silent result is
+     * worth (little), and why every probe releases. Read-only: query + release, nothing that writes.
+     */
+    private fun probeTransferKinds(fileIndex: Long) {
+        log("datalink: --- 0x4a transfer-kind probe on index 0x%08x (read-only) ---".format(fileIndex))
+        var answered = 0
+        for ((n, base) in DcfTransferProbe.BASES.withIndex()) {
+            val seq = 0x60 + n
+            sendDuml(0x00, 0x26, DcfTransferProbe.query(base, seq, fileIndex),
+                receiverType = 0x01, receiverId = 0)
+            val heard = LinkedHashMap<Int, Int>()
+            var sample: ByteArray? = null
+            for (round in 0 until 3) {
+                for (dg in recvAll(250)) {
+                    for ((set, cmd, pl) in scanFrames(dg)) {
+                        if (set != 0x00 || cmd != 0x27) continue
+                        DcfTransferProbe.familyMember(pl, base, seq)?.let { off ->
+                            heard.merge(off, 1, Int::plus)
+                            if (sample == null) sample = pl.copyOfRange(0, minOf(40, pl.size))
+                        }
+                    }
+                }
+                sendAck()
+            }
+            // Always release, answer or not — a leaked slot makes the camera go quiet later and looks
+            // exactly like "unsupported", which would send us away from a route that works.
+            sendDuml(0x00, 0x26, DcfTransferProbe.release(base, seq), receiverType = 0x01, receiverId = 0)
+            recvAll(150); sendAck()
+
+            if (heard.isEmpty()) {
+                log("datalink:   base 0x%02x — no reply".format(base))
+            } else {
+                answered++
+                log("datalink:   base 0x%02x — ANSWERED: %s".format(base,
+                    heard.entries.joinToString(", ") { "${DcfTransferProbe.kindName(it.key)}×${it.value}" }))
+                sample?.let { log("datalink:     %s".format(it.joinToString("") { b -> "%02x".format(b) })) }
+            }
+        }
+        log(if (answered > 0)
+            "datalink: --- probe: $answered/${DcfTransferProbe.BASES.size} kinds answered — datalink transfer is LIVE, report this ---"
+        else
+            "datalink: --- probe: nothing answered. NOT a refutation — the query payload is a guess, " +
+                "and a wrong shape looks the same as an unsupported kind. See DcfTransferProbe ---")
+    }
+
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
         // The older Osmo Action generation answers with a flat DCF record array instead of
         // CompositePack — no paths, no filenames, files addressed by packed index. Its header is
@@ -770,6 +820,7 @@ class CameraSession(
         val dcf = DcfRecords.decodeAction1(bytes)
         if (dcf.isNotEmpty()) {
             log("datalink: decoded ${dcf.size} DCF index records (older Osmo Action generation)")
+            probeTransferKinds(dcf.first().fileIndex)
             return dcf.map { it.toCameraFile() }
         }
         val comp = decodeComposite(bytes)
