@@ -19,8 +19,8 @@ android {
         applicationId "dev.konraditurbe.osmosis"
         minSdk 29
         targetSdk 34
-        versionCode 19
-        versionName "1.3.2-action1-preview"
+        versionCode 20
+        versionName "1.3.3-action1-playback"
     }
 
     signingConfigs {
