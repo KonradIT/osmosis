@@ -663,6 +663,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // 0x53/0x10 is the one that matters: the camera answers 01 00 00 00 and wakes.
         val c = dev.konraditurbe.osmosis.duml.OsmoCommands
         main.postDelayed({ gattClient?.writeCommand(c.session5310()); logLine("sent 0x53/0x10 (wake)") }, 100)
+        // OA4-only probe: it's the one camera whose AP never came up via 0x53/0x10 or ConnectToWiFi,
+        // and it predates the era when WiFi was an implicit mode, so give it Mimo's 0x07/0x39 too
+        // (right after 0x53/0x10, as Mimo orders it). Gated so no verified model regresses.
+        if (currentModelId == CameraModel.ID_OSMO_ACTION_4) {
+            main.postDelayed({ gattClient?.writeCommand(c.wifiEnable39()); logLine("sent 0x07/0x39 (OA4 WiFi-enable probe)") }, 350)
+        }
         main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x07, id = 0x8007)) }, 900)
         main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x0E, id = 0x800E)) }, 1400)
         main.postDelayed({

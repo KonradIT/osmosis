@@ -56,4 +56,13 @@ class SessionCommandsTest {
         assertEquals(0x07, receiver(f))
         assertEquals(0x07, cmdSet(f)); assertEquals(0x07, cmdId(f))
     }
+
+    @Test
+    fun `0x07-0x39 wifi-enable is 0x07-0x39 to the wifi subsystem with payload 7a`() {
+        val f = OsmoCommands.wifiEnable39()
+        assertEquals(0x02, sender(f))
+        assertEquals(0x07, receiver(f))
+        assertEquals(0x07, cmdSet(f)); assertEquals(0x39, cmdId(f))
+        assertEquals(listOf(0x7A), payload(f).map { it.toInt() and 0xFF })
+    }
 }
