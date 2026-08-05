@@ -161,6 +161,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** `--ez nojoin true` — skip the WiFi join/bind and talk over whatever network is already default. */
     private var noJoin = false
 
+    /** `--ez probe4a true` — run the Osmo Action datalink-transfer probe. Off by default; see
+     *  CameraSession.probeTransfers for why this is not something a tester runs unattended. */
+    private var probe4a = false
+
+
     /** Serial + tag read off the drone's identity beacon over BLE, handed to the datalink session. */
     private var bleDroneSerial: Pair<ByteArray, Int>? = null
     private var pinOverride: String? = null // `--es pin <v>` test hook; wins over the per-model token
@@ -290,6 +295,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // bindProcessToNetwork. Needed to capture our own session — see maybeStartOffload.
         if (intent?.getBooleanExtra("nojoin", false) == true) {
             noJoin = true; logLine("nojoin: will use the current default network, no WiFi join")
+        }
+        // `--ez probe4a true`: walk the Osmo Action's datalink transfer kinds. Opt-in because the
+        // probe interrogates the camera with commands it may not like — not for unattended tester runs.
+        if (intent?.getBooleanExtra("probe4a", false) == true) {
+            probe4a = true; logLine("probe4a: will probe Osmo Action datalink transfer kinds")
         }
         if (intent?.getBooleanExtra("autoscan", false) == true) {
             main.postDelayed({ startCameraScan(select = true) }, 500)
@@ -889,7 +899,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
                             if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)
-                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
+                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke, probe4a)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
                         val f = runCatching { c.fetchFileList("192.168.2.1") }

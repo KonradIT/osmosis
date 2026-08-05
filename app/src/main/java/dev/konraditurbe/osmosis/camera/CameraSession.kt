@@ -27,6 +27,16 @@ class CameraSession(
     log: (String) -> Unit,
     port: Int = 9004,
     tcpPoke: Boolean = true,
+    /**
+     * `--ez probe4a true` — run [probeTransferKinds] on an Action-1 manifest.
+     *
+     * **Default off, deliberately.** It ran unattended in the first probe build, and that build is the
+     * one where a tester's Action 1 started rebooting. The probe is not established as the cause — the
+     * same build also made the grid non-empty for the first time, so preview became reachable in the
+     * same step — but sending speculative transfer frames to firmware is exactly the kind of thing that
+     * could do it, and it is not a tester's job to run an experiment we can't yet exonerate.
+     */
+    private val probeTransfers: Boolean = false,
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
     /**
@@ -933,6 +943,7 @@ class CameraSession(
     private fun probeTransferKinds(fileIndex: Long) {
         log("datalink: --- 0x4a transfer-kind probe on index 0x%08x (read-only) ---".format(fileIndex))
         var answered = 0
+        var sawState = 0
         for ((n, base) in DcfTransferProbe.BASES.withIndex()) {
             val seq = 0x60 + n
             sendDuml(0x00, 0x26, DcfTransferProbe.query(base, seq, fileIndex),
@@ -960,16 +971,24 @@ class CameraSession(
                 log("datalink:   base 0x%02x — no reply".format(base))
             } else {
                 answered++
+                if (DcfTransferProbe.STATE in heard.keys) sawState++
                 log("datalink:   base 0x%02x — ANSWERED: %s".format(base,
                     heard.entries.joinToString(", ") { "${DcfTransferProbe.kindName(it.key)}×${it.value}" }))
                 sample?.let { log("datalink:     %s".format(it.joinToString("") { b -> "%02x".format(b) })) }
             }
         }
-        log(if (answered > 0)
-            "datalink: --- probe: $answered/${DcfTransferProbe.BASES.size} kinds answered — datalink transfer is LIVE, report this ---"
-        else
-            "datalink: --- probe: nothing answered. NOT a refutation — the query payload is a guess, " +
-                "and a wrong shape looks the same as an unsupported kind. See DcfTransferProbe ---")
+        // Distinguish "the kind exists" from "a transfer started". An Action 1 answered base 0x20 with
+        // a `release` and nothing else: the family IS understood there — a foreign base would be
+        // ignored outright — but the camera closed the transfer instead of raising a state and sending.
+        // The earlier wording called any reply "transfer is LIVE", which overstated exactly this case.
+        log(when {
+            sawState > 0 -> "datalink: --- probe: $sawState kind(s) raised STATE — a transfer STARTED, report this ---"
+            answered > 0 -> "datalink: --- probe: $answered/${DcfTransferProbe.BASES.size} kind(s) replied but none " +
+                "raised STATE — the transfer family is understood there, the transfer was refused. " +
+                "Most likely our query payload is wrong, not that the route is closed ---"
+            else -> "datalink: --- probe: nothing answered. NOT a refutation — the query payload is a guess, " +
+                "and a wrong shape looks the same as an unsupported kind. See DcfTransferProbe ---"
+        })
     }
 
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
@@ -980,7 +999,7 @@ class CameraSession(
         val dcf = DcfRecords.decodeAction1(bytes)
         if (dcf.isNotEmpty()) {
             log("datalink: decoded ${dcf.size} DCF index records (older Osmo Action generation)")
-            probeTransferKinds(dcf.first().fileIndex)
+            if (probeTransfers) probeTransferKinds(dcf.first().fileIndex)
             return dcf.map { it.toCameraFile() }
         }
         val comp = decodeComposite(bytes)
