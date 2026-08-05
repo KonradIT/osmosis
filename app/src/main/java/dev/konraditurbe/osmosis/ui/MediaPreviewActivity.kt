@@ -581,7 +581,24 @@ class MediaPreviewActivity : AppCompatActivity() {
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
         streamCandidates = file.previewCandidates()
         streamIdx = 0
-        startStream(streamCandidates[streamIdx])
+        // Check the port is even open before handing the URL to MediaPlayer. When it isn't — the older
+        // Osmo Action generation, whose HTTP server we can't yet get to listen — MediaPlayer sits on
+        // each candidate for a full 30 s before reporting `what=1 extra=-2147483648`, so a two-candidate
+        // list is a minute of spinner and then a generic failure. A refused connect is instant and
+        // says something specific.
+        Thread {
+            val open = runCatching {
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, 80), 2500); true }
+            }.getOrDefault(false)
+            main.post {
+                if (isFinishing) return@post
+                if (open) startStream(streamCandidates[streamIdx])
+                else {
+                    plog("preview: $ip:80 refused — not attempting to stream (camera is not serving HTTP)")
+                    showStatus("This camera isn't serving media over HTTP yet.\nPreview and download aren't available on it.")
+                }
+            }
+        }.start()
     }
 
     /**
