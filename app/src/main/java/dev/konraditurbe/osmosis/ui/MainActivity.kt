@@ -157,6 +157,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** `--ez nojoin true` — skip the WiFi join/bind and talk over whatever network is already default. */
     private var noJoin = false
 
+    /** `--ez probe4a true` — run the Osmo Action datalink-transfer probe. Off by default; see
+     *  CameraSession.probeTransfers for why this is not something a tester runs unattended. */
+    private var probe4a = false
+
     /** `--ez nobeacon true` — a drone's serial must come from the 0x51/0x08 challenge, not the beacon. */
     private var noBeaconSerial = false
 
@@ -300,6 +304,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // `--ez nobeacon true`: make a drone's serial come from the 0x51/0x08 challenge instead of its
         // beacon. The only way to exercise that path on a Mavic 3, which beacons first and would
         // otherwise never reach it — see DroneSession.ignoreBeaconSerial.
+        if (intent?.getBooleanExtra("probe4a", false) == true) {
+            probe4a = true; logLine("probe4a: will probe Osmo Action datalink transfer kinds")
+        }
         if (intent?.getBooleanExtra("nobeacon", false) == true) {
             noBeaconSerial = true; logLine("nobeacon: drone serial must come from the 0x51/0x08 challenge")
         }
@@ -903,7 +910,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
                             if (m.isDrone) DroneSession(::logLine, m.datalinkPort, noBeaconSerial, bleDroneSerial)
-                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
+                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke, probe4a)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
                         val f = runCatching { c.fetchFileList("192.168.2.1") }
