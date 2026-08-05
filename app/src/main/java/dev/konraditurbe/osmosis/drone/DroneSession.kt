@@ -340,6 +340,11 @@ class DroneSession(
     /** First `0x51/0x13` payload seen, kept verbatim for the log when the serial can't be read out. */
     @Volatile private var beacon13: ByteArray? = null
 
+    /** Everything the aircraft sends before we have a serial — see [DroneFrameCensus]. Collected on
+     *  every session (it stops the moment a serial latches, so a Mavic pays almost nothing) and only
+     *  printed when the open fails, which is the one time anybody needs it. */
+    private val census = DroneFrameCensus { parseDroneSerial(it) }
+
     /**
      * Pull the serial out of a `0x51/0x13` beacon payload.
      *
@@ -405,6 +410,8 @@ class DroneSession(
             log("datalink: a 0x51/0x13 beacon DID arrive but carried no readable serial — payload " +
                 it.copyOfRange(0, minOf(64, it.size)).joinToString("") { b -> "%02x".format(b) })
         }
+        // "NONE" only says this airframe isn't a Mavic. The census says what it IS doing.
+        census.report().forEach { log("datalink: $it") }
     }
 
     /** One `0x51`-channel frame: inner DUML (target 0xe9ee) + the shared 22-byte tail. */
@@ -648,9 +655,15 @@ class DroneSession(
                 // Telemetry rides pktType 0x01 (small keepalive-sized packets). Decode it HERE rather
                 // than only when idle: the keep-alive is busy serving thumbnails for minutes on end, and
                 // status parsed only between jobs meant battery and storage never appeared at all.
-                if (dg.size > 8 && (dg[6].toInt() and 0xFF) == 0x01) {
+                val pktType = if (dg.size > 6) dg[6].toInt() and 0xFF else -1
+                if (dg.size > 8 && pktType == 0x01) parseDroneStatus(dg)
+                // The beacon has only ever been *seen* on pktType 0x01 — but "only ever" is one
+                // airframe. Until we have a serial, look on every packet type and census what does
+                // arrive; a model that beacons elsewhere was previously invisible, indistinguishable
+                // in the log from one that never beacons at all.
+                if (dg.size > 8 && droneSerial == null) {
                     latchDroneSerial(dg)
-                    parseDroneStatus(dg)
+                    census.record(pktType, dg)
                 }
                 if (sink == null) continue
                 if (!manifestStream) sink.write(dg)
