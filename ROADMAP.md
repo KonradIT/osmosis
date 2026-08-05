@@ -179,9 +179,11 @@ note was wrong; it grabs the UDP/9004 datalink DUML in the clear). The RE had it
 `SendCompositePack<delete_file_req, MediaFile>` in the **same `0x00` cmdset as the list** — the missing
 byte is **cmdId `0x28`** (list = `0x00/0x26`, delete = `0x00/0x28`).
 
-- **Wire:** `0x00/0x28`, App→Camera. Payload `[count:u8][handle:u32-LE …][count:u32] 00 [count:u32]
-  01 01 00 00` (the tail is a storage selector, verbatim from the capture); reply `0x00/0x28` = `0000`
-  = OK. For one file both counts = 1.
+- **Wire:** `0x00/0x28`, App→Camera. Payload `[count:u8][handle:u32-LE …][counter:u32] 00 [count:u32]
+  01 01 00 00`; reply `0x00/0x28` = `0000` = OK. The field after the handles is a **per-request
+  counter**, not a second count — it steps 1, 2, 3… across a session (two consecutive deletes in the
+  Mimo capture show `01` then `02` while the other u32 stays `01`). Reading it as a count is what made
+  every delete after the first replay a stale counter.
 - **Handle:** a per-file object id at the **head of each manifest record**, read straight from the list
   we already fetch. Anchored on the constant record marker `03 ff 19 06` (`handle = u32 at marker-8`) —
   works for both layouts: Nano (`DJI_`, 361-byte records, handles step `0x40`) and Xtra/Action (`CAM_`,
@@ -201,8 +203,17 @@ handle sits elsewhere, e.g. ~120 B before the name). Widening the search to reac
 onto the *neighbouring video's* marker → a wrong-file, irreversible delete, so we fail-safe to "can't
 delete" instead. (The 400 B window is tuned for this: it reaches a video's own marker at ~195 B but stops
 short of the next record's at ~473 B.) Safe photo support needs a dedicated photo-record anchor verified
-on both families. Also: delete is single-shot per handle (a delete reshuffles the camera's table, so we
-zero the remaining handles and require a reconnect to delete more). Batch/multi-select is a follow-up.
+on both families. (Survivors keep their handles after a delete — the grid just drops the one cell, no
+reconnect needed.)
+
+**Batch delete — the payload takes an array, but n>1 has never been sent.** `[count:u8][handle …]` is
+length-prefixed and `deleteFiles(handles: List<Long>)` already builds N, yet all four deletes in the
+Nano *and* Xtra captures are `n=1`, and the UI deletes one file per long-press. With n always 1, both
+the leading `u8` and the trailing `u32` are indistinguishable from constants — the same ambiguity that
+hid the counter above — so sending `02` risks the camera misparsing the handle array rather than
+rejecting it, and a shifted read can synthesise a handle addressing a *different real file*. Settle it
+with **one Mimo capture of a multi-select delete** (`tools/duml_pcap.py --ops` prints `n=`) before
+writing any batch path. No consumer yet regardless: the grid has no multi-select.
 
 ## 5. Osmo Nano: dock / power stats — ✅ DONE (2026-07-23)
 
