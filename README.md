@@ -133,7 +133,7 @@ Standard Gradle Android build:
 ./gradlew assembleDebug
 ```
 
-Plain Android Views (no Jetpack Compose). Built with AGP 7.4.2 / Gradle 7.5.1 / JDK 15 (JDK 11–17 should work); `compileSdk 34`, `minSdk 29`.
+Plain Android Views (no Jetpack Compose). Built with AGP 8.5.2 / Gradle 8.7 / JDK 17 (JDK 17–21 work); `compileSdk 34`, `minSdk 29`.
 
 ## Roadmap
 

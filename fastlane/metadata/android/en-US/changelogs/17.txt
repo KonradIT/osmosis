@@ -1,0 +1,1 @@
+Build toolchain moved to AGP 8.5.2 / Gradle 8.7 / Kotlin 1.9.24 so the app builds on JDK 17 through 21. The old Gradle 7.5.1 refused to start on any JDK newer than 19, which no current build environment still ships. No functional changes.
