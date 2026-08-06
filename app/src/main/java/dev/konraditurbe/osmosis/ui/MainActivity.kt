@@ -145,9 +145,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // datalink goes idle). Held open during browse/download; closed on a new offload / exit.
     private var datalink: MediaSession? = null
 
-    // Favorites are camera writes that run in a fresh session (~re-handshake each), so serialize them
-    // on one worker — rapid star toggles queue instead of tearing down/rebuilding sessions concurrently.
-    private val favExec = java.util.concurrent.Executors.newSingleThreadExecutor()
+    // EVERY camera write goes through this one worker. They can each fall back to tearing the keep-alive
+    // down and re-handshaking, so two running at once fight over the socket. Observed on an Xtra Edge Pro:
+    // four deletes tapped in ~15 s ran on four threads, the first one's verify re-list re-opened the
+    // session underneath the other three, and the result was `handshake FAILED`, a 51-byte garbage
+    // manifest, a grid emptied to 0 files and a dead session — from four deletes the camera had accepted.
+    // Serialized, they queue behind each other instead.
+    private val cmdExec = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     // Pairing PIN string sent in SetPairingPIN — an app-chosen token (any value pairs; the camera
     // shows its approval popup once, then stores it for silent re-pair). Overridable via
@@ -1287,7 +1291,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // reload shows whatever the camera reports (the Xtra reports none; that's fine, we don't fake it).
         adapter?.setStarredByPath(f.path, on)
         toast(if (on) "Favoriting ${f.name}…" else "Unfavoriting ${f.name}…")
-        favExec.execute {
+        cmdExec.execute {
             val ok = runCatching { dl.setFavorite(favHandle, on) }.getOrDefault(false)
             if (!ok) main.post { adapter?.setStarredByPath(f.path, !on); toast("Favorite failed") }
         }
@@ -1303,7 +1307,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             .setPositiveButton("Delete") { _, _ ->
                 logLine("DELETE requested: ${f.name} (handle $hx)")
                 toast("Deleting ${f.name}…")
-                Thread {
+                cmdExec.execute {
                     val status = runCatching { dl.deleteFiles(listOf(f.handle)) }.getOrNull()
                     main.post {
                         when (status) {
@@ -1319,7 +1323,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                             }
                         }
                     }
-                }.start()
+                }
             }
             .show()
     }

@@ -34,6 +34,28 @@ class CameraSession(
 
     private val VIDEO_EXTS = setOf("MP4", "MOV", "OSV", "INSV")
 
+    // ---- playback mode -------------------------------------------------------------------------
+    // Playback (0x02/0x0c = 01 01 00 01) is a CAMERA-WIDE mode, not a per-command flag, and it is what
+    // takes the camera out of capture: on a Pocket 3 the gimbal parks, which is what a user offloading
+    // a session actually wants. Mimo treats it as owned for the whole browse — from a Nano capture:
+    //
+    //     1.10s APP->CAM 01010001      enter
+    //     1.33s CAM->APP 00            confirmed
+    //     … 48 s of browsing, thumbnails and a DELETE, no further 0x02/0x0c at all …
+    //
+    // and in a longer one it held for 128 s straight, left only when the user backed out of the album,
+    // and on re-entry sent the enter TWICE 0.6 s apart — i.e. Mimo retries until the camera answers.
+    //
+    // We used to fire the enter once and never look at the reply, then send LEAVE at the end of every
+    // fresh-session fallback (favorite, highlights). So the mode flapped on/off underneath operations
+    // that assume it is held, which is what made favourites and deletes race and let a Pocket 3 sit in
+    // capture mode — recording — throughout a transfer. Now: confirm on entry, retry, hold for the
+    // whole session, and release only on teardown.
+    @Volatile private var playbackHeld = false
+    /** Set by [close] so the keep-alive thread sends the leave before the socket goes. */
+    @Volatile private var releasePlaybackOnExit = false
+    @Volatile private var playbackReleased = false
+
     // Lazy grid pagination: [pageCursor] = oldest video handle seen (the next page's selector),
     // [seenPaths] dedups across pages, [moreAvailable] = another older page is likely to exist. Video
     // record handles live at/above VIDEO_HANDLE_BASE (0x4010xxxx on the Nano); the paging cursor only
@@ -275,13 +297,21 @@ class CameraSession(
     override fun getHighlights(handle: Long): List<Int> {
         if (handle == 0L) return emptyList()
         if (keepAliveOn) {
-            val reply = runCommand(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0)
+            val reply = runCommand(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0,
+                timeoutMs = 4000)
             if (reply != null) {
                 val marks = parseHighlights(reply)
                 log("datalink: highlights(inline) 0x${handle.toString(16)} → ${marks.size} $marks")
                 return marks
             }
-            log("datalink: highlights(inline) 0x${handle.toString(16)} — no reply, retrying in a fresh session")
+            // Give up rather than rebuild the session. Highlights are chapter marks on the scrubber —
+            // decorative, and usually empty. The fallback below tears the live session down and re-opens
+            // it, which on a Nano cost 8 s of churn per preview and re-entered playback mode, all to
+            // return `0 []`. Pagination and delete earn that cost because nothing else can do their job;
+            // this does not. A missing mark list just means no marks are drawn.
+            log("datalink: highlights(inline) 0x${handle.toString(16)} — no reply; skipping " +
+                "(not rebuilding a live session for chapter marks)")
+            return emptyList()
         }
         val ip = tx.peerIp ?: return emptyList()
         keepAliveOn = false
@@ -304,8 +334,9 @@ class CameraSession(
             reply = findReply(recvAll(200), 0x02, 0xFF)
             if (reply == null) sendAck()
         }
-        sendDuml(0x02, 0x0c, hex("01010000"), receiverType = 0x01, receiverId = 0)   // leave playback mode
-        recvAll(150)
+        // No leave here on purpose: the browse continues after this fresh session and the keep-alive is
+        // about to resume. Dropping the camera out of playback between operations is what made
+        // favourite/delete race and let a Pocket 3 fall back into capture mid-transfer.
         val marks = reply?.let { parseHighlights(it) } ?: emptyList()
         log("datalink: highlights(fresh) 0x${handle.toString(16)} → ${marks.size} $marks")
         return marks
@@ -405,13 +436,47 @@ class CameraSession(
      * services the inline command queue ([runCommand]).
      */
 
+    /**
+     * Put the camera into playback and wait for it to say so, retrying like Mimo does.
+     *
+     * The old code sent this once and never read the reply, so a camera that was busy, still waking, or
+     * mid-mode-change simply stayed in capture and nothing noticed. The camera answers `0x02/0x0c` with
+     * a status byte; Mimo waits for that and re-sends if it doesn't come (observed: two sends 0.6 s
+     * apart on re-entering the album).
+     *
+     * Runs ON the keep-alive thread, before its loop. That matters: [sendDuml] bumps `cmdCounter` and
+     * `dumlSeq` with no lock, so sending playback frames from any other thread would interleave the
+     * sequence numbers and get subsequent commands rejected as out-of-window.
+     */
+    private fun enterPlaybackConfirmed(attempts: Int = 3): Boolean {
+        repeat(attempts) { n ->
+            sendDuml(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0)
+            val deadline = System.nanoTime() + 900_000_000L
+            while (System.nanoTime() < deadline) {
+                val dg = recvAll(100)
+                parseStatus(dg)                       // keep the status pill fed while we wait
+                if (findReply(dg, 0x02, 0x0C) != null) {
+                    playbackHeld = true
+                    log("datalink: playback mode held" + if (n > 0) " (confirmed on attempt ${n + 1})" else "")
+                    return true
+                }
+                sendAck()
+            }
+        }
+        // Not fatal — the browse still works, but the camera stays in capture (a Pocket 3 keeps its
+        // gimbal live and can still be recording), so say so rather than pretend we hold it.
+        log("datalink: playback mode NOT confirmed after $attempts attempts — camera may still be in capture")
+        return false
+    }
+
     override fun startKeepAlive() {
         if (keepAliveOn) return
         keepAliveOn = true
+        playbackReleased = false
         resetStatus()
         Thread {
             var tick = 0
-            sendDuml(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0)   // enter + hold playback
+            enterPlaybackConfirmed()
             while (keepAliveOn) {
                 runCatching {
                     val dg = recvAll(200)
@@ -448,7 +513,38 @@ class CameraSession(
                 runCatching { Thread.sleep(300) }
                 tick++
             }
+            // The loop also stops for a fresh-session fallback, which resumes browsing straight after —
+            // only a real teardown releases the mode, the same way Mimo leaves the album rather than
+            // toggling per operation.
+            if (releasePlaybackOnExit && playbackHeld) {
+                runCatching {
+                    sendDuml(0x02, 0x0C, hex("01010000"), receiverType = 0x01, receiverId = 0)
+                    recvAll(150)
+                }
+                playbackHeld = false
+                log("datalink: playback mode released")
+            }
+            playbackReleased = true
         }.apply { isDaemon = true; name = "datalink-keepalive" }.start()
+    }
+
+    /**
+     * Hand the camera back before dropping the link, so it isn't left parked in playback.
+     *
+     * The leave has to be sent BY the keep-alive thread (unsynchronized sequence counters — see
+     * [enterPlaybackConfirmed]), so this asks it to and waits briefly for it to finish. Bounded tight:
+     * a caller that closes and immediately re-opens must not be stalled, and a missed leave costs
+     * nothing worse than a camera sitting in playback until it sleeps.
+     */
+    override fun close() {
+        if (playbackHeld && keepAliveOn) {
+            releasePlaybackOnExit = true
+            keepAliveOn = false
+            val deadline = System.currentTimeMillis() + 500
+            while (!playbackReleased && System.currentTimeMillis() < deadline) runCatching { Thread.sleep(25) }
+            releasePlaybackOnExit = false
+        }
+        super.close()
     }
 
     /** Scan datagrams for DUML status frames (SOF 0x55; cmd set/id at header offsets 9/10) and decode. */
@@ -494,7 +590,12 @@ class CameraSession(
         // "no such handle" on an already-deleted file). Only a genuine no-reply falls through.
         if (keepAliveOn) {
             log("datalink: DELETE(inline) 0x00/0x28 n=${handles.size}")
-            val reply = runCommand(0x00, 0x28, payload, receiverType = 0x01, receiverId = 0)
+            // 10 s, not the 2500 ms default. An Xtra Edge Pro answered a delete at +6.9 s with status
+            // 0x0000 — long after the default gave up — so the reply WAS coming and we threw it away,
+            // then paid for a verify re-list on every single delete. Waiting is cheap here; the fallback
+            // tears the session down, and a delete is a deliberate, one-at-a-time act anyway.
+            val reply = runCommand(0x00, 0x28, payload, receiverType = 0x01, receiverId = 0,
+                timeoutMs = 10_000)
             if (reply != null) {
                 val status = if (reply.size >= 2) (reply[0].toInt() and 0xFF) or ((reply[1].toInt() and 0xFF) shl 8) else reply[0].toInt() and 0xFF
                 log("datalink: DELETE(inline) status=0x%04x".format(status))
@@ -657,8 +758,7 @@ class CameraSession(
             for (d in recvAll(200)) { status = findRespStatus(d, 0x02, 0xbf); if (status != null) break }
             if (status == null) sendAck()
         }
-        sendDuml(0x02, 0x0c, hex("01010000"), receiverType = 0x01, receiverId = 0)   // leave playback mode
-        recvAll(150)
+        // No leave here — see freshSessionHighlights. The keep-alive resumes and keeps holding playback.
         log("datalink: FAVORITE reply status=${status?.let { "0x%04x".format(it) } ?: "none"}")
         return status == 0
     }

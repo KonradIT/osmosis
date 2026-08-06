@@ -239,8 +239,12 @@ class MediaGridAdapter(
         if (idx < 0 || all[idx].starred == starred) return
         all[idx] = all[idx].copy(starred = starred)
         // A faved-only view may gain/lose this cell, so re-diff; otherwise just repaint its badge.
-        if (favedOnly) setRows(buildRows())
-        else rowIndexOfPath(path).takeIf { it >= 0 }?.let { notifyItemChanged(it) }
+        if (favedOnly) { setRows(buildRows()); return }
+        val i = rowIndexOfPath(path).takeIf { it >= 0 } ?: return
+        // Row.Item holds a COPY of the file taken when buildRows() ran, so updating `all` alone leaves
+        // the bound row stale and notifyItemChanged repaints the same ❤️-less cell. Replace the row too.
+        rows = rows.toMutableList().also { it[i] = Row.Item(all[idx]) }
+        notifyItemChanged(i)
     }
 
     /** The filtered items in display order (no headers) — the list the preview swipes through. */
