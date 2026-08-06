@@ -44,15 +44,10 @@ object DronePairing {
      * The hold is 2 s on most models and 3 s on the newest (DJI's own QuickTransfer setup page splits
      * it that way: Mini 3 Pro / Mini 4 Pro = two seconds, Mini 5 Pro = three), so the prompt gives the
      * range rather than a duration that is wrong on half the line-up.
-     *
-     * The **Mini 3** is the exception and needs its own line: it has no hold-to-confirm at all — the
-     * aircraft must first be put into QuickTransfer mode with *three quick presses* of the power
-     * button. Worth surfacing, since a user holding the button on one gets nothing.
      */
     const val APPROVAL_MESSAGE =
         "The drone's lights should be flashing / chasing around now — that means it got the request.\n\n" +
-            "Press and hold its power button for 2–3 seconds to confirm the connection.\n\n" +
-            "On a Mini 3, instead press the power button three times quickly to enter QuickTransfer mode."
+            "Press and hold its power button for 2–3 seconds to confirm the connection."
 
     /**
      * The setup sequence DJI Fly runs **over BLE** right after pairing a Mavic, replayed verbatim from a
