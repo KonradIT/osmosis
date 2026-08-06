@@ -1,7 +1,5 @@
 Osmosis is a third-party media client for DJI Osmo action and gimbal cameras. It browses the camera's memory, previews clips, and copies photos and videos to the phone's gallery. It needs no DJI SDK, no account, no activation and no companion service.
 
-It speaks DJI's undocumented DUML protocol directly: it pairs with the camera over Bluetooth LE, reads the camera's Wi-Fi credentials, joins the camera's access point, lists the media, and downloads the originals over HTTP from the camera itself.
-
 Features:
 
 * Media grid with thumbnails pulled straight off the camera, grouped by capture date.
