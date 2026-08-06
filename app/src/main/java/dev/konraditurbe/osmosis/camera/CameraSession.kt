@@ -388,6 +388,47 @@ class CameraSession(
         return false
     }
 
+    /**
+     * How long a registered session keeps accepting inline command WRITES.
+     *
+     * Measured on a Nano, one session: deletes at 45 s / 57 s / 66 s came back `status=0x0000` in ~1 s;
+     * at 74 s / 94 s / 124 s / 142 s the camera answered nothing at all. Reads were unaffected — a
+     * pagination query at 82 s in that same session returned normally. 55 s leaves margin under the
+     * observed 66–74 s cliff.
+     *
+     * This is a MITIGATION, not the fix. Something in the sliding-window sequence handling
+     * ([DumlTransport.routingHeader] / advance) drifts out of the camera's write-accept range and we do
+     * not yet know what — the header comment there claims the window isn't enforced, which our own
+     * measurement contradicts, so a pcap of one of our long sessions against Mimo's needs to settle it.
+     * Until then, re-registering on a schedule we choose beats discovering it by timing out: the old
+     * path burned 10 s waiting for a reply that was never coming, then re-registered anyway and re-listed
+     * the whole manifest to verify — ~28 s in total.
+     */
+    private val WRITE_WINDOW_MS = 55_000L
+
+    /**
+     * Re-register before a write when the session is too old to accept one.
+     *
+     * Costs a handshake but lands the write inline afterwards, skipping both the doomed attempt and the
+     * verify re-list. Briefly drops playback — closing the socket is what takes the camera out of it —
+     * which is the same dip the old fallback caused, just sooner and without the wasted wait.
+     */
+    private fun refreshSessionForWrite(what: String): Boolean {
+        if (!keepAliveOn || sessionAgeMs() <= WRITE_WINDOW_MS) return false
+        val ip = tx.peerIp ?: return false
+        log("datalink: session is ${sessionAgeMs() / 1000}s old — re-registering before $what " +
+            "(writes stop being accepted around 70s)")
+        keepAliveOn = false
+        runCatching { Thread.sleep(600) }        // let the keep-alive loop finish its recv and exit
+        tx.close()
+        if (!openAndRegister(ip, subscribe = false)) {
+            log("datalink: re-register before $what FAILED — attempting the write anyway")
+            return false
+        }
+        startKeepAlive()
+        return true
+    }
+
     override fun startKeepAlive() {
         if (keepAliveOn) return
         keepAliveOn = true
@@ -519,6 +560,7 @@ class CameraSession(
      */
     override fun deleteFiles(handles: List<Long>): Int? {
         if (handles.isEmpty()) return null
+        refreshSessionForWrite("delete")
         val payload = deletePayload(handles, delCounter++)
 
         // Inline on the live session first (#12). For a DESTRUCTIVE op a landed reply is authoritative —
@@ -656,6 +698,7 @@ class CameraSession(
         }.toByteArray()
 
     override fun setFavorite(handle: Long, on: Boolean): Boolean {
+        refreshSessionForWrite("favourite")
         val payload = favoritePayload(handle, favCounter++, on)
 
         // Try INLINE on the live session first (it holds playback + a faithful seq now — #12). No pause,

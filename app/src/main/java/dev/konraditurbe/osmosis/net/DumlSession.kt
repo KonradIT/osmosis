@@ -30,6 +30,20 @@ abstract class DumlSession(
 
     @Volatile protected var keepAliveOn = false
 
+    /**
+     * When the current session last completed its handshake+registration, or 0 if never.
+     *
+     * Measured on a Nano: inline command **writes** stop being answered roughly 70 s after this, while
+     * reads (pagination, manifest queries) keep working all session. Same session, deletes at 45/57/66 s
+     * returned `status=0x0000` in ~1 s; at 74/94/124/142 s they got no reply at all. Callers use the age
+     * to refresh before a write rather than discover it by timing out. See CameraSession.refreshSession.
+     */
+    @Volatile protected var registeredAtMs = 0L
+
+    /** Milliseconds since this session registered; [Long.MAX_VALUE] if it never did. */
+    protected fun sessionAgeMs(): Long =
+        if (registeredAtMs == 0L) Long.MAX_VALUE else System.currentTimeMillis() - registeredAtMs
+
     @Volatile override var onStatus: ((CameraStatus) -> Unit)? = null
     @Volatile override var onFetchProgress: ((Int) -> Unit)? = null
 
@@ -99,6 +113,7 @@ abstract class DumlSession(
         // evidence that the peer has a sequence space of its own.
         log("datalink: session=0x%04x base=0x%04x channel=0x%04x"
             .format(tx.sessionId, tx.baseSeq, tx.cameraChannel))
+        registeredAtMs = System.currentTimeMillis()
         return true
     }
 
