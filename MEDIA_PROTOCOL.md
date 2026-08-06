@@ -327,6 +327,41 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 
 ## Datalink session (sent before the list, over UDP)
 
+### Holding playback mode for a whole browse session
+
+Playback (`0x02/0x0c` = `01 01 00 01`) is a **camera-wide mode**, not a per-command flag, and holding it
+is what keeps a camera out of capture — on a Pocket 3 the gimbal parks, which is what a user offloading a
+session wants. Two things have to be right, both learned the hard way on a Nano:
+
+**1. Enter once and confirm; never leave mid-session.** From `mimo_nano_delete.pcap`:
+
+```
+ 1.10s  APP->CAM  02/0c  01010001      enter
+ 1.33s  CAM->APP  02/0c  00            confirmed
+        ... 48 s of browsing, thumbnails and a DELETE — no further 0x02/0x0c at all ...
+```
+
+and in a longer capture it held 128 s, left only when the user backed out of the album, and on re-entry
+sent the enter **twice 0.6 s apart** — Mimo retries until the camera answers. So: send it, wait for the
+`0x02/0x0c` reply, retry if it doesn't come, and send the leave (`01 01 00 00`) only on teardown. Sending
+leave after each operation makes the mode flap and races anything that assumes it is held.
+
+**2. Beat `0x00/0x88` at ~1 Hz, and do NOT send `0x02/0x8E`.**
+
+| frame | Mimo, 49 s Nano session | effect |
+|---|---|---|
+| `0x02/0x8E` payload `00011400` | **never sent** | we sent it ~3x/s; it drags the camera OUT of playback about a second after entering |
+| `0x00/0x88` sub-cmd `0x17`, ASCII `APP` @5-7 | announce, twice (t=0.115 s, 0.595 s) | app presence |
+| `0x00/0x88` sub-cmd `0x1a` (`1a 00 00 00 01`, 5 B) | ~1 Hz, all session | the actual keepalive |
+
+The camera needs *some* ~1 Hz beat or it drops playback a second after it is set. We send the `0x17`
+announce at 1 Hz, which works and holds the mode for the whole session; Mimo's own beat is the `0x1a`
+sub-command, which is the more faithful thing and is untried. Sending nothing at all is what produces
+"playback appears, 1 s, disappears".
+
+Status does **not** depend on any of this: the camera pushes `0x02/0x80` and `0x02/0x82` on its own once
+registered (493 and 480 times in that 49 s capture), so battery and storage keep updating with no polling.
+
 ### Datalink transport / sequencing — the one that makes commands land inline
 
 Each UDP packet is `[8B udp hdr][12B routing hdr][DUML frame]`. It's a **sliding-window sequenced

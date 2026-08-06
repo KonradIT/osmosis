@@ -62,21 +62,26 @@ class CameraSession(
     private val VIDEO_EXTS = setOf("MP4", "MOV", "OSV", "INSV")
 
     /**
-     * `0x00/0x88` sub-command `0x17` — the app announcing itself, ASCII `APP` at bytes 5-7. Sent ONCE,
-     * during registration.
+     * `0x00/0x88` sub-command `0x17` — the app telling the camera it is still here, ASCII `APP` at bytes
+     * 5-7. Sent at registration **and every ~1 s for the whole session**.
      *
-     * Do not beat this. Tried and reverted (2026-08-06): Mimo does send 00/88 ~1 Hz all session, but the
-     * repeating frame is a different sub-command — **`1a 00 00 00 01` / `1a 00 00 00 00`, 5 bytes** —
-     * while `0x17` is only the announce, sent twice at t=0.115 s and t=0.595 s. Re-sending the announce
-     * every second made the Nano drop back to listing a single storage, losing the dock SD card that the
-     * corrected subscription frame had just made visible on page 1.
+     * The camera needs a periodic beat to keep serving a browsing client, and playback mode is what it
+     * drops without one. We used to send `0x02/0x8E` ~3x/s, which Mimo never sends and which actively
+     * knocked the camera OUT of playback; removing it left no beat at all, and the mode then fell over
+     * about a second after being set, coming back only on our own 10 s re-assert — observed on hardware
+     * as "appears, 1 s, disappears, 10 s later appears again". With this at 1 Hz, playback holds for the
+     * whole session.
      *
-     * Mimo's announce is also 14 bytes to our 15 (we carry an extra `00` before the trailing `02`) and
-     * its bytes 2-5 vary between its own two sends, so they hold a counter or timestamp we don't model.
-     * Ours is left exactly as it was: it is what the camera has always accepted, and the two-storage
-     * listing works with it. Changing it is unfinished business, not an improvement.
+     * 14 bytes, Mimo's shape. Ours was 15 with an extra `00` before the trailing `02`. Bytes 2-5 vary
+     * between Mimo's own sends (46237c41 → a8237c41) so they carry a counter or timestamp we don't
+     * model; a fixed value is accepted.
+     *
+     * Note for whoever picks this up: Mimo's 1 Hz 00/88 is actually a DIFFERENT sub-command —
+     * `1a 00 00 00 01` / `1a 00 00 00 00`, 5 bytes — and it sends the `0x17` announce only twice, at
+     * t=0.115 s and t=0.595 s. Beating the announce is therefore not what Mimo does; it simply works.
+     * The `1a` beat is untried and is the more faithful thing to test.
      */
-    private val APP_PRESENCE = hex("170008237b41505000000000000002")
+    private val APP_PRESENCE = hex("170046237c415050000000000002")
 
     // ---- playback mode -------------------------------------------------------------------------
     // Playback (0x02/0x0c = 01 01 00 01) is a CAMERA-WIDE mode, not a per-command flag, and it is what
@@ -522,6 +527,11 @@ class CameraSession(
                     // times, holds playback the whole way, and still gets status — because the camera
                     // PUSHES 0x02/0x80 (493x) and 0x02/0x82 (480x) on its own once registered. The polls
                     // were never needed for the pill; parseStatus reads those pushes either way.
+                    // ~1 Hz app-presence beat (tick is 300 ms). Without it the camera drops playback a
+                    // second after we set it — see APP_PRESENCE. This is the beat 0x02/0x8E was standing
+                    // in for, badly: that one was ours, not Mimo's, and it knocked playback out.
+                    if (tick % 3 == 0)
+                        sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
                     if (tick % 3 == 0) sendDuml(0x02, 0xA0, ByteArray(0), receiverType = 0x01, receiverId = 0)
                     if (tick % 6 == 0) sendDuml(0x02, 0x61, ByteArray(0), receiverType = 0x01, receiverId = 0)
                     // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode

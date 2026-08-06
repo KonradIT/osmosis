@@ -60,7 +60,7 @@ class MediaGridAdapter(
     }
     private var rows: List<Row> = emptyList()
 
-    init { rows = buildRows() }
+    init { sortNewestFirst(); rows = buildRows() }   // page 1 can be multi-store too — see sortNewestFirst
 
     // ---- row assembly ------------------------------------------------------
 
@@ -271,7 +271,24 @@ class MediaGridAdapter(
     fun append(more: List<CameraFile>) {
         if (more.isEmpty()) return
         all.addAll(more)
+        sortNewestFirst()
         setRows(buildRows())
+    }
+
+    /**
+     * Order the backing list by capture time, newest first.
+     *
+     * A single-store manifest already arrives sorted, which is why this never existed. A MULTI-store one
+     * does not: the camera sends one list per store, so a Nano with a card in its dock emits its SD list
+     * and then its internal list, and the two interleave by store rather than by date. Observed: an SD
+     * clip shot 5 October landed between two internal clips shot 29 November, because it led its page.
+     *
+     * [CameraFile.timestamp] is the `YYYYMMDDHHMMSS` out of the filename, so a plain descending string
+     * sort is chronological. Records without one (a drone's `DJI_0554.MP4` carries no timestamp) sort to
+     * the end and keep their manifest order, the sort being stable.
+     */
+    private fun sortNewestFirst() {
+        all.sortWith(compareByDescending { it.timestamp.ifEmpty { "0" } })
     }
 
     // ---- filter / mode toggles (driven by the toolbar chips) ----------------
