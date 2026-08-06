@@ -123,7 +123,7 @@ Contrast the official apps, which require a login and phone home to activation a
 - Play Store:
 - GitHub releases: https://github.com/KonradIT/osmosis/releases
 - Unobtanium: https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/KonradIT/osmosis
-- F-Droid:
+- F-Droid: submitted, awaiting review — [fdroiddata!45005](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/45005)
 
 ## Build from source
 
