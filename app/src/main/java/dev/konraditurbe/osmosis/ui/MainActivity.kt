@@ -157,9 +157,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** `--ez nojoin true` — skip the WiFi join/bind and talk over whatever network is already default. */
     private var noJoin = false
 
+    /** `--ez nobeacon true` — a drone's serial must come from the 0x51/0x08 challenge, not the beacon. */
+    private var noBeaconSerial = false
+
     /** Serial + tag read off the drone's identity beacon over BLE, handed to the datalink session. */
     private var bleDroneSerial: Pair<ByteArray, Int>? = null
     private var pinOverride: String? = null // `--es pin <v>` test hook; wins over the per-model token
+    // `--es appid <v>` — the app *identity* half of SetPairingPIN, overridable without a rebuild.
+    // A device remembers the (identity, token) pair it approved and re-pairs it silently (0x45 -> 0x01);
+    // present an identity it has never seen and it must ask the user again (0x45 -> 0x02), which on a
+    // drone means the power-button hold. That makes this the switch for *testing* the first-run path on
+    // hardware that is already paired.
+    private var appIdOverride: String? = null
 
     // Shown while the camera/drone is waiting for the user to confirm pairing (0x07/45 → 0x02).
     // A camera confirms on its own screen; a drone (e.g. Mavic) needs a ~2 s press of its power button.
@@ -282,10 +291,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // Test hooks: `--es pin <v>` overrides the pairing PIN; `--ez autoscan true` auto-starts
         // a scan (perms permitting) so device testing doesn't depend on tapping. Dormant otherwise.
         intent?.getStringExtra("pin")?.let { pinOverride = it; pairPin = it; logLine("pairPin set to \"$it\"") }
+        intent?.getStringExtra("appid")?.let { appIdOverride = it; logLine("app identity set to \"$it\"") }
         // `--ez nojoin true`: phone is already on the AP via Android WiFi settings, so skip the join +
         // bindProcessToNetwork. Needed to capture our own session — see maybeStartOffload.
         if (intent?.getBooleanExtra("nojoin", false) == true) {
             noJoin = true; logLine("nojoin: will use the current default network, no WiFi join")
+        }
+        // `--ez nobeacon true`: make a drone's serial come from the 0x51/0x08 challenge instead of its
+        // beacon. The only way to exercise that path on a Mavic 3, which beacons first and would
+        // otherwise never reach it — see DroneSession.ignoreBeaconSerial.
+        if (intent?.getBooleanExtra("nobeacon", false) == true) {
+            noBeaconSerial = true; logLine("nobeacon: drone serial must come from the 0x51/0x08 challenge")
         }
         if (intent?.getBooleanExtra("autoscan", false) == true) {
             main.postDelayed({ startCameraScan(select = true) }, 500)
@@ -677,12 +693,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * answer (older cameras), a fallback timer uses the saved password or prompts. Called once.
      */
     /**
-     * The identity half of SetPairingPIN: DJI Fly's for a drone, the generic one for a camera. Both
-     * call sites (first write + retry) must agree — a device keys its remembered approval on this
-     * string, so two writes with different identities read as two different apps asking to pair.
+     * The identity half of SetPairingPIN: DJI Fly's for a drone, the generic one for a camera, unless
+     * `--es appid <v>` overrides it. Both call sites (first write + retry) must agree — a device keys
+     * its remembered approval on this string, so two writes with different identities read as two
+     * different apps asking to pair.
      */
-    private fun pairIdentity(): String =
-        if (currentModel.isDrone) DronePairing.identifier(getSharedPreferences("osmosis", MODE_PRIVATE))
+    private fun pairIdentity(): String = appIdOverride
+        ?: if (currentModel.isDrone) DronePairing.identifier(getSharedPreferences("osmosis", MODE_PRIVATE))
         else dev.konraditurbe.osmosis.duml.DjiPairMessagePayload.DEFAULT_IDENTIFIER
 
     /**
@@ -885,7 +902,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         // flat DCF records instead of CompositePack, /v1 instead of /v2 (ROADMAP #14).
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
-                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)
+                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort, noBeaconSerial, bleDroneSerial)
                             else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
