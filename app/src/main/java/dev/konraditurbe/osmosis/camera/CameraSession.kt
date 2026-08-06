@@ -27,12 +27,56 @@ class CameraSession(
     tcpPoke: Boolean = true,
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
+    /**
+     * The status keys to subscribe to (`0x00/0x99`), in Mimo's own order.
+     *
+     * Lifted verbatim from a Mimo↔Nano capture (reference/captures/wifi/mimo_nano_delete.pcap): Mimo
+     * subscribes to all 54 of these and the camera then pushes state for them. We used to send just the
+     * eight below `cam_storage`, and on a Nano that was not enough to make it report per-store capacity
+     * at all — the camera pushed `0x02/0x80` (one aggregate store) and never `0x02/0xdc` (the per-store
+     * block), so a dock SD card was invisible in the pill. The same eight keys DO get 0x02/0xdc out of an
+     * Xtra, so this is a Nano-side strictness rather than a broken frame.
+     *
+     * Sending all of them is also FASTER than what we did before: Mimo fires all 80 of its subscription
+     * frames back to back in 258 ms without waiting for a reply, where our loop paused ~300 ms after each
+     * of eight keys — 2.4 s of the connect spent idling.
+     */
     private val paramSubs = listOf(
-        "camcap_mode_profile", "camcap_video_format", "camcap_fov", "camcap_iso",
-        "camcap_photo_storage_format", "camcap_color_mode", "cam_storage", "cam_status",
+        "camcap_base", "camcap_video_format", "camcap_fov", "camcap_iso",
+        "camcap_photo_storage_format", "camcap_color_mode", "camcap_wb", "camcap_photo_size",
+        "camcap_video_codec", "camcap_shutter", "camcap_photo_timer_interval", "camcap_exposure_mode",
+        "camcap_zoom", "camcap_antiflicker", "camcap_sharpness", "camcap_denoise",
+        "camcap_aperture", "camcap_shutter_max", "camcap_eis", "camcap_iso_auto_max",
+        "camcap_loop_video_duration", "camcap_hyperlapse_ratio", "camcap_slowmotion_ratio",
+        "camcap_timelapse_duration", "camcap_countdown", "camcap_photo_time_limited_burst_param",
+        "camcap_capture_aspect_type", "camcap_style_filter_mode",
+        "cam_storage", "cam_status", "cam_record_time", "cam_expo_param",
+        "shutter_param", "cam_photo_param_new", "cam_lapse_param", "cam_video_param_v2",
+        "cam_image_effect", "v_quality_enhance_status", "cam_fov", "cam_lens_state",
+        "cam_audio_status_v2", "audio_timecode_status", "temp_curve", "camcap_common",
+        "cam_imu_calib_info", "timecode_info", "cam_custom_mode_params", "cam_super_slowmotion_status",
+        "media_file_sync", "upgrade_status", "cam_capture_aspect_type", "gui_autorecord_param",
+        "cam_style_filter_status",
     )
 
     private val VIDEO_EXTS = setOf("MP4", "MOV", "OSV", "INSV")
+
+    /**
+     * `0x00/0x88` sub-command `0x17` — the app announcing itself, ASCII `APP` at bytes 5-7. Sent ONCE,
+     * during registration.
+     *
+     * Do not beat this. Tried and reverted (2026-08-06): Mimo does send 00/88 ~1 Hz all session, but the
+     * repeating frame is a different sub-command — **`1a 00 00 00 01` / `1a 00 00 00 00`, 5 bytes** —
+     * while `0x17` is only the announce, sent twice at t=0.115 s and t=0.595 s. Re-sending the announce
+     * every second made the Nano drop back to listing a single storage, losing the dock SD card that the
+     * corrected subscription frame had just made visible on page 1.
+     *
+     * Mimo's announce is also 14 bytes to our 15 (we carry an extra `00` before the trailing `02`) and
+     * its bytes 2-5 vary between its own two sends, so they hold a counter or timestamp we don't model.
+     * Ours is left exactly as it was: it is what the camera has always accepted, and the two-storage
+     * listing works with it. Changing it is unfinished business, not an improvement.
+     */
+    private val APP_PRESENCE = hex("170008237b41505000000000000002")
 
     // ---- playback mode -------------------------------------------------------------------------
     // Playback (0x02/0x0c = 01 01 00 01) is a CAMERA-WIDE mode, not a per-command flag, and it is what
@@ -81,17 +125,21 @@ class CameraSession(
         // Registration.
         sendDuml(0x00, 0x81, appDeviceInfo(), receiverType = 0x08, receiverId = 2, cmdType = 4)
         recvAll(400); sendAck()
-        sendDuml(0x00, 0x88, hex("170008237b41505000000000000002"), receiverType = 0x08, receiverId = 1)
+        sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
         recvAll(400); sendAck()
         sendDuml(0x03, 0xDA, hex("05ffffffff"), receiverType = 0x03, receiverId = 0)
         recvAll(400); sendAck()
         // Status subscriptions only feed the live pill; the delete session skips them to save ~4 s.
         if (subscribe) {
+            // Back to back, like Mimo (all 80 of its frames inside 258 ms), then drain once. Waiting
+            // ~300 ms per key served no purpose — the camera doesn't gate the next subscription on the
+            // previous reply — and with 54 keys that pause would have cost 16 s of connect time.
             var subId = 0x69DF
             for ((i, p) in paramSubs.withIndex()) {
                 sendDuml(0x00, 0x99, subscription(p, subId), receiverType = 0x08, receiverId = 1)
-                subId++; recvAll(300); sendAck()
-                onFetchProgress?.invoke(22 + i * 3) // ramp through the 8 subscriptions
+                subId++
+                if (i % 8 == 7) { recvAll(20); sendAck() }   // let the socket breathe, keep the ACKs flowing
+                onFetchProgress?.invoke(22 + (i * 20) / paramSubs.size)
             }
             repeat(4) { recvAll(400); sendAck() }
         }
@@ -1292,15 +1340,29 @@ class CameraSession(
         log("datalink: time synced → ${tz.id} (${offMin}min), unix $nowSec")
     }
 
+    /**
+     * A `0x00/0x99` status subscription, byte-for-byte as Mimo sends it.
+     *
+     *     [02 02 00 00][subId u32-LE][00 00 00][innerLen u16-LE][nameLen u16-LE][name][00 00 00 00]
+     *     innerLen = nameLen + 6                                  name is NOT padded
+     *
+     * Verified against three keys of different length in reference/captures/wifi/mimo_nano_delete.pcap
+     * (`camcap_base` 30 B, `camcap_fov` 29 B, `camcap_video_format` 38 B) — the frame length tracks the
+     * key length exactly, so there is no fixed-width field here.
+     *
+     * We previously padded every name to 20 bytes and carried an extra byte before it, which put the
+     * name at offset 17 rather than 15 and made innerLen 26 for any short key. An Xtra accepts that and
+     * pushes state anyway; a Nano is the reason to care, since it never sent us the per-store storage
+     * frame (0x02/0xdc) that it does send Mimo.
+     */
     private fun subscription(name: String, subId: Int): ByteArray {
         val nameBytes = name.toByteArray(Charsets.US_ASCII)
-        val padded = nameBytes + ByteArray(maxOf(0, 20 - nameBytes.size))
-        val innerLen = padded.size + 6
+        val innerLen = nameBytes.size + 6
         return byteArrayOf(0x02, 0x02, 0x00, 0x00) +
-            le32(subId) + byteArrayOf(0, 0, 0, 0) +
+            le32(subId) + byteArrayOf(0, 0, 0) +
             byteArrayOf((innerLen and 0xFF).toByte(), ((innerLen shr 8) and 0xFF).toByte()) +
-            byteArrayOf(0x00) + byteArrayOf(nameBytes.size.toByte()) + byteArrayOf(0x00) +
-            padded + byteArrayOf(0, 0, 0, 0)
+            byteArrayOf((nameBytes.size and 0xFF).toByte(), ((nameBytes.size shr 8) and 0xFF).toByte()) +
+            nameBytes + byteArrayOf(0, 0, 0, 0)
     }
 
 }

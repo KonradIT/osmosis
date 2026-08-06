@@ -108,16 +108,38 @@ class MediaDownloader(
         }
         if (startOffset > 0) log("resuming ${f.name} at ${startOffset / 1_000_000} MB")
 
-        val fos = FileOutputStream(pfd.fileDescriptor)
-        fos.channel.position(startOffset)
-        val ok = http.download(f.urlPath(), fos, startOffset) { total -> tick(total) }
-        runCatching { fos.flush(); fos.close() }
-        pfd.close()
+        // Resume in a loop rather than handing the user a failure to tap through.
+        //
+        // The camera closes a long transfer periodically — measured on a Nano reading its dock SD, a
+        // 1.4 GB clip died at 438 MB, then at 921 MB, and finished on the third attempt, roughly every
+        // ~10 s of streaming. Nothing was wrong: each resume Range-requested the remainder and picked up
+        // exactly where it stopped. But every drop surfaced as "1 failed" and needed another tap on
+        // Download, so a single file cost three. Retry here while the transfer is still making progress;
+        // only give up when an attempt moves no bytes at all, which is a real stall rather than a drop.
+        var offset = startOffset
+        var attempt = 0
+        while (true) {
+            val pfdN = if (attempt == 0) pfd else runCatching { resolver.openFileDescriptor(uri, "rw") }.getOrNull()
+                ?: run { log("reopen failed: ${f.name}"); return Result.FAILED }
+            if (attempt > 0) offset = pfdN.statSize.coerceAtLeast(0L)
 
-        return if (ok) {
-            markComplete(uri); prefs.edit().remove(key).apply(); Result.SAVED
-        } else {
-            log("paused ${f.name} (will resume on next Download)"); Result.FAILED
+            val fos = FileOutputStream(pfdN.fileDescriptor)
+            fos.channel.position(offset)
+            val ok = http.download(f.urlPath(), fos, offset) { total -> tick(total) }
+            runCatching { fos.flush(); fos.close() }
+            val after = pfdN.statSize.coerceAtLeast(0L)
+            pfdN.close()
+
+            if (ok) { markComplete(uri); prefs.edit().remove(key).apply(); return Result.SAVED }
+            if (remote > 0 && after >= remote) {
+                markComplete(uri); prefs.edit().remove(key).apply(); return Result.SAVED
+            }
+            if (after <= offset || attempt >= MAX_RESUMES) {
+                log("paused ${f.name} at ${after / 1_000_000} MB (will resume on next Download)")
+                return Result.FAILED
+            }
+            attempt++
+            log("link dropped at ${after / 1_000_000} MB — resuming ${f.name} (attempt ${attempt + 1})")
         }
     }
 
@@ -219,6 +241,15 @@ class MediaDownloader(
     }
 
     companion object {
+        /**
+         * How many times to resume a whole-file transfer the camera dropped mid-stream, per Download tap.
+         *
+         * A 1.4 GB clip on a Nano's dock SD needed two resumes; 8 covers roughly 4 GB at the observed
+         * ~450 MB between drops, which is past the largest single clip these cameras record. A drop that
+         * moves zero bytes ends the loop immediately regardless, so this only bounds genuine progress.
+         */
+        private const val MAX_RESUMES = 8
+
         /**
          * True if [file] is already fully saved **in its Osmosis folder**. Matched by display name,
          * relative path and **completed** state (`IS_PENDING=0`) — NOT by exact byte size. A completed
