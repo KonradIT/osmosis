@@ -3,8 +3,10 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
-// Release signing — reads keystore.properties (created by CI from repo secrets; absent locally,
-// in which case release builds are simply left unsigned instead of failing to configure).
+// Release signing — reads keystore.properties (created by CI from repo secrets). When it is absent
+// — a plain source checkout, or a downstream packager such as F-Droid that signs with its own key —
+// no signingConfig is attached at all and assembleRelease emits app-release-unsigned.apk. Attaching
+// an empty signingConfig instead fails packageRelease with "missing required property storeFile".
 def keystorePropsFile = rootProject.file("keystore.properties")
 def keystoreProps = new Properties()
 if (keystorePropsFile.exists()) {
@@ -19,8 +21,8 @@ android {
         applicationId "dev.konraditurbe.osmosis"
         minSdk 29
         targetSdk 34
-        versionCode 15
-        versionName "1.2.1"
+        versionCode 16
+        versionName "1.2.2"
     }
 
     signingConfigs {
@@ -36,7 +38,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }

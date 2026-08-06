@@ -1,0 +1,22 @@
+Osmosis is a third-party media client for DJI Osmo action and gimbal cameras. It browses the camera's memory, previews clips, and copies photos and videos to the phone's gallery. It needs no DJI SDK, no account, no activation and no companion service.
+
+It speaks DJI's undocumented DUML protocol directly: it pairs with the camera over Bluetooth LE, reads the camera's Wi-Fi credentials, joins the camera's access point, lists the media, and downloads the originals over HTTP from the camera itself.
+
+Features:
+
+* Media grid with thumbnails pulled straight off the camera, grouped by capture date.
+* Low-resolution streaming preview, so a clip can be scrubbed before it is downloaded.
+* In-preview trimming: set in and out points and download only that slice of the high-resolution clip, as a keyframe-accurate stream copy in the original quality.
+* Resumable download queue that writes high-resolution files into the phone's gallery.
+* Live camera status: battery, charge state, shooting mode and storage use for internal memory and SD card.
+* Multi-camera support: saved cameras are remembered and the list shows which ones are currently in range.
+* Mark media as favourite on the camera, and filter the grid to favourites, photos or videos.
+* GPS sync: a foreground service streams the phone's location into the camera using the accessory protocol, so recordings carry a GPS track for later telemetry overlays.
+
+Supported hardware, verified on real devices: Osmo Nano, Osmo Action 5 Pro, Osmo Action 6 and Osmo Pocket 3. The same protocol is used by the Xtra-branded rebadges of those cameras (Atto, Edge, Edge Pro, Muse). Other cameras in the Osmo line are handled on a best-effort basis, and support for DJI drones using Quick Transfer is in progress.
+
+Privacy: Osmosis talks to the camera at 192.168.2.1 and to nothing else. There are no analytics, no accounts, no activation servers and no cloud upload; media never leaves the phone and the camera. The bundled network security configuration restricts cleartext traffic to the camera's local address.
+
+Requirements: Android 10 or newer, Bluetooth LE, and permission to use nearby devices (Bluetooth scan and connect) plus Wi-Fi state changes. Location permission is used for Bluetooth scanning on older releases and for the optional GPS sync feature.
+
+Osmosis is an independent project and is not affiliated with, authorized by, or endorsed by DJI. "DJI" and "Osmo" are trademarks of their respective owners.

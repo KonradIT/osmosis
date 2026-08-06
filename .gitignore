@@ -31,3 +31,6 @@ logs-dump/
 # Python bytecode from tools/
 __pycache__/
 *.pyc
+
+# Local secrets (GitLab token for F-Droid submission, etc.)
+.env

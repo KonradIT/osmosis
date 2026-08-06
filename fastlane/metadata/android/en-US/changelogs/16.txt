@@ -1,0 +1,1 @@
+Adds store metadata (description, icon and screenshots) so the app can be listed and built by F-Droid. No functional changes since 1.2.1.
