@@ -1,4 +1,4 @@
-package dev.konraditurbe.osmosis.net
+package dev.konraditurbe.osmosis.camera
 
 import org.junit.Test
 import org.junit.Assert.*
@@ -9,13 +9,13 @@ import org.junit.Assert.*
  *    DCIM path straddled a 0x00/0x27 frame boundary (0264_D) — the case that used to silently drop.
  *  - manifests/xtra_13.bin — Xtra Edge Pro / Action 5 Pro, 13 records (1 MP4 + 12 JPG).
  * These lock in both the frame reassembly (10-byte 0x00/0x27 sub-header stripping) and the
- * count-validated record decode. Regenerate a fixture by dumping DatalinkClient's raw file-list blob.
+ * count-validated record decode. Regenerate a fixture by dumping CameraSession's raw file-list blob.
  */
 class DatalinkManifestTest {
 
     private fun decode(fixture: String, port: Int): List<dev.konraditurbe.osmosis.core.CameraFile> {
         val bytes = javaClass.classLoader!!.getResourceAsStream("manifests/$fixture")!!.readBytes()
-        return DatalinkClient(log = {}, port = port, tcpPoke = port == 9004).decodeManifestBlobForTest(bytes)
+        return CameraSession(log = {}, port = port, tcpPoke = port == 9004).decodeManifestBlobForTest(bytes)
     }
 
     @Test

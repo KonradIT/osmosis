@@ -21,7 +21,13 @@ class HttpClient(
             if (rangeStart > 0) setRequestProperty("Range", "bytes=$rangeStart-")
         }
 
-    /** HTTP status code for a HEAD, or -1 on error. */
+    /**
+     * HTTP status code for a HEAD, or -1 on error.
+     *
+     * Note that on a drone **-1 is the normal answer for a file that isn't there**: that firmware
+     * reports a missing file by closing the connection rather than sending a 404, so the request throws
+     * instead of returning a status. Callers must not read -1 as "network problem".
+     */
     fun headCode(path: String): Int {
         val c = open(path, "HEAD")
         return try {

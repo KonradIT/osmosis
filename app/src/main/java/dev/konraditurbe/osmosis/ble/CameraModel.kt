@@ -21,7 +21,14 @@ data class CameraModel(
     // instead of running the handle/HEAD storage resolution (tester-confirmed storage=0 across every
     // session). Other models can carry SD + internal, so they still resolve per file.
     val singleSdStorage: Boolean = false,
+    // DJI drones (Mavic, Neo, …) speak the same BLE DUML but differ downstream: their WiFi creds only
+    // unlock for the official pairing token ("DJI FLY", not "osmo"), pairing is confirmed by a ~2 s
+    // power-button press, and their media API is NOT the camera datalink (see ROADMAP #14).
+    val isDrone: Boolean = false,
 ) {
+    /** The SetPairingPIN token this device expects: a drone only releases WiFi creds to "DJI FLY". */
+    val pairingToken: String get() = if (isDrone) "DJI FLY" else "osmo"
+
     /**
      * The other datalink config to try when [datalinkPort] never answers: the whole line is either
      * 9004 + TCP-7001 poke or 10004 with no poke, so one retry covers the unknown.
@@ -33,6 +40,8 @@ data class CameraModel(
     companion object {
         val DEFAULT = CameraModel("DJI Osmo camera")
         const val ID_OSMO_NANO = 0x0019
+        const val ID_MAVIC_3 = 0x0070  // drone (confirmed on hardware, mfr 7000…)
+        const val ID_NEO_2 = 0x007e    // drone (tester scan, mfr 7e00…)
 
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0010 to CameraModel("Osmo Action 2"),
@@ -51,6 +60,15 @@ data class CameraModel(
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
             0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
             0x0021 to CameraModel("Osmo Pocket 4"),
+            // Drones (see ROADMAP #14). The datalink is the SAME handshake as a camera but on
+            // **udp/9003** with NO tcp-7001 poke — plus a `0x51/0x02` session-open the cameras don't
+            // need, before which the aircraft answers nothing at all.
+            //
+            // The Mavic 3 is verified end-to-end on hardware: pair, creds, AP, the full paged library
+            // with thumbnails, preview and download. The Neo 2 is a tester scan only — never offloaded,
+            // port unconfirmed, sharing the drone default until someone tests one.
+            ID_MAVIC_3 to CameraModel("Mavic 3", datalinkPort = 9003, tcpPoke = false, isDrone = true, verified = true),
+            ID_NEO_2 to CameraModel("DJI Neo 2", datalinkPort = 9003, tcpPoke = false, isDrone = true),
         )
 
         /**
@@ -88,8 +106,31 @@ data class CameraModel(
             )
         }
 
+        /**
+         * Model ids at or above this are treated as aircraft when we don't recognise them.
+         *
+         * A **guess**, and flagged as one: every camera we have ever seen sits in `0x10`–`0x21`, and
+         * both drones we have seen sit at `0x70` and `0x7e`. It exists because the fallback has to pick
+         * *something*, and picking "camera" for an aircraft fails at the very first step — a drone
+         * releases its WiFi credentials only for the `DJI FLY` pairing token, so an unknown drone
+         * treated as a camera never even gets on its network, and the log says nothing more useful than
+         * "no credentials". Guessing "drone" for an unknown id in this range at least gets far enough
+         * to be diagnosable.
+         *
+         * The scan logs the raw manufacturer bytes for every hit, so an unrecognised model can be
+         * pinned properly from a single log line and added to [BY_ID].
+         */
+        private const val DRONE_ID_FLOOR = 0x0040
+
         private fun byIdOrName(modelId: Int?, name: String?): CameraModel {
             BY_ID[modelId]?.let { return it }
+            // An unknown id in the aircraft range: take the drone defaults rather than the camera ones.
+            if (modelId != null && modelId >= DRONE_ID_FLOOR) {
+                return CameraModel(
+                    name = name?.takeIf { it.isNotBlank() }?.let { "DJI drone ($it)" } ?: "DJI drone",
+                    datalinkPort = 9003, tcpPoke = false, isDrone = true, verified = false,
+                )
+            }
             val n = name?.lowercase()?.replace(" ", "").orEmpty()
             // Xtra product names map to their DJI twin (Atto=Nano, Edge=Action 4, Edge Pro=Action 5
             // Pro, Muse=Pocket 3). Matters for the mfr-data-less units (Pocket 3 / Muse) that only

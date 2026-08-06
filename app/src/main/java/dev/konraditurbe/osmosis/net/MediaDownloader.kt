@@ -11,6 +11,7 @@ import android.net.Uri
 import android.provider.MediaStore
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
+import dev.konraditurbe.osmosis.core.urlPath
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 
@@ -227,9 +228,10 @@ class MediaDownloader(
          *
          * The relative-path clause matters: this used to match on name alone, across the whole
          * MediaStore, on the assumption that a capture name is globally unique. A camera name
-         * (`DJI_20260329115359_0211_D.MP4`) very nearly is — but any file anywhere on the device that
-         * happens to share it made us declare ours downloaded and gray out the button for something
-         * never saved. Scoping the query to the folder we write to costs nothing and can't be wrong.
+         * (`DJI_20260329115359_0211_D.MP4`) very nearly is — but a **drone**'s DCF name is just
+         * `DJI_0554.JPG`, one of the most common filenames there is, so any unrelated DJI photo already
+         * on the device made us declare the file downloaded and gray out the button for something never
+         * saved. Scoping the query to the folder we write to costs nothing and can't be wrong.
          */
         fun isDownloaded(context: Context, file: CameraFile): Boolean = downloadedUri(context, file) != null
 

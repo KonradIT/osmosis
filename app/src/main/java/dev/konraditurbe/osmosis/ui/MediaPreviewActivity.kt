@@ -24,8 +24,11 @@ import android.widget.VideoView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import dev.konraditurbe.osmosis.R
+import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
+import dev.konraditurbe.osmosis.core.previewCandidates
+import dev.konraditurbe.osmosis.core.urlPath
 import dev.konraditurbe.osmosis.net.Highlights
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.net.ImageLoader
@@ -234,8 +237,9 @@ class MediaPreviewActivity : AppCompatActivity() {
         photoView.visibility = View.GONE
         statusText.visibility = View.GONE
         spinner.visibility = ProgressBar.VISIBLE
-        // `controls` is the whole bottom overlay — it holds Add-to-Queue and the burst strip as well as
-        // the transport, so it must stay up for stills. Only the transport/trim row is video-only.
+        // `controls` is the whole bottom overlay — it also holds the queue button and the burst strip,
+        // so it stays up for a still. Only [trimRow], the scrubber/transport/trim block inside it, is
+        // video-only. Hiding the container instead took "Add to Queue" down with it on every photo.
         trimRow.visibility = if (file.isVideo) View.VISIBLE else View.GONE
         controls.visibility = View.VISIBLE
         topInfo.visibility = View.VISIBLE
@@ -278,7 +282,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 setOnClickListener { selectFrame(i) }
             }
             burstRow.addView(iv)
-            imageLoader.load("/v2?storage=${file.storage}&path=$thumbPath", iv)
+            imageLoader.load(PathAddressing.byPath(file.storage, thumbPath), iv)
         }
         updateBurstSelection()
     }
@@ -299,9 +303,14 @@ class MediaPreviewActivity : AppCompatActivity() {
         }
     }
 
-    /** URL of the frame currently shown — a group's selected frame, or the single file. */
+    /**
+     * URL of the frame currently shown — a group's selected frame, or the single file. Burst frames are
+     * addressed by path because they are enumerated after the manifest, and burst groups only exist on
+     * the path-based cameras.
+     */
     private fun currentUrl(): String =
-        if (groupPaths.isNotEmpty()) "/v2?storage=${file.storage}&path=${groupPaths[selectedFrame]}" else file.urlPath()
+        if (groupPaths.isNotEmpty()) PathAddressing.byPath(file.storage, groupPaths[selectedFrame])
+        else file.urlPath()
 
     private fun hasTrim() = trimStartMs >= 0 && trimEndMs > trimStartMs
 
@@ -450,8 +459,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     )
 
     /** Tap the media to hide the title + controls for a full-frame view; tap again to bring them back.
-     *  Only the transport/trim row is video-only — `controls` itself carries Add-to-Queue and the burst
-     *  strip, so it toggles for stills too. */
+     *  The scrubber/transport/trim block is video-only, but the bar itself carries the queue button,
+     *  so a photo gets it back on the second tap like everything else does. */
     private fun toggleControls() {
         val show = topInfo.visibility != View.VISIBLE
         topInfo.visibility = if (show) View.VISIBLE else View.GONE
@@ -648,11 +657,14 @@ class MediaPreviewActivity : AppCompatActivity() {
         val dm = resources.displayMetrics
         val frame = selectedFrame            // guard against a fast frame switch racing the fetch
         val at = navIndex                    // …or a swipe to another item
-        val url = currentUrl()
+        // A drone serves a screen-res render of a still (`file_subtype=2`), so try that before pulling a
+        // full ~14 MB frame just to downsample it for the display. Cameras have no such rendition — they
+        // keep the single full-res URL. Burst frames address a specific path, so they bypass this.
+        val urls = if (groupPaths.isEmpty() && file.isIndexed) file.previewCandidates() else listOf(currentUrl())
         spinner.visibility = ProgressBar.VISIBLE
         statusText.visibility = TextView.GONE
         Thread {
-            val bytes = runCatching { http.getBytes(url) }.getOrNull()
+            val bytes = urls.firstNotNullOfOrNull { runCatching { http.getBytes(it) }.getOrNull() }
             var bmp: Bitmap? = null
             if (bytes != null) {
                 // Bounds are decoded to pick a safe downsample factor; they also backfill the resolution

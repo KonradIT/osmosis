@@ -12,12 +12,23 @@ object OsmoCommands {
     const val WIFI_MSG_ID = 0x8C19
 
     /**
-     * SetPairingPIN (CmdSet 0x07 / CmdId 0x45). `pin` is the second PackString field; the app
-     * identifier is the known-accepted 32-hex blob from [DjiPairMessagePayload]. Camera replies
-     * on 0x07/0x45 with payload 0x0001 (already paired) or 0x0002 (approval required on screen).
+     * SetPairingPIN (CmdSet 0x07 / CmdId 0x45). `pin` is the second PackString field; `identifier` is
+     * the app identity, and the field the device keys its remembered approval on.
+     *
+     * Reply on 0x07/0x45 is `[00][status]`:
+     *   - `0x01` already paired — this (identity, token) pair was approved before; proceed silently.
+     *   - `0x02` approval required — confirm at the device. A camera shows a prompt on its screen; a
+     *     drone flashes its LEDs and waits for a ~2 s power-button hold.
+     *
+     * The approval itself then arrives as **0x07/0x46, a request (flags 0x40) rather than a response**,
+     * so it has to be answered like any other request or the device drops the link.
      */
-    fun setPairingPin(pin: String, id: Int = PAIR_MSG_ID): ByteArray {
-        val payload = DjiPairMessagePayload(pin).encode()
+    fun setPairingPin(
+        pin: String,
+        id: Int = PAIR_MSG_ID,
+        identifier: String = DjiPairMessagePayload.DEFAULT_IDENTIFIER,
+    ): ByteArray {
+        val payload = DjiPairMessagePayload(pin, identifier).encode()
         return DjiMessage(TARGET_APP_TO_WIFI, id, TYPE_SET_PAIRING_PIN, payload).encode()
     }
 

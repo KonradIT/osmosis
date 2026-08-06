@@ -2,6 +2,7 @@ package dev.konraditurbe.osmosis.net
 
 import android.widget.TextView
 import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.core.urlPath
 import java.util.concurrent.Executors
 
 /**

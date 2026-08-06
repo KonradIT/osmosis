@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Just the power-button face, on the SAME viewport as mavic3_rear.xml so the two align pixel-for-
+     pixel when stacked. Blinking is this view's alpha, not a fillColor animation: fading a 4 KB
+     overlay composites on the GPU, whereas recolouring a path inside the 34 KB body drawable would
+     re-render all ~1100 of its path commands every frame. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="220dp"
+    android:height="211dp"
+    android:viewportWidth="990"
+    android:viewportHeight="949">
+    <path android:fillColor="#1E88E5" android:fillType="evenOdd" android:pathData="M517.5 627.3C516.4 627.0 510.9 624.6 505.2 621.9C499.5 619.2 494.5 617.0 494.0 617.0C493.6 617.0 493.0 616.4 492.7 615.7C492.4 614.9 490.0 613.7 487.3 613.0C481.5 611.5 474.4 607.6 473.6 605.5C473.3 604.7 473.3 603.3 473.6 602.5C473.9 601.7 473.1 599.6 471.8 597.8C469.7 594.8 469.5 593.5 469.5 583.0C469.5 566.9 470.4 562.6 474.2 559.9L477.2 557.7L498.2 568.1C511.2 574.5 520.1 579.6 521.6 581.3C524.2 584.4 525.8 589.2 525.5 593.0C525.3 594.4 524.9 600.2 524.6 606.0C523.7 620.3 523.5 620.7 519.9 621.5C517.5 622.0 515.1 621.3 508.5 618.2C503.4 615.7 499.8 614.5 499.4 615.1C498.6 616.4 498.1 616.1 507.9 621.0C514.3 624.2 517.2 625.1 520.1 624.8C522.1 624.6 523.6 624.8 523.4 625.2C522.5 626.6 519.5 627.7 517.5 627.3Z"/>
+</vector>

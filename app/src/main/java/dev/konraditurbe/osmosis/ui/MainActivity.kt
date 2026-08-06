@@ -29,6 +29,7 @@ import dev.konraditurbe.osmosis.ble.Brand
 import dev.konraditurbe.osmosis.ble.CameraModel
 import dev.konraditurbe.osmosis.ble.GattClient
 import dev.konraditurbe.osmosis.ble.OsmoScanner
+import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.CameraStatus
 import dev.konraditurbe.osmosis.core.FileLog
@@ -37,7 +38,10 @@ import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.duml.DjiMessage
 import dev.konraditurbe.osmosis.net.ApJoiner
 import dev.konraditurbe.osmosis.net.HttpClient
-import dev.konraditurbe.osmosis.net.DatalinkClient
+import dev.konraditurbe.osmosis.camera.CameraSession
+import dev.konraditurbe.osmosis.core.MediaSession
+import dev.konraditurbe.osmosis.drone.DronePairing
+import dev.konraditurbe.osmosis.drone.DroneSession
 import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MediaDownloader
 import dev.konraditurbe.osmosis.net.MetaLoader
@@ -139,7 +143,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     // The datalink session keeps the camera AP alive (the Action 5 sleeps its AP the moment the
     // datalink goes idle). Held open during browse/download; closed on a new offload / exit.
-    private var datalink: DatalinkClient? = null
+    private var datalink: MediaSession? = null
 
     // Favorites are camera writes that run in a fresh session (~re-handshake each), so serialize them
     // on one worker — rapid star toggles queue instead of tearing down/rebuilding sessions concurrently.
@@ -149,6 +153,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // shows its approval popup once, then stores it for silent re-pair). Overridable via
     // `am start ... --es pin <value>`.
     private var pairPin = "osmo"
+
+    /** `--ez nojoin true` — skip the WiFi join/bind and talk over whatever network is already default. */
+    private var noJoin = false
+
+    /** Serial + tag read off the drone's identity beacon over BLE, handed to the datalink session. */
+    private var bleDroneSerial: Pair<ByteArray, Int>? = null
+    private var pinOverride: String? = null // `--es pin <v>` test hook; wins over the per-model token
+
+    // Shown while the camera/drone is waiting for the user to confirm pairing (0x07/45 → 0x02).
+    // A camera confirms on its own screen; a drone (e.g. Mavic) needs a ~2 s press of its power button.
+    private var pairingAlert: AlertDialog? = null
 
     // End-to-end offload: BLE-pair -> wake AP -> join WiFi -> probe manifest.
     private var offloadMode = false
@@ -266,7 +281,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
         // Test hooks: `--es pin <v>` overrides the pairing PIN; `--ez autoscan true` auto-starts
         // a scan (perms permitting) so device testing doesn't depend on tapping. Dormant otherwise.
-        intent?.getStringExtra("pin")?.let { pairPin = it; logLine("pairPin set to \"$it\"") }
+        intent?.getStringExtra("pin")?.let { pinOverride = it; pairPin = it; logLine("pairPin set to \"$it\"") }
+        // `--ez nojoin true`: phone is already on the AP via Android WiFi settings, so skip the join +
+        // bindProcessToNetwork. Needed to capture our own session — see maybeStartOffload.
+        if (intent?.getBooleanExtra("nojoin", false) == true) {
+            noJoin = true; logLine("nojoin: will use the current default network, no WiFi join")
+        }
         if (intent?.getBooleanExtra("autoscan", false) == true) {
             main.postDelayed({ startCameraScan(select = true) }, 500)
         }
@@ -567,6 +587,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         currentModelId = cam?.modelId
         currentAddress = device.address
         offloadSsid = cam?.name ?: safeName(device) ?: "camera"
+        // Pairing token is per-device: a drone only releases its WiFi creds to "DJI FLY", cameras to
+        // "osmo". An explicit `--es pin` (pinOverride) still wins, for testing.
+        pairPin = pinOverride ?: currentModel.pairingToken
         // No up-front password prompt: the camera hands us the passphrase over BLE after pairing
         // (see onPaired). savedPassFor seeds the fallback for models that don't expose it.
         connectAndOffload(device)
@@ -653,7 +676,82 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * entry is needed. The replies land in [onNotification] and drive the join. If the model doesn't
      * answer (older cameras), a fallback timer uses the saved password or prompts. Called once.
      */
+    /**
+     * The identity half of SetPairingPIN: DJI Fly's for a drone, the generic one for a camera. Both
+     * call sites (first write + retry) must agree — a device keys its remembered approval on this
+     * string, so two writes with different identities read as two different apps asking to pair.
+     */
+    private fun pairIdentity(): String =
+        if (currentModel.isDrone) DronePairing.identifier(getSharedPreferences("osmosis", MODE_PRIVATE))
+        else dev.konraditurbe.osmosis.duml.DjiPairMessagePayload.DEFAULT_IDENTIFIER
+
+    /**
+     * Prompt the user to confirm the pairing on the device.
+     *
+     * A camera says so on its own screen, so words are enough. A drone has no screen — the user has to
+     * find one unlabelled button on the back of an aircraft they may have just unboxed — so it gets the
+     * illustration, with the button blinking the same blue the aircraft's own lights use.
+     */
+    private fun showPairingApproval() {
+        if (isFinishing || isDestroyed) return
+        pairingAlert?.dismiss()
+        val b = AlertDialog.Builder(this)
+            .setTitle("Confirm pairing on ${currentModel.name}")
+            .setCancelable(false)
+            .setNegativeButton("Cancel") { _, _ -> gattClient?.disconnect() }
+        if (currentModel.isDrone) {
+            val view = layoutInflater.inflate(R.layout.dialog_drone_approval, null)
+            view.findViewById<TextView>(R.id.approvalText).text = DronePairing.APPROVAL_MESSAGE
+            startPowerBlink(view.findViewById(R.id.powerBlink))
+            b.setView(view)
+        } else {
+            b.setMessage("Approve the pairing on the camera's screen.")
+        }
+        pairingAlert = b.show()
+    }
+
+    /**
+     * Pulse the blue power-button overlay while the dialog is up: a slow fade in/out that reads as the
+     * button waiting to be pressed, matching the aircraft's own LEDs.
+     *
+     * Held so [dismissPairingApproval] can cancel it — an infinite animator on a detached view keeps
+     * the view (and this Activity) reachable, and would otherwise outlive the dialog.
+     */
+    private var powerBlink: android.animation.Animator? = null
+
+    private fun startPowerBlink(target: View) {
+        powerBlink?.cancel()
+        powerBlink = android.animation.ObjectAnimator.ofFloat(target, View.ALPHA, 1f, 0.15f).apply {
+            duration = 900
+            repeatMode = android.animation.ValueAnimator.REVERSE
+            repeatCount = android.animation.ValueAnimator.INFINITE
+            interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+            start()
+        }
+    }
+
+    private fun dismissPairingApproval() {
+        powerBlink?.cancel(); powerBlink = null
+        pairingAlert?.dismiss(); pairingAlert = null
+    }
+
     private fun onPaired() {
+        // GATT notifications are dispatched straight off the BluetoothGattCallback, which is not
+        // guaranteed to be the main thread — GattClient says as much, and `showPairingApproval` is
+        // already posted for that reason. Everything below touches dialogs, animators and Activity
+        // state, so hop first.
+        //
+        // This was load-bearing, not hygiene: `dismissPairingApproval` cancels the blink animator, and
+        // ValueAnimator.cancel() throws AndroidRuntimeException outright on a thread with no Looper.
+        // It threw before the dismiss AND before the credentials request, so a drone that had just
+        // been approved sat with the dialog still up and the flow dead — recoverable only by
+        // cancelling and reconnecting, which then took the silent already-paired path.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            logLine("onPaired: hopping to main from \"${Thread.currentThread().name}\"")
+            main.post { onPaired() }
+            return
+        }
+        dismissPairingApproval()
         if (!offloadMode || credsRequested) return
         credsRequested = true
         logLine("Paired — running Mimo's post-pair sequence, then reading WiFi creds…")
@@ -663,6 +761,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // 0x53/0x10 is the one that matters: the camera answers 01 00 00 00 and wakes.
         val c = dev.konraditurbe.osmosis.duml.OsmoCommands
         main.postDelayed({ gattClient?.writeCommand(c.session5310()); logLine("sent 0x53/0x10 (wake)") }, 100)
+        if (currentModel.isDrone) DronePairing.sendBleSetup(
+            write = { f -> gattClient?.writeCommand(f) },
+            schedule = { delay, action -> main.postDelayed(action, delay) },
+            log = ::logLine,
+        )
         main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x07, id = 0x8007)) }, 900)
         main.postDelayed({ gattClient?.writeCommand(c.wifiQuery(0x0E, id = 0x800E)) }, 1400)
         main.postDelayed({
@@ -699,6 +802,19 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             )
         } else {
             logLine("OFFLOAD: paired -> AP up via the session sequence (0x00/0x2b + 0x53/0x10)")
+        }
+        // DEBUG (`--ez nojoin true`): assume the phone is ALREADY on the camera/drone AP via Android's
+        // own WiFi settings, and skip WifiNetworkSpecifier + bindProcessToNetwork entirely.
+        //
+        // This exists to make the session capturable. PCAPdroid captures through a VPN interface, but
+        // bindProcessToNetwork pins our sockets to the AP network and bypasses that VPN — so a VPN-mode
+        // capture sees none of our traffic (and on this tablet the bind then fails outright, killing the
+        // datalink). Joining the AP normally makes it the DEFAULT route, so our traffic goes through the
+        // VPN, gets captured, and still reaches the drone. See ROADMAP #14.
+        if (noJoin) {
+            logLine("OFFLOAD: --ez nojoin — skipping the WiFi join, using the current default network")
+            main.postDelayed({ startDatalink() }, 1500)
+            return
         }
         // AP needs a few seconds to come up; the WifiNetworkSpecifier dialog keeps searching
         // until it appears, so a modest delay before requesting the network is fine.
@@ -747,14 +863,30 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     ?.firstOrNull { it is java.net.Inet4Address }
                 setConnectProgress(58) // WiFi joined + bound
                 logLine("WiFi link: ip=${ip4?.hostAddress}")
+                startDatalink()
+            }
+        })
+        apJoiner = joiner
+        val useWpa3 = currentModel.wpa3 && !wpa3FallbackDone
+        joiner.join(ssid, pass, useWpa3)
+    }
+
+    /** Open the datalink and fetch the media list. Split out of the join callback so the `nojoin`
+     *  debug path can run it against whatever network is already current. */
+    private fun startDatalink() {
                 Thread {
                     // Datalink port + poke come from the model AND brand: 10004/no-poke was only ever
                     // confirmed on the Xtra rebrand (own OUI EC:9E:EA), so a genuine DJI unit gets the
                     // DJI-standard 9004+poke. Either guess can be wrong on an untested model, so if the
                     // handshake never lands we retry the alternate config and log which port answered.
-                    fun open(m: CameraModel): Pair<DatalinkClient, List<CameraFile>> {
+                    fun open(m: CameraModel): Pair<MediaSession, List<CameraFile>> {
                         logLine("=== media list [${m.name}] via udp/${m.datalinkPort} (poke=${m.tcpPoke}) ===")
-                        val c = DatalinkClient(::logLine, m.datalinkPort, m.tcpPoke)
+                        // A drone speaks a different protocol end to end — the 0x51 session-open gate,
+                        // flat DCF records instead of CompositePack, /v1 instead of /v2 (ROADMAP #14).
+                        // This is the only place in the app that decides which of the two it is.
+                        val c: MediaSession =
+                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)
+                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
                         val f = runCatching { c.fetchFileList("192.168.2.1") }
@@ -791,11 +923,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         (if (dl.moreAvailable) " · more on scroll" else ""))
                     main.post { showGrid(fixed) }
                 }.start()
-            }
-        })
-        apJoiner = joiner
-        val useWpa3 = currentModel.wpa3 && !wpa3FallbackDone
-        joiner.join(ssid, pass, useWpa3)
     }
 
     /**
@@ -968,6 +1095,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** Stamp each file's HTTP storage index (per-file, by its handle's store bit) and sort newest-first —
      *  shared by the initial fetch and every lazily-loaded older page. See [resolveStorage]. */
     private fun applyStorageAndSort(files: List<CameraFile>): List<CameraFile> {
+        // Drone media is index-addressed (/v1?file_index=…) — there is no /v2 mount to resolve, and its
+        // names carry no `_<14 digits>_` stamp for the camera sort to key on, so order by the manifest's
+        // own mtime + index instead. Probing storage here would fire a pointless HEAD per file.
+        if (files.any { it.isIndexed }) return files.sortedWith(
+            compareByDescending<CameraFile> { it.mtimeEpoch }.thenByDescending { it.fileIndex }
+        )
         val out = files.map { f -> f.copy(storage = resolveStorage(f)) }
         return out.sortedWith(compareByDescending<CameraFile> { it.timestamp }.thenByDescending { it.seq })
     }
@@ -994,8 +1127,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         return storageForBit.getOrPut(bit) {
             val other = 1 - bit
             when {
-                http.headCode("/v2?storage=$bit&path=${f.path}") == 200 -> bit
-                http.headCode("/v2?storage=$other&path=${f.path}") == 200 -> other
+                http.headCode(PathAddressing.byPath(bit, f.path)) == 200 -> bit
+                http.headCode(PathAddressing.byPath(other, f.path)) == 200 -> other
                 else -> bit
             }
         }
@@ -1003,7 +1136,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** Blind mount probe for a file with no handle at all (e.g. a photos-only list, no fittable handle). */
     private fun probeStorage(f: CameraFile): Int {
-        for (s in intArrayOf(1, 0)) if (http.headCode("/v2?storage=$s&path=${f.path}") == 200) return s
+        for (s in intArrayOf(1, 0)) if (http.headCode(PathAddressing.byPath(s, f.path)) == 200) return s
         return 0
     }
 
@@ -1060,7 +1193,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             visibility = View.VISIBLE; alpha = 1f; scaleX = 1f; scaleY = 1f; translationY = 0f
         }
         Thread {
-            val more = runCatching { applyStorageAndSort(dl.fetchNextPage()) }.getOrElse { emptyList() }
+            val more = runCatching {
+                applyStorageAndSort(dl.fetchNextPage())
+            }.getOrElse { emptyList() }
             main.post {
                 adapter?.append(more)
                 findViewById<View>(R.id.loadMoreSpinner)?.animate()?.alpha(0f)?.setDuration(180)
@@ -1142,7 +1277,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** Toggle the camera's ⭐ favorite for [f] (DUML 0x02/0xbf). Optimistic grid badge; the write runs on
      *  the serialized favorite worker and reverts the badge on failure. */
-    private fun toggleFavorite(f: CameraFile, dl: DatalinkClient) {
+    private fun toggleFavorite(f: CameraFile, dl: MediaSession) {
         val on = !f.starred
         // Videos carry their own handle; photos don't, so fall back to the manifest-fitted one (a
         // hardcoded Nano formula is why photo favorites failed on the Xtra). See withCmdHandles.
@@ -1159,7 +1294,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     /** Confirm + delete [f] from the camera (DUML 0x00/0x28) — irreversible, so it's gated by a dialog. */
-    private fun confirmDelete(f: CameraFile, dl: DatalinkClient) {
+    private fun confirmDelete(f: CameraFile, dl: MediaSession) {
         val hx = "0x%08x".format(f.handle)
         AlertDialog.Builder(this)
             .setTitle("Delete from camera?")
@@ -1290,9 +1425,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val addr = device.address
         // Brand matters, not just the model id: the Xtra rebrand shares model 0x0015 with the DJI
         // Osmo Action 5 Pro but uses a different datalink port. Its OUI gives it away.
-        val model = CameraModel.resolve(modelId, name, Brand.of(addr, name, djiCid = modelId != null))
-        if (discovered.put(addr, Cam(device, name, Brand.of(addr, name, djiCid = modelId != null), rssi, modelId, model)) == null) {
-            logLine("found ${model.name} [${Brand.of(addr, name, djiCid = modelId != null)}] (${name ?: addr}) rssi=$rssi" +
+        // modelId is non-null only when the DJI company id was in the advertisement (OsmoScanner sets
+        // it inside that match), so it doubles as the robust "this is a DJI device" signal for Brand.
+        val brand = Brand.of(addr, name, djiCid = modelId != null)
+        val model = CameraModel.resolve(modelId, name, brand)
+        if (discovered.put(addr, Cam(device, name, brand, rssi, modelId, model)) == null) {
+            logLine("found ${model.name} [$brand] (${name ?: addr}) rssi=$rssi" +
                 if (!model.verified) "  🧪" else "")
             main.post { rebuildCameraList() }
         }
@@ -1312,9 +1450,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         )
         logLine("READY — sent session wake 0x00/0x2b[04 00] ok=$woke")
         main.postDelayed({
-            val frame = dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin)
+            val frame = dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin, identifier = pairIdentity())
             val ok = gattClient?.writeCommand(frame) ?: false
-            logLine("sent SetPairingPIN(pin=\"$pairPin\") ok=$ok")
+            logLine("sent SetPairingPIN(pin=\"$pairPin\" id=\"${pairIdentity().take(8)}…\") ok=$ok")
         }, 120)
         // The keepalive used to re-send SetPairingPIN every 2 s, which doubled as a retry if the
         // first write dropped (fff5 is write-without-response). Now that it pings 0x00/0x2b instead,
@@ -1323,7 +1461,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             main.postDelayed({
                 if (!credsRequested && lastPairStatus == -99 && gattClient != null) {
                     logLine("pairing: no reply yet — re-sending SetPairingPIN")
-                    gattClient?.writeCommand(dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin))
+                    // Must carry the SAME identity as the first attempt. This retry used to omit it and
+                    // fall back to the camera default, so a dropped first write silently re-paired a
+                    // drone under the wrong identity — and, for the rotation test, quietly undid it.
+                    gattClient?.writeCommand(
+                        dev.konraditurbe.osmosis.duml.OsmoCommands.setPairingPin(pairPin, identifier = pairIdentity())
+                    )
                 }
             }, delay)
         }
@@ -1365,10 +1508,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         lastPairStatus = status
                         val meaning = when (status) {
                             0x01 -> "ALREADY PAIRED"
-                            0x02 -> "APPROVAL REQUIRED — approve on the Nano screen"
+                            0x02 -> "APPROVAL REQUIRED — approve on the camera / press the drone button 2s"
                             else -> "status=0x%02x".format(status)
                         }
                         logLine("PAIRING <- 0x07/45 $meaning  [${p.toHex()}]")
+                        if (status == 0x02) main.post { showPairingApproval() }
                     }
                     // onPaired() is load-bearing and idempotent (guarded by credsRequested) — call it on
                     // EVERY already-paired reply, not only when the status *changes*. Gating it on the
@@ -1400,6 +1544,16 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             return
         }
 
+        // A drone tunnels its identity beacon inside 0x51/0x01 — and sends it over BLE too, long before
+        // its AP exists. Reading the serial here means the datalink never has to hunt for one.
+        if (parsed != null && parsed.cmdSet == 0x51 && parsed.cmdId == 0x01 && bleDroneSerial == null) {
+            dev.konraditurbe.osmosis.drone.DroneSerial.inTunnelFrame(parsed.payload)?.let { (s, tag) ->
+                bleDroneSerial = s to tag
+                logLine("drone serial over BLE: ${String(s, Charsets.US_ASCII)} " +
+                    "(${s.size} chars, tag 0x%02x)".format(tag))
+            }
+        }
+
         val key = parsed?.let { (it.flags shl 16) or (it.cmdSet shl 8) or it.cmdId } ?: -1
         val n = (typeCounts[key] ?: 0) + 1
         typeCounts[key] = n
@@ -1418,6 +1572,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         stopKeepalive()
         lastPairStatus = -99
         main.post {
+            dismissPairingApproval()
             if (isFinishing || isDestroyed) return@post
             // A BLE drop before the grid is the normal control→WiFi handoff (status=8) — ignore it.
             // A drop while the gallery is up (status=19, camera terminated) means the camera is gone:

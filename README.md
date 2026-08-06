@@ -14,6 +14,8 @@ Third-party Android client to download videos and photos from DJI Osmo action / 
 
 Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK or the DJI R-SDK, and should also work with the rest of the DJI Osmo lineup (see [Supported cameras](#supported-cameras)). Also tested with the **Xtra Edge Pro**, a rebadged **DJI Osmo Action 5 Pro** made by DJI front company Xtra.
 
+**Drones:** offload over QuickTransfer is **verified on the DJI Mavic 3**. **Every other DJI drone is unverified and not expected to work**; an aircraft this app has never met will be attempted rather than refused, but nothing about it is known to work. Work on the **Neo 2** and **Mini 3** lives on the `support-neo2` and `support-mini3` branches — they pair and reach the datalink but do not serve a media list yet.
+
 ## Features
 
 - **Media grid** with thumbnails, pulled straight off the camera.
@@ -32,7 +34,8 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 - Camera control: start/stop recording, take photo, change settings
 - Live preview
 - USB-C offload
-- Support DJI drone offload via quick transfer (Neo2 specifically)
+- DJI drone offload via QuickTransfer — **working on a Mavic 3**; Neo 2 and Mini 3 in progress
+  ([ROADMAP #14](ROADMAP.md))
 
 ## Supported cameras
 
@@ -48,7 +51,10 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 | Osmo Action 4 | Started |
 | Osmo 360 | Unplanned (needs Mimo to render 360 content) |
 | Osmo Action 2/3 | Best-effort default, untested, not expected to work |
-| DJI drones using quick transfer | In progress |
+| DJI Mavic 3 (QuickTransfer) | Verified on hardware — grid, thumbnails, preview, download, battery + storage |
+| DJI Neo 2 (QuickTransfer) | In progress on `support-neo2` — pairs, hands over WiFi credentials and brings the datalink up, but does not unlock its media session the way a Mavic does, so the grid is empty |
+| DJI Mini 3 (QuickTransfer) | In progress on `support-mini3` — untested against hardware so far |
+| Any other DJI drone | Unverified, and **not expected to work** |
 
 Want to help adding support for an unsupported camera? [Open an issue](../../issues) so it can be listed as fully supported.
 

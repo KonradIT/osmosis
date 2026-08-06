@@ -1,69 +1,38 @@
-package dev.konraditurbe.osmosis.net
+package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.core.CameraFile
-import dev.konraditurbe.osmosis.core.CameraStatus
 import dev.konraditurbe.osmosis.duml.DjiCrc
-import dev.konraditurbe.osmosis.duml.DjiMessage
-import dev.konraditurbe.osmosis.duml.OsmoCommands
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.Socket
-import kotlin.random.Random
+import dev.konraditurbe.osmosis.net.DumlSession
+import dev.konraditurbe.osmosis.net.DumlTransport
 
 /**
- * DUML-over-UDP datalink client. Handshakes, registers, requests the media file list (0x00/0x26),
- * and parses the DJI_/CAM_ paths out of the 0x00/0x27 response (ported from osmo-download's
- * file_list.py). Wire layers per packet: [8B udp hdr][12B routing hdr][DUML frame]; the app's UDP
- * sequence must start at (camera_channel + 8), learned from the camera's heartbeat routing header.
+ * A media session with an **Osmo camera** — registration, the CompositePack media list (`0x00/0x26`)
+ * and every per-file command (delete, favourite, burst expand, highlights).
+ *
+ * This is the path `main` has always taken and the one every camera in the app uses. A drone shares
+ * only the handshake in [DumlSession] and diverges completely after it — see
+ * [DroneSession][dev.konraditurbe.osmosis.drone.DroneSession].
  *
  * The datalink UDP [port] differs by camera family:
- *  - Osmo 360 / Nano / Pocket 3 = 9004, and need a TCP-7001 poke to arm it ([tcpPoke] = true).
+ *  - Osmo 360 / Nano / Pocket 3 = 9004, and need a TCP-7001 poke to arm it (`tcpPoke` = true).
  *  - Xtra Edge Pro (= DJI Action 5 Pro) = 10004, no poke (discovered via pcap; undocumented).
  *
  * After [fetchFileList] the socket stays OPEN: the Action 5 tears down its WiFi AP the instant the
  * datalink goes idle, so call [startKeepAlive] to hold it up during browse/download, then [close].
  * Blocking; call on a background thread. The process must already be bound to the camera network.
  */
-class DatalinkClient(
-    private val log: (String) -> Unit,
-    private val port: Int = 9004,
-    private val tcpPoke: Boolean = true,
-) {
-    private val handshake = hex(
-        "b88764006400c005140000640000019001c005140000640014006400c00514000064000101040102"
-    )
+class CameraSession(
+    log: (String) -> Unit,
+    port: Int = 9004,
+    tcpPoke: Boolean = true,
+) : DumlSession(log, port, tcpPoke, isDrone = false) {
+
     private val paramSubs = listOf(
         "camcap_mode_profile", "camcap_video_format", "camcap_fov", "camcap_iso",
         "camcap_photo_storage_format", "camcap_color_mode", "cam_storage", "cam_status",
     )
 
     private val VIDEO_EXTS = setOf("MP4", "MOV", "OSV", "INSV")
-
-    private var sessionId = 0
-    private var udpSeq = 0
-    private var dumlSeq = 0xA000
-    private var cmdCounter = 0
-    private var lastCamSeq = 0xB887
-
-    private lateinit var sock: DatagramSocket
-    private lateinit var cam: InetAddress
-    @Volatile private var keepAliveOn = false
-
-    /** Set to receive live camera status (battery/storage/firmware) parsed from status pushes. */
-    @Volatile var onStatus: ((CameraStatus) -> Unit)? = null
-
-    /** Progress 0..100 through fetchFileList (handshake → registration → manifest), for a UI bar. */
-    @Volatile var onFetchProgress: ((Int) -> Unit)? = null
-    private var status = CameraStatus()
-    private var lastSig = ""        // last display signature fired to onStatus (throttles UI updates)
-    private var lastBattSig = ""    // dock-relevant bytes of 0x0d/02; log only on change (#5)
-
-    /** False when the datalink handshake never landed — i.e. wrong UDP port for this camera. Lets
-     *  the caller distinguish "no media" from "nothing answered" and retry the alternate port. */
-    @Volatile var handshakeOk = false
-        private set
 
     // Lazy grid pagination: [pageCursor] = oldest video handle seen (the next page's selector),
     // [seenPaths] dedups across pages, [moreAvailable] = another older page is likely to exist. Video
@@ -75,49 +44,17 @@ class DatalinkClient(
     private val GROUP_EXPAND_LIMIT = 120
     private var pageCursor = 0x40000001L
     private val seenPaths = HashSet<String>()
-    @Volatile var moreAvailable = false
-        private set
 
 
     /**
-     * Open the udp/[port] datalink and bring the session up to the point commands are accepted: TCP
-     * poke, handshake (retry until the camera answers), drain heartbeats to learn its channel + start
-     * our sequence, then register (device-info, register, gimbal-init, param subscriptions). Leaves
-     * [sock] open and the send sequence synced on success. Shared by [fetchFileList] and the delete
-     * flow — the delete re-runs this so it rides the same fresh, in-window session the list does.
+     * Bring the datalink up ([openDatalink]) and then register: device-info, register, gimbal-init and
+     * the param subscriptions. Leaves the socket open and the send sequence synced on success.
+     *
+     * Shared by [fetchFileList] and the delete flow — the delete re-runs this so it rides the same
+     * fresh, in-window session the list does.
      */
     private fun openAndRegister(ip: String, subscribe: Boolean = true): Boolean {
-        handshakeOk = false
-        cam = InetAddress.getByName(ip)
-        sock = DatagramSocket().apply { soTimeout = 200 }
-        sessionId = Random.nextInt(0x1000, 0xFFFE)
-
-        if (tcpPoke) {
-            runCatching {
-                Socket().use { s ->
-                    s.connect(InetSocketAddress(cam, 7001), 1200)
-                    s.getOutputStream().write(OsmoCommands.setPairingPin("osmo"))
-                    s.getOutputStream().flush()
-                    Thread.sleep(400)
-                }
-            }
-        }
-
-        var ok = false
-        for (attempt in 0 until 20) {
-            sendRaw(0x00, handshake)
-            for (r in recvAll(350)) if (r.size >= 8 && (r[6].toInt() and 0xFF) == 0x00) { ok = true; break }
-            if (ok) break
-        }
-        if (!ok) { log("datalink: handshake FAILED on udp/$port"); runCatching { sock.close() }; return false }
-        handshakeOk = true
-        log("datalink: handshake OK on udp/$port")
-        onFetchProgress?.invoke(8)
-
-        // Drain heartbeats, learn camera channel, set our seq start.
-        repeat(5) { recvAll(400); sendAck() }
-        udpSeq = (lastCamSeq + 8) and 0xFFFF
-        onFetchProgress?.invoke(16)
+        if (!openDatalink(ip)) return false
 
         // Registration.
         sendDuml(0x00, 0x81, appDeviceInfo(), receiverType = 0x08, receiverId = 2, cmdType = 4)
@@ -140,7 +77,7 @@ class DatalinkClient(
     }
 
     /** Handshake + register + list. Socket stays open on success. Empty list on failure. */
-    fun fetchFileList(ip: String): List<CameraFile> {
+    override fun fetchFileList(ip: String): List<CameraFile> {
         if (!openAndRegister(ip)) return emptyList()
         runCatching { syncTime() }   // set the camera clock + timezone to the phone's, on every connect
         onFetchProgress?.invoke(50)
@@ -186,6 +123,7 @@ class DatalinkClient(
             it[13] = ((cursor ushr 24) and 0xFF).toByte()
         }
 
+
     /**
      * Fetch the next OLDER page for the grid's infinite scroll, returning ONLY the newly-seen files
      * (empty when exhausted). Pagination (from a DJI-Mimo pcap): enter PLAYBACK MODE (0x02/0x0c=01 01 00
@@ -194,7 +132,7 @@ class DatalinkClient(
      * window, so each call runs in a FRESH registered session (like the delete flow), then restores the
      * browse keep-alive. Blocking; call off the UI thread.
      */
-    fun fetchNextPage(): List<CameraFile> {
+    override fun fetchNextPage(): List<CameraFile> {
         if (!moreAvailable) return emptyList()
 
         // Inline on the live session first (playback held) — the win that makes scroll instant (#12).
@@ -215,13 +153,13 @@ class DatalinkClient(
         }
 
         // Fallback: fresh registered session (pre-#12 path).
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return emptyList()
+        val ip = tx.peerIp ?: return emptyList()
         keepAliveOn = false
         Thread.sleep(600)                 // let the keep-alive loop finish its current recv and exit
-        runCatching { sock.close() }      // free udp/$port for the fresh session
+        tx.close()                        // free udp/$port for the fresh session
         val fresh = runCatching { freshSessionPage(ip) }
             .getOrElse { log("datalink: next-page session error: ${it.message}"); emptyList() }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return fresh
     }
 
@@ -257,9 +195,9 @@ class DatalinkClient(
      * session (the live keep-alive would drop the write), like [fetchNextPage]. Blocking; call off-UI.
      * Returns the frames in sub-index order, or just [lead] if it isn't a group / the query came back empty.
      */
-    fun expandBurstGroup(lead: CameraFile): List<CameraFile> {
+    override fun expandBurstGroup(lead: CameraFile): List<CameraFile> {
         val base = lead.groupKey ?: return listOf(lead)
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return listOf(lead)
+        val ip = tx.peerIp ?: return listOf(lead)
         // Handle namespace differs per camera AND per store, so use the manifest-fitted handle (see
         // withCmdHandles) — a hardcoded Nano formula returned 0 frames on the Xtra.
         val handle = lead.cmdHandle.takeIf { it != 0L } ?: return listOf(lead)
@@ -278,10 +216,10 @@ class DatalinkClient(
         // Fallback: fresh registered session (pre-#12 path).
         keepAliveOn = false
         Thread.sleep(600)                 // let the keep-alive loop exit before we take the socket
-        runCatching { sock.close() }
+        tx.close()
         val frames = runCatching { freshSessionExpand(ip, handle, base) }
             .getOrElse { log("datalink: group-expand error: ${it.message}"); emptyList() }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return frames.takeIf { it.size > 1 } ?: listOf(lead)
     }
 
@@ -334,7 +272,7 @@ class DatalinkClient(
      * works again for the next stretch. Read-only, so it's safe to retry.
      */
     @Synchronized
-    fun getHighlights(handle: Long): List<Int> {
+    override fun getHighlights(handle: Long): List<Int> {
         if (handle == 0L) return emptyList()
         if (keepAliveOn) {
             val reply = runCommand(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0)
@@ -345,13 +283,13 @@ class DatalinkClient(
             }
             log("datalink: highlights(inline) 0x${handle.toString(16)} — no reply, retrying in a fresh session")
         }
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return emptyList()
+        val ip = tx.peerIp ?: return emptyList()
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its recv and exit
-        runCatching { sock.close() }     // free udp/$port for the fresh session
+        tx.close()                       // free udp/$port for the fresh session
         val marks = runCatching { freshSessionHighlights(ip, handle) }
             .getOrElse { log("datalink: highlights session error: ${it.message}"); emptyList() }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return marks
     }
 
@@ -460,41 +398,17 @@ class DatalinkClient(
     }
 
     /**
-     * First CRC-valid DUML **reply** frame with the given cmdset/cmd across [datagrams] → its payload,
-     * else null. Skips the empty-payload transport ACK the camera sends before the real reply (that ACK
-     * is what a naive "first frame" match grabs, making a landed command look like a failure).
-     */
-    private fun findReply(datagrams: List<ByteArray>, set: Int, cmd: Int): ByteArray? {
-        for (d in datagrams) {
-            var i = 0
-            while (i + 11 <= d.size) {
-                if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
-                val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-                if (len < 13 || i + len > d.size) { i++; continue }
-                if (DjiCrc.computeCrc8(d.copyOfRange(i, i + 3)) != (d[i + 3].toInt() and 0xFF)) { i++; continue }
-                if ((d[i + 9].toInt() and 0xFF) == set && (d[i + 10].toInt() and 0xFF) == cmd) {
-                    val payload = d.copyOfRange(i + 11, i + len - 2)
-                    if (payload.isNotEmpty()) return payload   // skip the empty transport ACK
-                }
-                i += len
-            }
-        }
-        return null
-    }
-
-    /**
      * Keep the datalink alive (ACK ~2×/s so the AP doesn't sleep) and, Mimo-style, poll the camera
      * for status — heartbeat 0x02/0x8E, state query 0x02/0xA0, status poll 0x02/0x61 — decoding the
      * pushed status frames (battery/storage/firmware) as they arrive. Also holds **playback mode** the
      * whole browse session (so inline commands needing it — favorite/group-expand/pagination — work) and
      * services the inline command queue ([runCommand]).
      */
-    fun startKeepAlive() {
+
+    override fun startKeepAlive() {
         if (keepAliveOn) return
         keepAliveOn = true
-        status = CameraStatus()
-        lastSig = ""
-        lastBattSig = ""
+        resetStatus()
         Thread {
             var tick = 0
             sendDuml(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0)   // enter + hold playback
@@ -555,87 +469,9 @@ class DatalinkClient(
                 i += len
             }
         }
-        val sig = displaySig(status)
-        if (sig != lastSig) { lastSig = sig; onStatus?.invoke(status) }
+        emitStatusIfChanged()
     }
 
-    // Includes the power state so docking/undocking refreshes the pill even when the percentage
-    // hasn't moved; mV is bucketed to 0.05 V so normal ripple doesn't spam the UI.
-    private fun displaySig(s: CameraStatus) =
-        "${s.batteryPercent}|${s.sdTotalMb / 1024}|${s.sdFreeMb / 1024}|${s.internalFreeMb / 1024}" +
-            "|${s.storageFreeMb / 1024}|${s.storageTotalMb / 1024}" +
-            "|${s.docked}|${s.charging}|${s.batteryMilliVolts / 50}"
-
-    private fun applyStatusFrame(set: Int, id: Int, p: ByteArray): Boolean {
-        when {
-            set == 0x02 && id == 0x80 && p.size >= 13 -> {
-                // Storage of the active store: total = u32-LE MiB @ byte 5, free = u32-LE MiB @ byte 9.
-                val total = u32le(p, 5).toInt()
-                val free = u32le(p, 9).toInt()
-                status = status.copy(
-                    storageTotalMb = if (total in 1..50_000_000) total else status.storageTotalMb,
-                    storageFreeMb = if (free in 0..50_000_000) free else status.storageFreeMb,
-                ); return true
-            }
-            set == 0x02 && id == 0xDC && p.size >= 22 -> {
-                // One [total][free] u32-LE MiB block PER STORE (byte 2 = store count): the first at
-                // @6/@10, the built-in at @24/@28. Two-store bodies send 32 B (SD @6 + built-in @24);
-                // a **single-store body (Pocket 3 = microSD only) sends 22 B** with just the first
-                // block, so read the built-in only when it's actually there. Ground-truthed: an
-                // Action 6's @6/@10 (121785/109748 MiB) matched its on-screen 118.9/107.2 GB; the
-                // Action 5 Pro + Xtra rebadge report an identical 48980 MiB built-in; a card-less
-                // Xtra reports @6 = 0. Byte 0 is *not* an inserted flag (0x11 no card / 0x00 with) —
-                // presence is capacity > 0.
-                val sdTotal = u32le(p, 6).toInt(); val sdFree = u32le(p, 10).toInt()
-                val hasInternal = p.size >= 32
-                val inTotal = if (hasInternal) u32le(p, 24).toInt() else 0
-                val inFree = if (hasInternal) u32le(p, 28).toInt() else 0
-                fun sane(v: Int) = v in 0..50_000_000
-                status = status.copy(
-                    sdTotalMb = if (sane(sdTotal)) sdTotal else status.sdTotalMb,
-                    sdFreeMb = if (sane(sdFree)) sdFree else status.sdFreeMb,
-                    // A single-store frame confirms there is no built-in (0), rather than "unknown" (-1).
-                    internalTotalMb = if (!hasInternal) 0 else if (sane(inTotal)) inTotal else status.internalTotalMb,
-                    internalFreeMb = if (!hasInternal) 0 else if (sane(inFree)) inFree else status.internalFreeMb,
-                ); return true
-            }
-            set == 0x00 && id == 0x00 && p.size >= 6 -> {
-                // GetVersion reply: NUL-separated ASCII (sdk\0name\0firmware); grab the version string.
-                val text = String(p, Charsets.US_ASCII)
-                val fw = Regex("""\d{2}\.\d{2}\.\d{2}\.\d{2}""").find(text)?.value
-                    ?: text.split('\u0000').map { it.trim() }.lastOrNull { it.length in 4..24 && it.any(Char::isDigit) }
-                if (!fw.isNullOrBlank()) { status = status.copy(firmware = fw); return true }
-            }
-            set == 0x0D && id == 0x02 && p.size >= 21 -> {
-                // The dock is NOT its own DUML device (docked vs undocked sessions only ever showed
-                // type 0x05 id 0), so the dock signal lives in this frame: u16@1 = pack mV,
-                // i32@5 = current mA (signed, -ve = discharging), @20 = percent, @27 = dock
-                // attached, @32 = taking charge. Confirmed over six live dock/undock transitions
-                // (ROADMAP #5). Logged on change only — a state line, not a 1 Hz stream.
-                if (p.size >= 34) {
-                    val mv = (p[1].toInt() and 0xFF) or ((p[2].toInt() and 0xFF) shl 8)
-                    val cur = ((p[5].toInt() and 0xFF) or ((p[6].toInt() and 0xFF) shl 8) or
-                        ((p[7].toInt() and 0xFF) shl 16) or ((p[8].toInt() and 0xFF) shl 24))
-                    val docked = (p[27].toInt() and 0xFF) != 0
-                    val charging = (p[32].toInt() and 0xFF) == 1
-                    status = status.copy(
-                        batteryMilliVolts = if (mv in 2000..5000) mv else status.batteryMilliVolts,
-                        batteryMilliAmps = cur, docked = docked, charging = charging,
-                    )
-                    val sig = "$docked|$charging|${if (cur == 0) "0" else if (cur < 0) "-" else "+"}"
-                    if (sig != lastBattSig) {
-                        lastBattSig = sig
-                        log("battery: %d%% %dmV %+dmA docked=%s charging=%s"
-                            .format(p[20].toInt() and 0xFF, mv, cur, docked, charging))
-                    }
-                }
-                val bp = p[20].toInt() and 0xFF
-                if (bp in 0..100) { status = status.copy(batteryPercent = bp); return true }
-                if (p.size >= 34) return true   // power fields decoded even if the % looked bogus
-            }
-        }
-        return false
-    }
 
     /**
      * Delete files by their manifest [handles] (DUML **0x00/0x28** — the file-management cmdset, same
@@ -649,7 +485,7 @@ class DatalinkClient(
      * ([openAndRegister]) — the one path the camera reliably accepts — issue the delete there, then
      * keep that session for browse. Call on a background thread (blocks ~9 s, the re-handshake cost).
      */
-    fun deleteFiles(handles: List<Long>): Int? {
+    override fun deleteFiles(handles: List<Long>): Int? {
         if (handles.isEmpty()) return null
         val payload = deletePayload(handles, delCounter++)
 
@@ -677,13 +513,13 @@ class DatalinkClient(
         }
 
         // No live session to go inline on: a fresh registered session is the only route (pre-#12 path).
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return null
+        val ip = tx.peerIp ?: return null
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its current recv and exit
-        runCatching { sock.close() }     // free udp/$port for the fresh session
+        tx.close()                       // free udp/$port for the fresh session
         val status = runCatching { freshSessionDelete(ip, payload) }
             .getOrElse { log("datalink: delete session error: ${it.message}"); null }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return status
     }
 
@@ -698,14 +534,14 @@ class DatalinkClient(
      * corrects — as against re-issuing a delete, whose cost is a destroyed file.
      */
     private fun verifyDeleted(handles: List<Long>): Int? {
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return null
+        val ip = tx.peerIp ?: return null
         keepAliveOn = false
         Thread.sleep(600)
-        runCatching { sock.close() }
+        tx.close()
         val files = runCatching { fetchFileList(ip) }.getOrElse {
             log("datalink: delete verify — listing failed: ${it.message}"); emptyList()
         }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         if (files.isEmpty()) { log("datalink: delete verify — no list, cannot confirm"); return null }
         val survivors = handles.filter { h -> files.any { it.handle == h } }
         return if (survivors.isEmpty()) {
@@ -764,11 +600,20 @@ class DatalinkClient(
      * index `0x40100000 + seq*0x40`. Returns true on the camera's `0x00` ack. Blocks (~re-handshake);
      * call on a background thread, serialized so rapid toggles don't overlap sessions.
      */
-    fun setFavorite(handle: Long, on: Boolean): Boolean {
-        val payload = java.io.ByteArrayOutputStream().apply {
-            write(byteArrayOf(0x01, 0x01)); write(le32(handle.toInt())); write(le32(favCounter++))
+    /**
+     * Favourite request payload: `01 01 [handle:u32-LE][counter:u32-LE] 00 [on:u8] 00 00 00`.
+     *
+     * Byte-identical to Mimo's, verified against a Nano capture — including the counter, which
+     * increments per request within a session rather than being a constant.
+     */
+    internal fun favoritePayload(handle: Long, counter: Int, on: Boolean): ByteArray =
+        java.io.ByteArrayOutputStream().apply {
+            write(byteArrayOf(0x01, 0x01)); write(le32(handle.toInt())); write(le32(counter))
             write(0x00); write(if (on) 0x01 else 0x00); write(byteArrayOf(0x00, 0x00, 0x00))
         }.toByteArray()
+
+    override fun setFavorite(handle: Long, on: Boolean): Boolean {
+        val payload = favoritePayload(handle, favCounter++, on)
 
         // Try INLINE on the live session first (it holds playback + a faithful seq now — #12). No pause,
         // no re-registration. Fall back to a fresh session only if the camera doesn't answer.
@@ -783,13 +628,13 @@ class DatalinkClient(
         }
 
         // Fallback: fresh registered session (the pre-#12 path), kept until inline is proven everywhere.
-        val ip = (if (::cam.isInitialized) cam.hostAddress else null) ?: return false
+        val ip = tx.peerIp ?: return false
         keepAliveOn = false
         Thread.sleep(600)                // let the keep-alive loop finish its recv and exit
-        runCatching { sock.close() }     // free udp/$port for the fresh session
+        tx.close()                       // free udp/$port for the fresh session
         val ok = runCatching { freshSessionFavorite(ip, handle, on) }
             .getOrElse { log("datalink: favorite session error: ${it.message}"); false }
-        if (::sock.isInitialized && !sock.isClosed) runCatching { startKeepAlive() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
         return ok
     }
 
@@ -816,31 +661,6 @@ class DatalinkClient(
         recvAll(150)
         log("datalink: FAVORITE reply status=${status?.let { "0x%04x".format(it) } ?: "none"}")
         return status == 0
-    }
-
-    /** Scan a datagram for a DUML response frame with [set]/[id] and return its leading status word. */
-    private fun findRespStatus(d: ByteArray, set: Int, id: Int): Int? {
-        var i = 0
-        while (i + 13 <= d.size) {
-            if ((d[i].toInt() and 0xFF) != 0x55) { i++; continue }
-            val len = ((d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-            if (len < 13 || i + len > d.size) { i++; continue }
-            if ((d[i + 9].toInt() and 0xFF) == set && (d[i + 10].toInt() and 0xFF) == id) {
-                val ps = i + 11; val pe = i + len - 2
-                return when {
-                    pe - ps >= 2 -> (d[ps].toInt() and 0xFF) or ((d[ps + 1].toInt() and 0xFF) shl 8)
-                    pe - ps >= 1 -> d[ps].toInt() and 0xFF
-                    else -> 0
-                }
-            }
-            i += len
-        }
-        return null
-    }
-
-    fun close() {
-        keepAliveOn = false
-        runCatching { sock.close() }
     }
 
     /**
@@ -912,12 +732,6 @@ class DatalinkClient(
 
     /** Test seam: build a file-list request for a given counter + 4-byte handle cursor. */
     internal fun buildListCmdForTest(ctr: Int, cursor: Long): ByteArray = listCmd(ctr, cursor)
-
-    /** Test seam: feed one status push and read back the decoded [CameraStatus]. */
-    internal fun applyStatusFrameForTest(set: Int, id: Int, payload: ByteArray): CameraStatus {
-        applyStatusFrame(set, id, payload)
-        return status
-    }
 
     /**
      * Decode the reassembled manifest. [decodeComposite] structurally handles every CompositePack
@@ -1309,10 +1123,6 @@ class DatalinkClient(
         return fps
     }
 
-    private fun u32le(b: ByteArray, o: Int): Long =
-        (b[o].toLong() and 0xFF) or ((b[o + 1].toLong() and 0xFF) shl 8) or
-            ((b[o + 2].toLong() and 0xFF) shl 16) or ((b[o + 3].toLong() and 0xFF) shl 24)
-
     /**
      * Position of a manifest record's **head** for the file whose name starts at [namePos], or -1.
      * Every record carries a constant marker `03 ff 19 06` at `head + 8`; the head holds the delete
@@ -1359,103 +1169,7 @@ class DatalinkClient(
         return -1
     }
 
-    // ---- packet builders (mirror file_list.py) ------------------------------
 
-    private fun udpHeader(pktType: Int, payloadLen: Int): ByteArray {
-        val total = 8 + payloadLen
-        val w0 = (1 shl 15) or (total and 0x3FFF)
-        val b = byteArrayOf(
-            (w0 and 0xFF).toByte(), ((w0 shr 8) and 0xFF).toByte(),
-            (sessionId and 0xFF).toByte(), ((sessionId shr 8) and 0xFF).toByte(),
-            (udpSeq and 0xFF).toByte(), ((udpSeq shr 8) and 0xFF).toByte(),
-            pktType.toByte(),
-        )
-        var xor = 0
-        for (x in b) xor = xor xor (x.toInt() and 0xFF)
-        return b + xor.toByte()
-    }
-
-    // Command routing header (pkt 0x05). The datalink is a sliding-window transport: every packet carries
-    // `[r8-9 = ack of the peer's seq][r10-11 = my own seq]`, uhSeq = my own seq. Both fields for a COMMAND
-    // live in OUR OWN command-seq space — r10-11 is this command's seq, r8-9 is the previous one (the last
-    // seq the camera has echoed back, since we recvAll between sends). Ground-truthed from Mimo/Xtra pcaps.
-    //
-    // The old code put `lastCamSeq` in r8-9 — the camera's TELEMETRY seq, which recvAll refreshes from every
-    // received packet. Telemetry runs ~10× faster than our commands and wraps to a different phase, so r8-9
-    // drifted far from r10-11 and the receiver window silently dropped our WRITES (reads were lenient).
-    // That single divergence is what forced a fresh registered session for every delete/favorite/page/burst.
-    private fun routingHeader(): ByteArray {
-        val ack = (udpSeq - 8) and 0xFFFF          // previous command's seq (our own space), not the camera's
-        return byteArrayOf(
-            (ack and 0xFF).toByte(), ((ack shr 8) and 0xFF).toByte(),
-            (udpSeq and 0xFF).toByte(), ((udpSeq shr 8) and 0xFF).toByte(),
-            0, 0, 0, 0, (cmdCounter and 0xFF).toByte(), 0x01, 0x00, 0x00,
-        )
-    }
-
-    private fun advance() { udpSeq = (udpSeq + 8) and 0xFFFF }
-
-    /** Send a UDP packet, swallowing a send failure. When the camera AP drops or the WiFi network is
-     *  unbound mid-session (e.g. teardown, or the phone losing the AP) sock.send throws ENETUNREACH —
-     *  that's expected on a dying link and must NEVER crash the keep-alive thread (it once did). */
-    private fun sendPacket(pkt: ByteArray): Boolean =
-        runCatching { sock.send(DatagramPacket(pkt, pkt.size, cam, port)) }.isSuccess
-
-    private fun sendRaw(pktType: Int, payload: ByteArray) {
-        val pkt = udpHeader(pktType, payload.size) + payload
-        if (sendPacket(pkt)) advance()
-    }
-
-    private fun sendAck() {
-        val grp = byteArrayOf(
-            (lastCamSeq and 0xFF).toByte(), ((lastCamSeq shr 8) and 0xFF).toByte(),
-            (lastCamSeq and 0xFF).toByte(), ((lastCamSeq shr 8) and 0xFF).toByte(),
-            0, 0, 0, 0,
-        )
-        val payload = grp + grp + grp + byteArrayOf(0, 0)
-        val old = udpSeq; udpSeq = 0
-        val hdr = udpHeader(0x04, payload.size)
-        udpSeq = old
-        val pkt = hdr + payload
-        sendPacket(pkt)
-    }
-
-    private fun sendDuml(
-        set: Int, cmd: Int, payload: ByteArray,
-        receiverType: Int, receiverId: Int, cmdType: Int = 2,
-    ) {
-        cmdCounter++
-        val rt = routingHeader()
-        val target = 0x02 or (((receiverId shl 5) or receiverType) shl 8)
-        val type = (cmdType shl 5) or (set shl 8) or (cmd shl 16)
-        val duml = DjiMessage(target, dumlSeq, type, payload).encode()
-        dumlSeq = (dumlSeq + 1) and 0xFFFF
-        val pkt = udpHeader(0x05, rt.size + duml.size) + rt + duml
-        if (sendPacket(pkt)) advance()
-    }
-
-    private fun recvAll(durationMs: Long): List<ByteArray> {
-        val out = ArrayList<ByteArray>()
-        val deadline = System.nanoTime() + durationMs * 1_000_000
-        val buf = ByteArray(65536)
-        while (System.nanoTime() < deadline) {
-            try {
-                val p = DatagramPacket(buf, buf.size)
-                sock.receive(p)
-                val data = p.data.copyOf(p.length)
-                out.add(data)
-                if (data.size >= 10) {
-                    val camCh = (data[8].toInt() and 0xFF) or ((data[9].toInt() and 0xFF) shl 8)
-                    if (camCh != 0) lastCamSeq = camCh
-                }
-            } catch (_: java.net.SocketTimeoutException) {
-                // keep polling until the deadline
-            } catch (_: Exception) {
-                break
-            }
-        }
-        return out
-    }
 
     private fun appDeviceInfo(): ByteArray {
         // "\x00APP" + 37*00 + 02 + 8*00 + 02 08 + 10*00  (62 bytes) — mirrors file_list.py.
@@ -1500,15 +1214,4 @@ class DatalinkClient(
             padded + byteArrayOf(0, 0, 0, 0)
     }
 
-    private fun le32(v: Int) = byteArrayOf(
-        (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
-        ((v shr 16) and 0xFF).toByte(), ((v shr 24) and 0xFF).toByte(),
-    )
-
-    private fun hex(s: String): ByteArray {
-        val clean = s.filter { !it.isWhitespace() }
-        return ByteArray(clean.length / 2) {
-            ((clean[it * 2].digitToInt(16) shl 4) or clean[it * 2 + 1].digitToInt(16)).toByte()
-        }
-    }
 }

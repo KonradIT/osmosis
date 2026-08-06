@@ -1,4 +1,4 @@
-package dev.konraditurbe.osmosis.net
+package dev.konraditurbe.osmosis.camera
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -35,7 +35,7 @@ class PhotoHandleTest {
 
     private fun check(camera: String, port: Int, poke: Boolean) {
         val blob = fixture(camera)
-        val files = DatalinkClient({}, port, poke).decodeCompositeForTest(blob)
+        val files = CameraSession({}, port, poke).decodeCompositeForTest(blob)
         val valid = markerHandles(blob).map { it.second }.toSet()
         val photos = files.filter { it.isImage }
         assertEquals("fixture should hold photos", true, photos.isNotEmpty())

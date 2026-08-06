@@ -95,13 +95,21 @@ App-level pairing replaces OS Bluetooth bonding — there is no numeric BT pairi
       The approval REQUEST is the "go" signal — treat it as pairing-complete and start offload.
 ```
 
-- **`identifier`** = a stable per-install string the app invents and reuses so the camera remembers us
-  ("already paired" next time). Any of the shapes seen work (15-digit or 32-hex UUID); we generate a
-  UUID once and persist it.
-- **`token`** is app-chosen and purely cosmetic: on first use the camera **displays it verbatim** and
-  the on-screen *approve* tap is the real gate — there is no camera-generated numeric PIN to type back.
-  We send `"osmo"`; the camera screen shows `OSMO`. After approval the camera remembers the identifier
-  and answers `00 01` silently thereafter.
+- **`identifier`** = the string the device stores its approval **under**, so it recognises us next time
+  ("already paired"). Any of the shapes seen work (15-digit or 32-hex UUID). Proven by experiment on a
+  Mavic 3: rotating it on an aircraft that had been re-pairing silently for days forced a full approval
+  round, and a known one skips it again. We send a **fixed constant on cameras** and a **per-install
+  UUID, minted once and persisted, on drones** ([DronePairing](../app/src/main/java/dev/konraditurbe/osmosis/drone/DronePairing.kt)) —
+  a shipped constant makes every install share one identity and contend for a single remembered slot.
+  Retries must carry the **same** identifier: `fff5` is write-without-response, so a first write can
+  drop, and a retry with a different identity reads as a second app asking to pair.
+- **`token`** — cosmetic on a **camera**, load-bearing on a **drone**. A camera displays it verbatim on
+  first use and the on-screen *approve* tap is the real gate; we send `"osmo"` and the screen shows
+  `OSMO`. A drone approves any token but releases WiFi credentials only for **`"DJI FLY"`**, so an
+  aircraft paired under the wrong token looks successful and then hands out nothing.
+- **Confirming without a screen.** A drone has no display: it flashes its LEDs and waits for a
+  power-button hold — 2 s on most models, 3 s on the newest, while the **Mini 3** has no hold at all and
+  needs three quick presses to enter QuickTransfer mode.
 - The first-time `00 02` flow is confirmed on a factory-reset Xtra / Action 5 Pro. The already-paired
   `00 01` fast path is confirmed on both units. The handler must treat the `07/46` **request** as the
   completion signal — the `07/45 = 00 01` fast path alone only covers the already-paired case.
@@ -230,7 +238,7 @@ the raw payloads instead injects those 10 bytes mid-string wherever a path strad
 (`DCIM/DJI_` + `J….001/…`); the path is then unparseable and that one file silently drops — and which
 file drops depends on packet layout, so the loss looks random run-to-run. The reassembled manifest
 opens with a `u32-LE` file count. Don't seq-sort across pages: the per-file counter restarts per page.
-See [`manifestBytes`](../app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt).
+See [`manifestBytes`](../app/src/main/java/dev/konraditurbe/osmosis/camera/CameraSession.kt).
 
 ### 7d. Record layout
 
@@ -254,7 +262,7 @@ followed by **length-prefixed strings**. Per-record signature:
 
 ### 7e. Decode, don't scrape
 
-[`decodeManifest`](../app/src/main/java/dev/konraditurbe/osmosis/net/DatalinkClient.kt) anchors on each
+[`decodeManifest`](../app/src/main/java/dev/konraditurbe/osmosis/camera/CameraSession.kt) anchors on each
 primary-extension filename, scopes that record's media/thumb/proxy paths and fps to its own byte window
 (no cross-record joins, no `±220 B` fps guessing), and **asserts decoded record count == the header
 `u32` count**. That assertion is the safety net — a record dropped by a reassembly bug fails the check
@@ -309,3 +317,44 @@ real 45-record Nano and 13-record Xtra blobs.
 Shared and model-agnostic: pairing (`osmo` token), the DUML frame + CRC, the `0x00/0x26`→`0x00/0x27`
 list flow and its reassembly/decode, `/v2` HTTP, storage auto-detect, moov-derived resolution/duration,
 and the streaming preview.
+
+---
+
+## 11. DJI drones (QuickTransfer) — the same stack, a different manifest
+
+A drone reaches the *same* `0x00/0x26` → `0x00/0x27` list flow described in §7, but four things change.
+Cracked from a PCAPdroid capture of DJI Fly ↔ a real Mavic 3 (2026-08-01).
+
+| | Osmo camera | DJI drone (Mavic 3 `0x0070`) |
+|--|-------------|------------------------------|
+| Pairing token | `osmo` | **`DJI FLY`** — anything else is approved but gets **no WiFi creds** |
+| Datalink | UDP 9004 (+poke) / 10004 | **UDP 9003, no poke** |
+| List reply body | CompositePack TLV, carries paths | **flat 94-byte records, no filename** |
+| Media URL | `/v2?storage=N&path=…` | **`/v1?file_index=<u32>&file_subtype=0`** |
+| Thumbnails | HTTP `.scr`/`.thm` | **video:** HTTP `/v1` subtype 1 · **still:** EXIF `APP1` out of the original |
+| Playback mode to page | required | **not needed** |
+| Session | handshake → registration → commands | handshake → **`0x51/0x02` session-open**, before which the aircraft answers *nothing* |
+| Delete / favourite | `0x00/0x28` / `0x02/0xbf` by manifest handle | **not available** — DCF records carry no handle |
+
+The `0x4a` envelope is shared with the camera path, but note its length field is **12 bits with
+`0x1000` as a FINAL-chunk flag** — reading it as a `u8` parses short frames correctly and silently
+corrupts every long one, which is exactly where the manifest lives.
+
+Record (94 B, newest first): `+0 u32` mtime · `+4 u32` size · `+8 u32` `file_index` · `+12 u16` duration
+seconds (`0` ⇒ photo); fields past `+14` are unmapped. No name is transmitted;
+`DCIM/100MEDIA/DJI_0554.MP4` is reconstructed from the index. Paging passes the **oldest index of the
+previous page** as the cursor and the drone replays that file first, so callers dedup by index.
+
+`file_index` is **packed, not flat** — mask the directory as 16 bits and the storage bits fold in, which
+silently hides every file on internal storage:
+
+```
+bits 31:30 = storage (0 SD, 1 internal eMMC, 2 SSD)
+bits 29:16 = DCF directory, 14 bits (100 -> 100MEDIA)
+bits 15:0  = DCF file number (554 -> DJI_0554)
+```
+
+Full detail, ground truth and open questions: **[ROADMAP #14](../ROADMAP.md)**; implementation in
+[DcfRecords.kt](../app/src/main/java/dev/konraditurbe/osmosis/dcf/DcfRecords.kt), pinned by
+[DroneManifestTest](../app/src/test/java/dev/konraditurbe/osmosis/drone/DroneManifestTest.kt) against
+the captured frames.

@@ -622,8 +622,30 @@ Mimo does **not** send ConnectToWiFi (#25) anywhere in this flow.
 
 ### 22. SetPairingPIN
 - Cmd Set / ID: `0x07` / `0x45`  ·  App → WiFi(`0x07`), BLE
-- Payload: `PackString(identifier)` + `PackString(token)` (`PackString` = `[len:u8][utf8]`; token `"osmo"`)
-- Response: `0x07/0x45` payload `00 01` = already paired · `00 02` = approval popup on camera; approval then arrives as a **`0x07/0x46` request** (flags `0x40`), which is the "go" signal.
+- Payload: `PackString(identifier)` + `PackString(token)` (`PackString` = `[len:u8][utf8]`)
+- Response: `0x07/0x45` payload `00 01` = already paired · `00 02` = approval required. Approval then arrives as a **`0x07/0x46` request** (flags `0x40`), not a response — it must be ACKed like any other request, and it is the "go" signal.
+
+**Both fields matter, and they gate different things.**
+
+| field | camera | drone |
+|---|---|---|
+| token | `"osmo"` — any value pairs | **`"DJI FLY"`** — anything else pairs but the WiFi getters return nothing |
+| identifier | 32 chars; the generic one is accepted | 32 chars; **this is what the device remembers** |
+
+The **identifier is the key a device stores its approval under** — proven on a Mavic 3 by rotating it: the same aircraft that had been re-pairing silently (`0x45` → `0x01`) for days answered `0x45` → `0x02` and demanded confirmation the moment it saw a string it hadn't approved. Present a known identifier and it skips the approval entirely.
+
+Two consequences:
+- An app should mint **one identifier per install and persist it**, as DJI Fly does. A constant shared across installs is silent only for whoever's device already approved it; a fresh one per launch prompts every time and burns a remembered slot each time.
+- **Send the same identifier on retries.** `fff5` is write-without-response, so a first write can drop; a retry carrying a different identifier reads as a second app asking to pair.
+
+**Confirming, on hardware without a screen.** A camera prompts on its own display. A drone flashes its LEDs and waits for a power-button hold — 2 s on most models, 3 s on the newest, while the **Mini 3** has no hold at all and instead needs three quick presses to enter QuickTransfer mode. Full sequence measured on a Mavic 3:
+
+```
+11:44:50.447  -> 0x07/0x45  SetPairingPIN(token="DJI FLY", id="c7f10a83…")
+11:44:51.894  <- 0x07/0x45  [00 02]   approval required — LEDs start chasing
+11:45:01.886  <- 0x07/0x46  [01]      (request, flags 0x40) — after the button hold
+11:45:03.497  <- 0x07/0x0e            passphrase released
+```
 - DUML example: <https://b3yond.d3vl.com/duml/#553304c2020700a0400745203238346165356238643736623333373561303461363431376164373162656133046f736d6f8c02>
 
 ### 23. ConnectToWiFi (AP bring-up — fallback only)
@@ -647,3 +669,301 @@ Mimo does **not** send ConnectToWiFi (#25) anywhere in this flow.
 - Cmd Set / ID: `0x07` / `0x0c`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][6-byte MAC]`
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070ca7cc>
+
+---
+
+## DJI Drone QuickTransfer media offload
+
+> **Everything below is the Mavic 3 family** (Mavic 3, Classic, Pro) unless a heading says otherwise —
+> that is the only aircraft this has been made to work on end to end.
+
+**"A drone" is not one thing.** A Neo 2 shares the transport and the credential path with a Mavic 3 and
+then diverges completely at the point of unlocking the link, so the two are tracked separately here:
+
+| | Mavic 3 | Neo 2 |
+|---|---|---|
+| BLE pair, `DJI FLY` token | ✅ | ✅ |
+| WiFi creds over `0x07/0x07` + `0x07/0x0e` | ✅ | ✅ |
+| Datalink port | ✅ udp/9003 | ✅ udp/9003 |
+| Handshake | ✅ 9-byte reply | ✅ **15-byte** reply ([§27a](#27a-neo-2--the-same-transport-a-different-unlock)) |
+| Serial in the `0x51/0x13` beacon | ✅ tag `0x11` | ✅ **tag `0x24`** |
+| Answers `0x51/0x02` session-open | ✅ | ❌ **ignores it** |
+| Media list | ✅ | ❌ never reached |
+
+So a Neo 2 gets as far as a live, authenticated link and then serves nothing. It is *not* a `/v1`-vs-`/v2`
+question — no manifest is ever reached, and §29 has never been exercised on one.
+
+A drone runs the same DUML stack as an Osmo, with four differences that break a camera client outright:
+
+| | Osmo camera | DJI drone |
+|---|---|---|
+| Pairing token | `osmo` | **`DJI FLY`** — any other token pairs but yields **no WiFi creds** |
+| Datalink | UDP `9004` + TCP-7001 poke (Xtra: `10004`) | **UDP `9003`, no poke**, bind local port `9003` (symmetric) |
+| Session | handshake → registration → commands | handshake → **`0x51` session-open** ([§27](#27-session-open-0x51--required-before-anything-else-mavic-3)) — Mavic 3 only; a Neo 2 unlocks differently ([§27a](#27a-neo-2--the-same-transport-a-different-unlock)) |
+| Media addressing | paths, `/v2?storage=N&path=…` | **DCF indices**, `/v1?file_index=…` ([§29](#29-http-media-api-v1--dcf-indexed)) |
+| Registration | `0x00/0x81`, `0x00/0x88`, `0x03/0xda`, param subs | **none** — go straight to commands |
+
+Addressing byte is unchanged: App `0x02`, Camera `0x01`. The `0x51` channel uses its own endpoints
+(`0xee` app, `0xe9` drone) outside the `(id<<5)|type` scheme.
+
+### 27. Session open (`0x51`) — required before anything else *(Mavic 3)*
+
+A Mavic 3 answers **no command at all** until this completes. Before it, it emits ~2 DUML frames/s of empty
+keepalive; one second after, ~1200 frames/s and every command works. **This exchange is Mavic-specific —
+see [§27a](#27a-neo-2--the-same-transport-a-different-unlock) before assuming it generalises.**
+
+- Cmd Set: `0x51`
+- Cmd ID: `0x02` open · `0x08` challenge · `0x06` identity · `0x13` beacon
+- Dir / transport: App(`0xee`) ⇄ Drone(`0xe9`), datalink
+- Wrapper: every `0x51` frame is an **inner DUML frame + 22 trailing bytes**, carried as the payload of an outer `0x51/0x01` frame (target `0xe93b`)
+
+| step | dir | frame | flags | inner payload |
+|---|---|---|---|---|
+| 1 | → | `0x51/0x13` | `0x00` | app identity (answers the beacon) |
+| 2 | → | `0x51/0x02` | `0x40` | `05 01 04 01 00` |
+| 3 | ← | `0x51/0x08` | `0x40` | drone serial + app id (challenge) |
+| 4 | → | `0x51/0x08` | `0xC0` | `00 00 11 <serial:20> 00` |
+| 5 | → | `0x51/0x06` | `0x40` | `04 02 00 <appid:19> 00 00 00 11 <serial:20> 00` |
+| 6 | ←→ | `0x51/0x06` | `0xC0` | serial echo, both directions |
+
+- **Serial** = a run of uppercase alphanumerics in the drone's own `0x51/0x13` beacon — 20 characters on both aircraft seen so far. **Do not key on the tag byte in front of it:** a Mavic 3 uses `0x11`, a Neo 2 uses `0x24`, and anchoring on `0x11` silently rejects the Neo entirely. Find it by shape, remember the tag, and echo that tag back in steps 4–5 rather than a literal `0x11`.
+- **Trailing bytes** `39fdb2ae 02 <ctr> 00 00 00 79102e9b 01 00×8` — **`ctr` (byte 5) must increase on every `0x51` frame sent**. A repeated or decreasing value is dropped as a replay, with no reply at all.
+- **Outer DUML message id** is a per-frame counter from `1`, not a constant.
+- DUML example (`0x51/0x02` open, outer frame): <https://b3yond.d3vl.com/duml/#553504683be90100005101551204c7eee97c004051020501040100619639fdb2ae020100000079102e9b010000000000000000f340>
+
+Two fields that look like flow control but are not: the routing header's `r0-1` on a **received** packet
+is not a running ack (it repeats the handshake channel and only moves when a reply lands), and the
+sequence window is not enforced — the reference app runs ~1600 packets ahead of it.
+
+### 27a. Neo 2 — the same transport, a different unlock
+
+Everything up to and including the datalink works. The aircraft pairs on the `DJI FLY` token, hands over
+SSID and passphrase on `0x07/0x07` / `0x07/0x0e`, joins, and completes the handshake on udp/9003. Its
+serial reads out of its beacon correctly once the tag assumption above is dropped. And then nothing.
+
+```
+datalink: handshake OK on udp/9003
+datalink: session=0xcefb base=0x56f0 channel=0x56f0
+datalink: drone serial 1581FA6QC25BS01CHVJQ (20 chars, tag 0x24)
+datalink: 51/02 open sent, len=40
+datalink: 51-channel replies: 51/13×3            <- beacons only; a Mavic answers 51/08, 51/06, 51/80, 51/82 …
+datalink: drone session-open sent — drone frames/s now 5      <- a Mavic reaches ~268 here
+datalink: drone list FAILED … after 0B data; rx [pkt01×225]
+```
+
+**It does not answer `0x51/0x02` at all** — not an error, not a rejection, just more beacons. The frame
+rate staying at ~5/s is the tell: the Mavic's jump to the hundreds *is* the session opening.
+
+That is consistent with what the official app does. In a full DJI Fly ↔ Neo capture (287 packets from
+cold start to flight), **`0x51/0x02` does not appear once**. What it sends instead is a long init whose
+*repetition* is load-bearing — ~86 `0x00/0x99` capability subscriptions and 14 `0x03/0xcd` upload chunks
+(`01 00` … `01 0d`) — and the aircraft only opens up once the whole thing has landed. A curated
+first-occurrence-of-each subset (which is what a 30-command prelude is) leaves those bursts incomplete
+and the drone withholds. Its `0x51` tunnels carry `51/13`, `51/17`, `03/f9`, `03/cd`; no `51/02`.
+
+Other differences worth recording, none of them yet shown to matter:
+
+- **The handshake reply is 15 bytes, not 9.** Same structure and the same `01` ACK byte, then six extra:
+  `01 0f 00 05 05 40 1f`. **Byte-identical across sessions with different session ids**, so it is a fixed
+  property of the aircraft or firmware — a version or capability descriptor, not a nonce or a challenge.
+  Meaning unknown; we ignore it and the link still comes up.
+- **The AP drops ~16 s after joining**, twice, both times just before the list query went out. Plausibly
+  downstream of the session never opening, but that is a guess.
+
+Unresolved, and the honest state of it: the serial is **necessary but not sufficient**. Whether replaying
+the full init unlocks a Neo 2 is untested, and the reference capture is from a **Neo 1** during a *flight
+control* session rather than a media one — so it may not transfer.
+
+### 28. Get media list (drone)
+
+- Cmd Set: `0x00`
+- Cmd ID: `0x26`  (response `0x00/0x27`)
+- Dir / transport: App → Camera(`0x01`), datalink
+- Payload (newest page): `4a002110 0c00 00000000 01000000 2d 000d0100 ffffffffffffffff 000100000000`
+- Response: chunked `0x00/0x27` frames, subtype `0x01`
+- DUML example: <https://b3yond.d3vl.com/duml/#552e04a7020177c94000264a0021100c0000000000010000002d000d0100ffffffffffffffff000100000000c085>
+
+The `0x4a` envelope (both directions, all subtypes):
+
+| off | size | field |
+|---:|---|---|
+| +0 | u8 | `0x4a` |
+| +1 | u8 | subtype — see below |
+| +2 | u16 | low 12 bits = this frame's payload length; bit `0x1000` = **final chunk** |
+| +4 | u16 | seq (reply echoes the query's) |
+| +6 | u32 | chunk index |
+| +10 | u32 | *(list reply chunk 0 only)* total file count |
+| +14 | u32 | *(list reply chunk 0 only)* total manifest bytes |
+
+Reading `+2` as a `u8` parses short frames and silently corrupts every long one.
+
+#### Transfer lifecycle
+
+Subtypes are a family per transfer kind — `+0` query, `+1` reply, `+2` proceed, `+3` state, `+4`
+release. A media list is `0x00`–`0x04`, a thumbnail `0x20`–`0x24`. `seq` is one monotonic counter
+shared by both kinds.
+
+| subtype | dir | meaning | bytes |
+|---:|---|---|---|
+| `0x00` / `0x20` | → | query | 33 B list · 48 B thumb |
+| `0x01` / `0x21` | ← | data, chunked | |
+| `0x02` | → | proceed, answering a state frame | `4a020f10 <seq:u16> 00000000 0000000000` |
+| `0x03` / `0x23` | ← | transfer state: raised before the data, and again once it ends | `4a030a00 <seq:u16> 00000000` |
+| `0x04` / `0x24` | → | **release the transfer** | `4a040e10 <seq:u16> 00000000 01000000` |
+
+**A transfer holds a slot until it is released, and there is a finite number of them.** Leak them and
+the drone stops answering media queries while telemetry keeps streaming at full rate — a healthy-looking
+link that serves nothing. Release every transfer, including one that returned no data and one abandoned
+part-way (the reference app cancels by sending the release immediately after the query).
+
+If a state frame arrives before any data, answer it with `0x02` or the drone will keep waiting.
+
+**Reassembly.** A reply spans several 1472-byte packets and single frames straddle packet boundaries.
+The manifest rides `pktType 0x03`; strip each packet's **8-byte transport + 12-byte routing header**
+before concatenating, or every straddling chunk fails CRC and disappears.
+
+- Query byte 14 (`0x2d` = 45) is the page size.
+- **Paging cursor** = query bytes 10–13, `u32-LE`. `1` = newest page; an older page passes the **oldest `file_index` of the page just received**, which the drone replays as that page's first record — dedup by index. No playback mode, no fresh session.
+
+#### Record — fixed 94 bytes, newest first
+
+| off | size | field |
+|---:|---|---|
+| +0 | u32 | mtime, **FAT/DOS packed** (not unix) |
+| +4 | u32 | file size, bytes |
+| +8 | u32 | **`file_index`** — packed, see [§29](#29-http-media-api-v1--dcf-indexed) |
+| +12 | u16 | duration, whole seconds (`0` = still) |
+
+No filename is transmitted; it is reconstructed from the index. Fields past `+14` are unmapped.
+
+```python
+import struct, datetime
+
+def fat_to_datetime(v):                      # +0 is FAT, not unix
+    date, time = v >> 16, v & 0xFFFF
+    return datetime.datetime(
+        1980 + (date >> 9), (date >> 5) & 0x0F, date & 0x1F,
+        time >> 11, (time >> 5) & 0x3F, (time & 0x1F) * 2)   # seconds stored /2
+
+def decode_manifest(blob):                   # blob = chunks concatenated, envelopes stripped
+    for off in range(0, len(blob) - 93, 94):
+        mtime, size, index, dur = struct.unpack_from("<IIIH", blob, off)
+        storage, dir_index, file_no = index >> 30, (index >> 16) & 0x3FFF, index & 0xFFFF
+        if not (100 <= dir_index <= 999 and file_no):
+            continue                         # phase lost — a chunk is missing
+        yield dict(index=index, storage=storage,
+                   name="DJI_%04d.%s" % (file_no, "MP4" if dur else "JPG"),
+                   path="DCIM/%dMEDIA/DJI_%04d" % (dir_index, file_no),
+                   size=size, duration=dur, mtime=fat_to_datetime(mtime))
+```
+
+### 29. HTTP media API (`/v1`) — DCF indexed
+
+`lighttpd/1.4.55`, TCP **80**, no auth. Response carries `Accept-Ranges: bytes`, `Content-Range` and a
+`Last-Modified` that matches the manifest's FAT mtime.
+
+```
+GET /v1?file_index=<u32>&file_subtype=<S>&file_seg_subindex=<G>
+```
+
+All three parameters are expected — the connection is closed when one is missing.
+`file_seg_subindex` selects a part of a segmented recording; `0` = whole file. **It is a real per-file
+value, not a constant**: the reference app reads it off each file's own record rather than hardcoding
+zero, so a segmented recording is only reachable by passing the right one.
+
+**A missing file is reported by closing the connection with no response at all**, not by a 404 — so a
+client sees an IOException where it expects a status code. (Every URL that is not `/v1` or `/v2` takes
+the same path, which is why `GET /` returns an empty reply.)
+
+The reference app only ever builds a `/v1` URL with `file_subtype=0`. Every other rendition it fetches
+by **physical path over `/v2`**, taking the path from the file's own record and appending the extension
+for the type it wants — which is exactly the `/v2?storage=N&path=…` shape the cameras use.
+
+**`file_index` is a packed 32-bit field**, not a flat number:
+
+| bits | width | field |
+|---|---|---|
+| 31:30 | 2 | storage id |
+| 29:16 | 14 | DCF directory (`100` → `100MEDIA`) |
+| 15:0 | 16 | DCF file number (`554` → `DJI_0554`) |
+
+| storage id | medium |
+|---:|---|
+| 0 | SD card |
+| 1 | internal eMMC |
+| 2 | NVMe SSD |
+| 3 | reserved / unset |
+
+`file_subtype` is a **19-value enum**, recovered in full (with its own names) from a decompiled
+DJI-derived app. Only the five below are exercised here; the rest are listed because guessing at a
+number is how you end up with a connection close and no idea why.
+
+| `file_subtype` | name | content | on-card path |
+|---:|---|---|---|
+| 0 | ORIGIN | original full-res | `DCIM/<dir>MEDIA/DJI_<n>` |
+| 1 | THUMBNAIL | thumbnail (`.thm`) | `MISC/THM/<dir>/DJI_<n>` |
+| 2 | SCREEN | screen-res render (`.scr`) | `MISC/THM/<dir>/DJI_<n>` |
+| 17 | AIS | sensor data | `MISC/THM/<dir>/DJI_<n>` |
+| 18 | PROXY | low-res proxy video (`.lrf`) | `DCIM/<dir>MEDIA/DJI_<n>` |
+
+The rest: 3 CLIP · 4 STREAM · 5 PANO · 6 PANOSCREENNAIL · 7 PANOTHUMBNAIL · 8 TIMELAPSESCREENAIL ·
+9 FILE · 10 CUSTOM_DATA · 11 PHOTO_METADATA · 12 USER_CTRL_INFO · 13 JSON · 14 PAYLOAD_WIDGET_JSON ·
+**15 PROXY_MOOV** · **16 ORIGIN_MOOV**.
+
+The two `_MOOV` subtypes are worth noting: an MP4's `moov` atom served on its own, without the media
+data. Streaming a clip currently costs a range request for the `moov` before playback can start, so
+these would replace that with one small fetch. Untested — the Neo 2 firmware answers "Not support this
+subtype yet!" for everything in 3–16, so support is per-model.
+
+Extensions per type, from the same source: `.jpg .dng .mov .mp4 .pano .tiff .log.lz4 .seq .tiff.seq
+.lrf .thm .scr`.
+
+**Which renditions actually exist depends on the media.** On a Mavic 3 a video has a THM, while a still
+has *nothing but the original* — subtypes 1, 2, 17 and 18 all close the connection for a photo index.
+The reference app sidesteps this by pulling every thumbnail over the datalink instead
+([§28](#28-get-media-list-drone), subtype `0x20`), and never requests subtype 1 or 2 over HTTP at all.
+
+A cheaper route for a still, since `Range` is supported: fetch the **first 64 kB of the original** and
+take the thumbnail out of its EXIF `APP1` segment (a u16 length caps `APP1` at 64 kB, so one request
+always suffices). Measured on a Mavic 3, the embedded JPEG starts 1502 bytes in. Unlike the datalink
+route this parallelises and leases no transfer slot.
+
+Extensions are probed in order (`.JPG .jpg .MP4 .mp4 .MOV .mov .DNG .dng` for ORG; `.LRF/.lrf`,
+`.THM/.thm`, `.SCR/.scr` for the rest), so the URL carries no extension.
+
+The LRF proxy is ~7× smaller than the original (38.8 MB vs 273 MB on a 30 s clip) and decodes at
+1280×720 — use it for preview and scrubbing, ORG only for download.
+
+```python
+def pack_file_index(storage, dir_index, file_no):
+    return (storage << 30) | (dir_index << 16) | file_no
+
+ORG, THM, SCR, AIS, LRF = 0, 1, 2, 17, 18
+
+def url(index, subtype=ORG, seg=0):
+    return "/v1?file_index=%d&file_subtype=%d&file_seg_subindex=%d" % (index, subtype, seg)
+
+url(pack_file_index(0, 100, 554), LRF)   # /v1?file_index=6554154&file_subtype=18&file_seg_subindex=0
+```
+
+### 30. Drone status pushes
+
+Pushes are wrapped inside `0x51/0x01` tunnel frames — a top-level frame scan steps over them; scan
+byte-at-a-time with both CRCs verified. Field layouts are **identical to the camera frames**
+([§19](#19-sd--storage--both-stores-in-one-frame), [§20](#20-battery--power-also-the-only-place-the-dock-reports-in)):
+
+| Cmd Set / ID | field | offset |
+|---|---|---|
+| `0x0d`/`0x02` | battery percent | `u8 @ 20` |
+| `0x0d`/`0x02` | pack voltage, mV | `u16-LE @ 1` |
+| `0x0d`/`0x02` | current, mA (signed, −ve = discharging) | `i32-LE @ 5` |
+| `0x0d`/`0x03` | per-cell voltages, mV | `u16-LE × 4 @ 2` |
+| `0x02`/`0xdc` | SD total / free, MiB | `u32-LE @ 6` / `@ 10` |
+| `0x02`/`0xdc` | internal total / free, MiB | `u32-LE @ 24` / `@ 28` |
+| `0x02`/`0x80` | active store total / free, MiB | `u32-LE @ 5` / `@ 9` |
+
+### 31. Drone uplink stream
+
+The reference app sends `0x02/0x82` (42 B), `0x02/0xdc` (40 B) and `0x04/0x1c` (`38`) at ~860/s for the
+whole session — 95% of its uplink — addressed to `0x1c01`/`0x1c04` with sender `0x01`. Not required to
+open the session or to browse media.
