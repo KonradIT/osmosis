@@ -1,0 +1,1 @@
+Groundwork for reproducible builds on F-Droid, so the same signed APK can be installed from F-Droid, GitHub or Obtainium and updated across all three. The dependency-info blob AGP embeds in the APK is gone, and releases are now built on JDK 21. No functional changes.

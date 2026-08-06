@@ -20,11 +20,15 @@ jobs:
       - name: Validate Gradle Wrapper
         uses: gradle/actions/wrapper-validation@v3
 
+      # JDK 21 to match F-Droid's buildserver. Reproducible builds compare their APK against the
+      # one this workflow attaches to the release, so the two toolchains have to agree — see
+      # AllowedAPKSigningKeys in metadata/dev.konraditurbe.osmosis.yml over in fdroiddata.
+      # Don't bump this without checking what F-Droid runs.
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: '17'
+          java-version: '21'
           cache: 'gradle'
 
       - name: Decode keystore
