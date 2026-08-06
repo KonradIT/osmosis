@@ -421,9 +421,26 @@ class CameraSession(
                         }
                     }
                     sendAck()
-                    sendDuml(0x02, 0x8E, hex("00011400"), receiverType = 0x01, receiverId = 0)
+                    // NO 0x02/0x8E here. It was sent ~3x/s as a "heartbeat" with payload 00011400, and
+                    // it is what kept dragging the camera back out of playback about a second after we
+                    // put it in — which is why a Pocket 3 stayed in capture through a transfer, and why
+                    // delete only ever answered inline when it happened to be issued within a few
+                    // seconds of connecting. Later deletes hit a camera no longer in playback, got no
+                    // reply, and paid ~28 s for the verify re-list instead.
+                    //
+                    // Mimo does not send it. In a 49 s Nano session (reference/captures/wifi/
+                    // mimo_nano_delete.pcap) Mimo sends 0x02/0x8E, 0x02/0xa0 and 0x02/0x61 exactly ZERO
+                    // times, holds playback the whole way, and still gets status — because the camera
+                    // PUSHES 0x02/0x80 (493x) and 0x02/0x82 (480x) on its own once registered. The polls
+                    // were never needed for the pill; parseStatus reads those pushes either way.
                     if (tick % 3 == 0) sendDuml(0x02, 0xA0, ByteArray(0), receiverType = 0x01, receiverId = 0)
                     if (tick % 6 == 0) sendDuml(0x02, 0x61, ByteArray(0), receiverType = 0x01, receiverId = 0)
+                    // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode
+                    // should simply stay, but the camera can also be knocked out of it by something we
+                    // don't control — a button press on the body, a mode change, a firmware quirk — and
+                    // silently losing it costs a 28 s delete. Idempotent and one frame per 33 ticks.
+                    if (playbackHeld && tick % 33 == 0)
+                        sendDuml(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0)
                     if (awaitingCmd == null) cmdQueue.poll()?.let { c ->
                         awaitingCmd = c
                         sendDuml(c.set, c.cmd, c.payload, receiverType = c.rType, receiverId = c.rId, cmdType = c.cType)
@@ -508,6 +525,12 @@ class CameraSession(
         // we return it as-is and never re-issue via the fallback (which could delete twice / report a stale
         // "no such handle" on an already-deleted file). Only a genuine no-reply falls through.
         if (keepAliveOn) {
+            // Re-assert playback FIRST. Hardware finding: a delete is only answered while the camera is
+            // actually in playback. The one delete that ever came back inline was issued 5 s after the
+            // mode was set; every one issued minutes later got no reply at all and fell to the verify
+            // re-list. Queued via runCommand so it goes out on the keep-alive thread (see
+            // enterPlaybackConfirmed for why that matters), and cheap enough to pay before every delete.
+            runCommand(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0, timeoutMs = 1500)
             log("datalink: DELETE(inline) 0x00/0x28 n=${handles.size}")
             // 10 s, not the 2500 ms default. An Xtra Edge Pro answered a delete at +6.9 s with status
             // 0x0000 — long after the default gave up — so the reply WAS coming and we threw it away,
@@ -638,6 +661,10 @@ class CameraSession(
         // Try INLINE on the live session first (it holds playback + a faithful seq now — #12). No pause,
         // no re-registration. Fall back to a fresh session only if the camera doesn't answer.
         if (keepAliveOn) {
+            // Same as delete: re-assert playback before the write. Mimo only ever favourites with
+            // playback active, and a camera that has drifted out of it answers nothing — which then
+            // costs a fresh-session fallback.
+            runCommand(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0, timeoutMs = 1500)
             log("datalink: FAVORITE(inline) 0x02/0xbf handle=0x%08x on=%b".format(handle, on))
             val reply = runCommand(0x02, 0xbf, payload, receiverType = 0x01, receiverId = 0)
             val status = reply?.let {
