@@ -207,28 +207,6 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- Highlight / moment marks (side-button presses during recording, pulled via DUML 0x02/0xff):
-             a centered row of tappable ⚑ m:ss chips that seek the video. Built in code; shown only when
-             the clip has marks. -->
-        <HorizontalScrollView
-            android:id="@+id/highlightStrip"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:fillViewport="true"
-            android:scrollbars="none"
-            android:visibility="gone">
-
-            <LinearLayout
-                android:id="@+id/highlightRow"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center_horizontal"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingHorizontal="6dp" />
-        </HorizontalScrollView>
-
         <!-- Burst / interval frame strip: a centered 1×n row of thumbnails, built in code; the selected
              frame gets an accent border and is what "Add to Queue" queues. Shown only for a group. -->
         <HorizontalScrollView
