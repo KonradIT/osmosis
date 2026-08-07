@@ -262,21 +262,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 if (saved != null && saved.exists() && saved.length() > 0) offerToShareLogs(saved)
             }
         }
-        // Long-press "Save logs" → also hex-dump the raw media manifest into the log.
-        //
-        // Hidden on purpose: it makes the log ~1200 lines longer per camera and nobody needs it by
-        // default. It is here so a remote tester can produce a byte-exact manifest through the flow
-        // they already know ("Save logs", then share), instead of being talked through a packet
-        // capture — which is what an Osmo Pocket 4 Pro's 46-file manifest cost us: it decoded
-        // perfectly, so nothing was dumped, and there was nothing to build a fixture from.
-        // An unverified model turns this on by itself; see startDatalink.
-        saveLogs.setOnLongClickListener {
-            val on = !prefs.getBoolean(PREF_DUMP_MANIFEST, false)
-            prefs.edit().putBoolean(PREF_DUMP_MANIFEST, on).apply()
-            logLine("manifest hex dump ${if (on) "ON — reconnect to capture it" else "off"}")
-            toast("Manifest hex dump ${if (on) "on" else "off"}")
-            true
-        }
 
         // 🛰️ GPS-sync mode (R-SDK): when on, picking a camera starts the GPS foreground service
         // instead of the usual WiFi offload. Default off.
@@ -897,23 +882,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     // confirmed on the Xtra rebrand (own OUI EC:9E:EA), so a genuine DJI unit gets the
                     // DJI-standard 9004+poke. Either guess can be wrong on an untested model, so if the
                     // handshake never lands we retry the alternate config and log which port answered.
-                    // Dump the manifest bytes for any model we have not verified, without anyone
-                    // asking. That is exactly the camera whose layout we don't have and whose tester
-                    // we cannot walk through a packet capture — and it costs a verified camera's user
-                    // nothing, because they never hit it. The hidden long-press adds it for verified
-                    // models too, for work like diffing a manifest with known favourites.
-                    val dumpHex = getSharedPreferences("osmosis", MODE_PRIVATE)
-                        .getBoolean(PREF_DUMP_MANIFEST, false) || !currentModel.verified
-
                     fun open(m: CameraModel): Pair<MediaSession, List<CameraFile>> {
-                        logLine("=== media list [${m.name}] via udp/${m.datalinkPort} (poke=${m.tcpPoke})" +
-                            "${if (dumpHex) " +hex" else ""} ===")
+                        logLine("=== media list [${m.name}] via udp/${m.datalinkPort} (poke=${m.tcpPoke}) ===")
                         // A drone speaks a different protocol end to end — the 0x51 session-open gate,
                         // flat DCF records instead of CompositePack, /v1 instead of /v2 (ROADMAP #14).
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
                             if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)
-                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke, dumpManifests = dumpHex)
+                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
                         val f = runCatching { c.fetchFileList("192.168.2.1") }
@@ -1672,8 +1648,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     companion object {
         private const val REQ_PERMS = 1001
         private const val REQ_GPS_PERMS = 1002
-        /** Long-press "Save logs" toggles this; unverified models set it for themselves. */
-        private const val PREF_DUMP_MANIFEST = "dump_manifest_hex"
     }
 }
 

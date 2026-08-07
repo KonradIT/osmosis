@@ -25,23 +25,21 @@ class CameraSession(
     log: (String) -> Unit,
     port: Int = 9004,
     tcpPoke: Boolean = true,
-    /**
-     * Hex-dump the raw file-list blob even when it decodes cleanly.
-     *
-     * A failed decode has always dumped, which is useless for the case that actually matters: a new
-     * camera whose manifest decodes *fine* but whose bytes we have never seen. A Pocket 4 Pro listed
-     * 46 files perfectly and left us with no fixture to test against, because success is silent.
-     * Enabled automatically for unverified models and by hand from the UI — see [dumpBudgetBytes].
-     */
-    private val dumpManifests: Boolean = false,
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
     /**
      * Remaining hex-dump budget for this session, in bytes of manifest.
      *
-     * A 45-record manifest is ~37 KB, which is ~1200 log lines — fine once as a diagnostic, ruinous
-     * on every page of an infinite scroll. Two pages' worth is enough to reconstruct a fixture and
-     * see how paging changes the blob; past that the log stops being something a tester can send.
+     * The raw file-list blob is dumped for **every** camera, verified or not: a failed decode has
+     * always dumped, which is useless for the case that actually matters — a new camera whose
+     * manifest decodes *fine* but whose bytes we have never seen. A Pocket 4 Pro listed 46 files
+     * perfectly and left us with no fixture, because success was silent.
+     *
+     * The budget is the only thing keeping that affordable. A 45-record manifest is ~37 KB, which is
+     * ~1200 log lines: fine once as a diagnostic, ruinous on every page of an infinite scroll. Two
+     * pages' worth is enough to reconstruct a fixture and see how paging changes the blob; past that
+     * the log stops being something a tester can send. Lines only reach a file when "Save logs" is
+     * on, so an ordinary run pays nothing but logcat.
      */
     private var dumpBudgetBytes = 80_000
 
@@ -946,7 +944,7 @@ class CameraSession(
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
             warnOnHandleCollisions(comp)
-            if (dumpManifests) dumpManifest(bytes)
+            dumpManifest(bytes)
             return comp
         }
         log("datalink: no CompositePack records — dumping manifest, falling back to flat scrape")
