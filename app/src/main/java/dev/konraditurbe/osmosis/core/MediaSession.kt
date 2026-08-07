@@ -9,8 +9,8 @@ package dev.konraditurbe.osmosis.core
  * unlocked with a `0x51` handshake and then answers flat DCF records on the live session. Both are
  * "give me the newest page, then older ones", which is all the grid ever needed.
  *
- * Device-specific capabilities default to a no-op rather than throwing: a drone has no burst groups,
- * and a camera serves its thumbnails over HTTP and never over the datalink. Callers can invoke
+ * Device-specific capabilities default to a no-op rather than throwing: a drone has no burst groups or
+ * highlights, a camera serves its thumbnails over HTTP and never over the datalink. Callers can invoke
  * them unconditionally.
  */
 interface MediaSession {
@@ -46,6 +46,9 @@ interface MediaSession {
 
     /** Enumerate a burst/interval group's frames. Path-based cameras only. */
     fun expandBurstGroup(lead: CameraFile): List<CameraFile> = listOf(lead)
+
+    /** Highlight marker positions, in seconds. Path-based cameras only. */
+    fun getHighlights(handle: Long): List<Int> = emptyList()
 
     /** Delete by manifest handle; the reply status word (0 = OK), or null. Path-based cameras only. */
     fun deleteFiles(handles: List<Long>): Int? = null
