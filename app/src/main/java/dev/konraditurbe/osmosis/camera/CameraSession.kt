@@ -941,8 +941,15 @@ class CameraSession(
      * queries with the same list — a single-store body, where there is nothing to attribute.
      */
     private fun collectStores(raw: ByteArray): List<CameraFile> {
-        val sd = decodeManifest(manifestBytes(raw, requestCtr = SD_QUERY_CTR))
-        val internal = decodeManifest(manifestBytes(raw, requestCtr = INTERNAL_QUERY_CTR))
+        // An empty slice means that store answered with nothing — a camera with no card, or a query
+        // that went unanswered. Decoding it anyway logs "no CompositePack records — falling back to
+        // flat scrape" and runs a scrape over zero bytes, which reads in the log exactly like a decode
+        // failure on a real manifest. Seen on a Nano whose SD query came back empty.
+        fun sliceOf(ctr: Int): List<CameraFile> =
+            manifestBytes(raw, requestCtr = ctr).takeIf { it.isNotEmpty() }?.let { decodeManifest(it) }
+                ?: emptyList()
+        val sd = sliceOf(SD_QUERY_CTR)
+        val internal = sliceOf(INTERNAL_QUERY_CTR)
         val ambiguous = sd.isNotEmpty() && internal.isNotEmpty() &&
             sd.map { it.path }.toSet() == internal.map { it.path }.toSet()
         if ((sd.isEmpty() && internal.isEmpty()) || ambiguous) {
