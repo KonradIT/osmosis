@@ -1,0 +1,171 @@
+<resources>
+    <!-- app_name intentionally not translated: Osmosis is the product name. -->
+    <string name="action_share">分享已下载的文件</string>
+    <string name="action_edit">在其他应用中编辑已下载的文件</string>
+
+    <!-- Common buttons -->
+    <string name="cancel">取消</string>
+    <string name="save">保存</string>
+    <string name="delete">删除</string>
+    <string name="share">分享</string>
+    <string name="no">不了</string>
+    <string name="stop">停止</string>
+
+    <!-- Camera selector -->
+    <string name="cameras">相机</string>
+    <string name="save_logs">保存日志</string>
+    <string name="rescan">重新扫描</string>
+    <string name="scanning">正在扫描…</string>
+    <string name="no_cameras_hint">还没有相机——请开启相机，然后点按“重新扫描”。</string>
+    <string name="cameras_in_range">%1$d/%2$d 台已保存相机在范围内 · %3$d 台新设备</string>
+    <string name="new_tag">新设备</string>
+    <string name="no_bluetooth">此设备没有蓝牙功能。</string>
+    <string name="camera_not_in_range">%1$s 不在范围内——请开启相机后重新扫描</string>
+
+    <!-- Bluetooth off dialog -->
+    <string name="bluetooth_off_title">蓝牙已关闭</string>
+    <string name="bluetooth_off_message">Osmosis 通过蓝牙查找并配对相机。请开启蓝牙以扫描相机。</string>
+    <string name="turn_on">开启</string>
+
+    <!-- Pairing approval dialog -->
+    <string name="pairing_approval_title">在 %1$s 上确认配对</string>
+    <string name="pairing_approval_message">请在相机屏幕上批准配对。</string>
+    <string name="drone_approval_message">无人机的指示灯现在应该在闪烁/跑马——这说明它已收到请求。\n\n长按电源键 2–3 秒以确认连接。</string>
+    <string name="drone_power_button_desc">无人机的电源键，位于机身尾部</string>
+
+    <!-- Camera long-press menu -->
+    <string name="reenter_wifi_password">重新输入 Wi-Fi 密码</string>
+    <string name="forget_camera">忘记此相机</string>
+
+    <!-- Wi-Fi password dialog -->
+    <string name="wifi_password_hint">Wi-Fi 密码</string>
+    <string name="wifi_password_for">%1$s 的 Wi-Fi 密码</string>
+    <string name="wifi_password_message">密码显示在相机屏幕的“连接设置”中。按相机分别保存。</string>
+
+    <!-- Wi-Fi off dialog -->
+    <string name="wifi_off_title">Wi-Fi 已关闭</string>
+    <string name="wifi_off_message">Osmosis 需要加入相机自身的 Wi-Fi 网络来浏览和下载媒体。请开启 Wi-Fi 后继续。</string>
+    <string name="turn_on_wifi">开启 Wi-Fi</string>
+
+    <!-- Wi-Fi join failed dialog -->
+    <string name="couldnt_join_wifi">无法加入 %1$s</string>
+    <string name="wifi_join_failed_message">加入相机 Wi-Fi 失败。通常是保存的密码已过期——例如相机恢复出厂设置后会重新生成密码。是否重新输入密码并重试？</string>
+    <string name="wifi_join_failed_wpa_message">此手机通过 WPA3 和 WPA2 均无法加入 %1$s——很可能是手机自身的 Wi-Fi 兼容性限制，而非密码问题。你仍可重新输入密码以排除该可能。</string>
+    <string name="reenter_password">重新输入密码</string>
+    <string name="back_to_cameras">返回相机列表</string>
+
+    <!-- GPS sync -->
+    <string name="the_camera">相机</string>
+    <string name="gps_sync_active_banner">🛰️ 正在与 %1$s 进行 GPS 同步\nGPS 流式传输期间无法浏览媒体。点按 🛰️ 停止。</string>
+    <string name="gps_sync_connecting_banner">🛰️ 正在连接 %1$s 进行 GPS 同步…如相机弹出提示请批准。点按 🛰️ 取消。</string>
+    <string name="gps_sync_starting">正在为 %1$s 启动 GPS 同步——如相机弹出提示请批准</string>
+    <string name="gps_active_select_blocked">GPS 同步进行中——请先点按 🛰️ 停止，再选择相机。</string>
+    <string name="gps_stop_before_browse">请先停止 GPS 同步（点按 🛰️），再浏览媒体。</string>
+
+    <!-- GPS sync notification -->
+    <string name="notif_channel_gps">GPS 同步</string>
+    <string name="gps_notif_title">GPS 同步 · %1$s</string>
+    <string name="gps_notif_text">模式 - %1$s - 录制 - %2$s - GPS：%3$s</string>
+    <string name="gps_notif_connecting">连接中…</string>
+    <string name="gps_notif_rec_yes">是</string>
+    <string name="gps_notif_rec_no">否</string>
+    <string name="gps_notif_healthy">正常</string>
+    <string name="gps_notif_not_healthy">异常</string>
+
+    <!-- Gallery -->
+    <string name="filter_photos">照片</string>
+    <string name="filter_videos">视频</string>
+    <string name="filter_faved">已收藏</string>
+    <string name="select">选择</string>
+    <string name="download">下载</string>
+    <string name="download_count">下载（%1$d）</string>
+    <string name="connected_wifi">已连接 · Wi-Fi</string>
+    <string name="loading_burst">正在加载连拍…</string>
+    <string name="not_connected">未连接</string>
+
+    <!-- Date headers -->
+    <string name="today">今天</string>
+    <string name="yesterday">昨天</string>
+    <string name="date_unknown">未知日期</string>
+    <string name="date_header">%3$s年%2$s%1$s日</string>
+    <string-array name="month_abbreviations">
+        <item>1月</item>
+        <item>2月</item>
+        <item>3月</item>
+        <item>4月</item>
+        <item>5月</item>
+        <item>6月</item>
+        <item>7月</item>
+        <item>8月</item>
+        <item>9月</item>
+        <item>10月</item>
+        <item>11月</item>
+        <item>12月</item>
+    </string-array>
+
+    <!-- Favorite / delete -->
+    <string name="favorite">收藏</string>
+    <string name="unfavorite">取消收藏</string>
+    <string name="favoriting">正在收藏 %1$s…</string>
+    <string name="unfavoriting">正在取消收藏 %1$s…</string>
+    <string name="favorite_failed">收藏失败</string>
+    <string name="favorite_no_handle">无法收藏 %1$s——缺少 handle</string>
+    <string name="delete_from_camera_title">从相机中删除？</string>
+    <string name="delete_from_camera_message">%1$s\nhandle %2$s\n\n此操作将永久删除相机存储卡上的该文件，无法撤销。</string>
+    <string name="deleting">正在删除 %1$s…</string>
+    <string name="deleted">已删除 %1$s</string>
+    <string name="delete_no_response">删除：无响应</string>
+    <string name="delete_failed">删除失败（0x%1$04x）</string>
+
+    <!-- Download progress -->
+    <string name="overall_progress_bytes">总进度：0/%1$d — %2$s</string>
+    <string name="overall_progress_files">总进度：%1$d/%2$d 个文件</string>
+    <string name="file_progress">%1$d%% — %2$s/%3$s</string>
+    <string name="download_done">完成：已保存 %1$d，已跳过 %2$d，失败 %3$d</string>
+    <string name="fmt_bytes_gb">%.1f GB</string>
+    <string name="fmt_bytes_mb">%.0f MB</string>
+    <string name="fmt_bytes_kb">%.0f KB</string>
+    <string name="fmt_bytes_b">%1$d B</string>
+
+    <!-- Log sharing -->
+    <string name="share_logs_title">与 Konrad 分享日志？</string>
+    <string name="share_logs_chooser">与 Konrad 分享日志</string>
+    <string name="share_logs_failed">无法分享日志：%1$s</string>
+    <string name="logs_email_subject">Osmosis 日志 — %1$s</string>
+
+    <!-- Media preview -->
+    <string name="add_to_queue">加入下载队列</string>
+    <string name="add_to_queue_trimmed">加入下载队列（已裁剪）</string>
+    <string name="remove_from_queue">移出下载队列</string>
+    <string name="already_downloaded">已下载</string>
+    <string name="no_preview">无法预览 .%1$s 文件</string>
+    <string name="cant_play_clip">无法播放此片段（%1$d/%2$d）</string>
+    <string name="preview_unavailable">预览不可用</string>
+    <string name="pause_then_set_start">请先暂停，再设置起点</string>
+    <string name="pause_then_set_end">请先暂停，再设置终点</string>
+    <string name="set_start_first">请先设置起点 [</string>
+    <string name="end_after_start">终点必须晚于起点</string>
+    <string name="edit_with">编辑</string>
+    <string name="no_app_available_share">没有可用于分享此文件的应用</string>
+    <string name="no_app_available_edit">没有可用于编辑此文件的应用</string>
+
+    <!-- Content descriptions -->
+    <string name="cd_preview">预览</string>
+    <string name="cd_thumbnail">缩略图</string>
+    <string name="cd_rewind">快退</string>
+    <string name="cd_play_pause">播放/暂停</string>
+    <string name="cd_fast_forward">快进</string>
+    <string name="cd_scrub_preview">拖动预览</string>
+
+    <!-- Status pill -->
+    <string name="sd_card">SD 卡</string>
+    <string name="internal_storage">内置存储</string>
+    <string name="storage">存储空间</string>
+    <string name="storage_line_unknown">%1$s · —</string>
+    <string name="storage_line_total">%1$s · %2$.1f / %3$.1f GB</string>
+    <string name="storage_line_free">%1$s · 剩余 %2$.1f GB</string>
+    <string name="power_charging">充电中 %1$d mA</string>
+    <string name="power_drawing">耗电 %1$d mA</string>
+    <string name="power_idle">空闲</string>
+    <string name="power_docked_suffix"> · 已连接底座</string>
+</resources>
