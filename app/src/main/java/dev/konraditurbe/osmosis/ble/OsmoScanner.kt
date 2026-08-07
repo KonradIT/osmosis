@@ -13,7 +13,14 @@ import android.bluetooth.le.ScanSettings
  *  - DJI manufacturer id present -> parse model id, log raw payload (this is how we learn
  *    the Nano's model byte);
  *  - name contains "osmo"/"nano" -> treat as a camera hit;
- *  - any other named device -> logged dimly so an unexpectedly-named Nano is still visible.
+ *  - anything else -> counted, never named. See below.
+ *
+ * **Non-matching devices are never logged.** A scan with no hardware filter sees the whole room, and
+ * this log is a file we ask testers to send us: one real run came back listing a neighbour's TV, a
+ * named phone, smart bulbs and room names, each with its MAC. None of that is ours to collect, and
+ * the diagnostic it was there for — "is BLE actually working?" — is answered just as well by a
+ * count. If an unexpectedly-named camera ever needs finding, the count says the radio saw devices
+ * and the fix belongs in [Brand]/[CameraModel] name matching, not in a log of the tester's home.
  */
 @SuppressLint("MissingPermission")
 class OsmoScanner(
@@ -27,6 +34,8 @@ class OsmoScanner(
 
     private var scanning = false
     private val seen = HashSet<String>()
+    /** Distinct non-camera devices this scan — reported as a number, never as names. */
+    private var others = 0
 
     fun isScanning() = scanning
 
@@ -37,6 +46,7 @@ class OsmoScanner(
             return
         }
         seen.clear()
+        others = 0
         scanning = true
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -52,7 +62,7 @@ class OsmoScanner(
             adapter.bluetoothLeScanner?.stopScan(cb)
         } catch (_: Exception) {
         }
-        listener.onLog("Scan: stopped")
+        listener.onLog("Scan: stopped ($others other BLE device(s) seen, not logged)")
     }
 
     private val cb = object : ScanCallback() {
@@ -95,8 +105,10 @@ class OsmoScanner(
                     )
                 )
                 listener.onHit(dev, result.rssi, name, modelGuess, modelId)
-            } else if (name != null) {
-                listener.onLog("  (other) %s %s".format(dev.address, name))
+            } else {
+                // Counted, not named — see the class comment. Deliberately covers unnamed devices
+                // too, so the number is an honest "how much did the radio see".
+                others++
             }
         }
 
