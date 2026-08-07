@@ -28,35 +28,27 @@ class CameraSession(
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
     /**
-     * The status keys to subscribe to (`0x00/0x99`), in Mimo's own order.
+     * The status keys to subscribe to (`0x00/0x99`). Eight, deliberately — NOT Mimo's 54.
      *
-     * Lifted verbatim from a Mimo↔Nano capture (reference/captures/wifi/mimo_nano_delete.pcap): Mimo
-     * subscribes to all 54 of these and the camera then pushes state for them. We used to send just the
-     * eight below `cam_storage`, and on a Nano that was not enough to make it report per-store capacity
-     * at all — the camera pushed `0x02/0x80` (one aggregate store) and never `0x02/0xdc` (the per-store
-     * block), so a dock SD card was invisible in the pill. The same eight keys DO get 0x02/0xdc out of an
-     * Xtra, so this is a Nano-side strictness rather than a broken frame.
+     * Tried and reverted (2026-08-07). Mimo subscribes to 54 keys, so we matched it. The camera then
+     * pushes state for all of them, and that push traffic arrives as `4A 01` data chunks on the SAME
+     * stream the media manifest uses — so [manifestBytes] cannot filter it out and [decodeManifest] sees
+     * a 35-70 KB blob of parameter names with no `DCIM/` paths in it at all. On an Xtra Edge Pro that
+     * broke burst group-expand outright:
      *
-     * Sending all of them is also FASTER than what we did before: Mimo fires all 80 of its subscription
-     * frames back to back in 258 ms without waiting for a reply, where our loop paused ~300 ms after each
-     * of eight keys — 2.4 s of the connect spent idling.
+     *     group-expand(inline) CAM_20260802162559_0057_D -> 0 frames (of 0)
+     *     no CompositePack records - dumping manifest, falling back to flat scrape
+     *     ...the dumped "manifest" contains camcap_photo_time_limited_burst_param...
+     *
+     * and each failure fell through to a fresh session, so it looped. With eight keys the push volume is
+     * small enough not to swamp a manifest query. Raising this again needs [manifestBytes] to filter by
+     * DUML cmd (0x00/0x27) rather than by the `4A 01` payload prefix alone.
+     *
+     * The frame FORMAT fix stays — see [subscription]; that one was real and is unrelated.
      */
     private val paramSubs = listOf(
-        "camcap_base", "camcap_video_format", "camcap_fov", "camcap_iso",
-        "camcap_photo_storage_format", "camcap_color_mode", "camcap_wb", "camcap_photo_size",
-        "camcap_video_codec", "camcap_shutter", "camcap_photo_timer_interval", "camcap_exposure_mode",
-        "camcap_zoom", "camcap_antiflicker", "camcap_sharpness", "camcap_denoise",
-        "camcap_aperture", "camcap_shutter_max", "camcap_eis", "camcap_iso_auto_max",
-        "camcap_loop_video_duration", "camcap_hyperlapse_ratio", "camcap_slowmotion_ratio",
-        "camcap_timelapse_duration", "camcap_countdown", "camcap_photo_time_limited_burst_param",
-        "camcap_capture_aspect_type", "camcap_style_filter_mode",
-        "cam_storage", "cam_status", "cam_record_time", "cam_expo_param",
-        "shutter_param", "cam_photo_param_new", "cam_lapse_param", "cam_video_param_v2",
-        "cam_image_effect", "v_quality_enhance_status", "cam_fov", "cam_lens_state",
-        "cam_audio_status_v2", "audio_timecode_status", "temp_curve", "camcap_common",
-        "cam_imu_calib_info", "timecode_info", "cam_custom_mode_params", "cam_super_slowmotion_status",
-        "media_file_sync", "upgrade_status", "cam_capture_aspect_type", "gui_autorecord_param",
-        "cam_style_filter_status",
+        "camcap_mode_profile", "camcap_video_format", "camcap_fov", "camcap_iso",
+        "camcap_photo_storage_format", "camcap_color_mode", "cam_storage", "cam_status",
     )
 
     private val VIDEO_EXTS = setOf("MP4", "MOV", "OSV", "INSV")
@@ -207,6 +199,7 @@ class CameraSession(
      * window, so each call runs in a FRESH registered session (like the delete flow), then restores the
      * browse keep-alive. Blocking; call off the UI thread.
      */
+    @Synchronized
     override fun fetchNextPage(): List<CameraFile> {
         if (!moreAvailable) return emptyList()
 
@@ -270,6 +263,7 @@ class CameraSession(
      * session (the live keep-alive would drop the write), like [fetchNextPage]. Blocking; call off-UI.
      * Returns the frames in sub-index order, or just [lead] if it isn't a group / the query came back empty.
      */
+    @Synchronized
     override fun expandBurstGroup(lead: CameraFile): List<CameraFile> {
         val base = lead.groupKey ?: return listOf(lead)
         val ip = tx.peerIp ?: return listOf(lead)
@@ -444,10 +438,16 @@ class CameraSession(
     /**
      * How long a registered session keeps accepting inline command WRITES.
      *
-     * Measured on a Nano, one session: deletes at 45 s / 57 s / 66 s came back `status=0x0000` in ~1 s;
-     * at 74 s / 94 s / 124 s / 142 s the camera answered nothing at all. Reads were unaffected — a
-     * pagination query at 82 s in that same session returned normally. 55 s leaves margin under the
-     * observed 66–74 s cliff.
+     * Two cameras, and they do NOT agree — the Xtra's window is the shorter of the two:
+     *
+     *     Nano       ok at 45 s, 57 s, 66 s   ·  no reply at 74 s, 94 s, 124 s, 142 s
+     *     Edge Pro   no reply at 51.6 s
+     *
+     * Reads are unaffected on both — a pagination query at 82 s in the Nano session returned normally.
+     * 40 s sits under the Xtra's only observed failure with room to spare; 55 s did not, and a favourite
+     * at 51.6 s slipped through and missed. Erring low is cheap: the refresh costs one handshake and only
+     * happens when a write is actually requested on an old session, whereas erring high costs the full
+     * dead-wait-plus-verify path the mitigation exists to avoid.
      *
      * This is a MITIGATION, not the fix. Something in the sliding-window sequence handling
      * ([DumlTransport.routingHeader] / advance) drifts out of the camera's write-accept range and we do
@@ -457,7 +457,7 @@ class CameraSession(
      * path burned 10 s waiting for a reply that was never coming, then re-registered anyway and re-listed
      * the whole manifest to verify — ~28 s in total.
      */
-    private val WRITE_WINDOW_MS = 55_000L
+    private val WRITE_WINDOW_MS = 40_000L
 
     /**
      * Re-register before a write when the session is too old to accept one.
@@ -466,11 +466,22 @@ class CameraSession(
      * verify re-list. Briefly drops playback — closing the socket is what takes the camera out of it —
      * which is the same dip the old fallback caused, just sooner and without the wasted wait.
      */
+    // NOTE on @Synchronized, here and on fetchNextPage / expandBurstGroup / deleteFiles / setFavorite:
+    // every one of these can tear the keep-alive down, close the socket and re-register. Two of them at
+    // once is two threads calling openAndRegister on the same transport, and the result is exactly the
+    // wreckage this session's fixes were meant to end. Observed on an Xtra Edge Pro while scrolling and
+    // favouriting at the same time: a write-refresh registered at 09:49:13, pagination's own fallback
+    // opened a second handshake 4 s later, playback then failed all 3 confirm attempts because the socket
+    // went out from under it, the favourite got no reply, and the manifest came back as 41 KB of garbage
+    // with no CompositePack records. Serialising a favourite against a delete was not enough — pagination
+    // runs off the scroll handler and never touched cmdExec. The lock is the CameraSession instance and
+    // Java monitors are reentrant, so deleteFiles -> refreshSessionForWrite nests without deadlocking.
+    @Synchronized
     private fun refreshSessionForWrite(what: String): Boolean {
         if (!keepAliveOn || sessionAgeMs() <= WRITE_WINDOW_MS) return false
         val ip = tx.peerIp ?: return false
         log("datalink: session is ${sessionAgeMs() / 1000}s old — re-registering before $what " +
-            "(writes stop being accepted around 70s)")
+            "(writes stop being answered past ~${WRITE_WINDOW_MS / 1000}s)")
         keepAliveOn = false
         runCatching { Thread.sleep(600) }        // let the keep-alive loop finish its recv and exit
         tx.close()
@@ -616,6 +627,7 @@ class CameraSession(
      * ([openAndRegister]) — the one path the camera reliably accepts — issue the delete there, then
      * keep that session for browse. Call on a background thread (blocks ~9 s, the re-handshake cost).
      */
+    @Synchronized
     override fun deleteFiles(handles: List<Long>): Int? {
         if (handles.isEmpty()) return null
         refreshSessionForWrite("delete")
@@ -755,6 +767,7 @@ class CameraSession(
             write(0x00); write(if (on) 0x01 else 0x00); write(byteArrayOf(0x00, 0x00, 0x00))
         }.toByteArray()
 
+    @Synchronized
     override fun setFavorite(handle: Long, on: Boolean): Boolean {
         refreshSessionForWrite("favourite")
         val payload = favoritePayload(handle, favCounter++, on)
