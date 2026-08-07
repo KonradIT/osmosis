@@ -530,6 +530,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      *  can take the camera's single BLE link without contention. Safe to call when nothing is active. */
     private fun teardownOffload() {
         stopKeepalive()
+        dev.konraditurbe.osmosis.net.Highlights.provider = null
         dev.konraditurbe.osmosis.net.PreviewNav.clear()
         datalink?.close(); datalink = null
         apJoiner?.release(); apJoiner = null
@@ -911,6 +912,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         )
                     }
                     datalink = dl
+                    dev.konraditurbe.osmosis.net.Highlights.provider = { h -> dl.getHighlights(h) }
                     // Always: it holds the AP up, polls status for the pill, and holds playback (#12).
                     // Gating on files.isNotEmpty() left an empty camera (e.g. an Action 6 with no media)
                     // with a dead pill — status is only parsed in this loop.

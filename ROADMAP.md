@@ -318,7 +318,7 @@ resume. Diagnosis came from an app log + a decrypted **RTOS** log. Below, findin
 
 **Resume artifacts:** `reference/osmo-action/` (raw list blob + RTOS log).
 
-## 7. Retrieve highlight / moment markers — ⏸️ PARKED on branch `highlights` (2026-08-06)
+## 7. Retrieve highlight / moment markers — ✅ DONE, inline (2026-07-30)
 
 DJI "highlight" marks (side-button presses during recording) are **NOT stored in the MP4** — proven
 by an exhaustive teardown of an Action 4 + Xtra clip: not in chapters/tags, not in the `dvtm` protobuf
@@ -340,20 +340,11 @@ reply    0x02/0xff:  00 · 40 2f 00 01 · [len:u32-LE] · [handle:u32-LE] · [co
 - `handle` = the video's manifest delete-handle (§2). `startTimeMs` = mark start in ms (we show whole
   marks; a `duration` field wasn't distinguishable in the reply — the marks read as points).
 
-**Was shipped, now parked.** The video preview pulled marks off-UI via the `net/Highlights` bridge and
-showed a row of tappable **⚑ m:ss** chips that seek the player. Verified on the Xtra (`0023` → 4s/7s,
-`0022` → 1s/3s/5s).
-
-**Why it came out of main.** The inline query still missed often enough to matter, and a miss fell back
-to a fresh session — which tears the live session down and rebuilds it. On a Nano that cost ~8 s of churn
-per preview and re-entered playback mode, all to return `0 []`; two previews in quick succession made the
-rebuilds overlap and killed the playback entry outright (see #14). Chapter marks are decorative, the Nano
-never had any, and no camera here uses them enough to justify destabilising every browse session.
-
-The whole feature — `getHighlights`, `net/Highlights`, the ⚑ chips and their layout — lives on the
-`highlights` branch, cut from main at c684998. The protocol itself is documented above and in
-MEDIA_PROTOCOL.md §3a and is not lost. To revive it, the inline path needs to stop needing a
-fresh-session fallback at all.
+**Shipped:** the video preview pulls marks off-UI via the `net/Highlights` bridge and shows a row of
+tappable **⚑ m:ss** chips that seek the player. Verified on the Xtra (`0023` → 4s/7s, `0022` →
+1s/3s/5s) with the two-storage split staying intact afterward — the churn that forced this off before is
+gone (see #12). Originally the camera only answered `0x02/0xff` on a fresh session, whose teardown churn
+collapsed the Xtra's storage split; the #12 faithful session removed both problems.
 
 ## 8. Camera control + live settings (mode / resolution / fps, shutter) — 🔬 R-SDK read done via #9; media-path read + all control unimplemented
 
