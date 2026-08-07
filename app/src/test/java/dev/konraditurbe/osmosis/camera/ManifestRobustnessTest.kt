@@ -71,6 +71,61 @@ class ManifestRobustnessTest {
     }
 
     /**
+     * The per-store split agrees with the handle-bit rule it replaces, on every record we have.
+     *
+     * Two independent derivations of the same fact: the counter echoed in the response sub-header
+     * (which query returned this record) versus bit `0x40000000` of the record's own handle. Both
+     * fixtures were captured from the internal-store query — counter 2, 16154 and 3600 chunk bytes,
+     * no counter-1 chunks at all — so every record must come back stamped internal, and every handle
+     * must have the bit set. 58 records across two camera families.
+     *
+     * What this does *not* cover: a blob containing both stores, because neither fixture has one. The
+     * SD side is evidenced from the Mimo captures instead — on a Nano `0x00000001` returns the single
+     * dock-SD clip against 45 internal, on an Xtra 35 against 45.
+     */
+    @Test
+    fun `store split agrees with the handle bit it replaces`() {
+        for ((fixture, port) in listOf("nano_45.bin" to 9004, "xtra_13.bin" to 10004)) {
+            val files = session(port).collectStoresForTest(raw(fixture))
+            assertTrue("$fixture decoded nothing", files.isNotEmpty())
+            for (f in files) {
+                assertTrue("$fixture/${f.name}: store should be known, not guessed", f.storageKnown)
+                assertEquals("$fixture/${f.name}: captured from the internal query", 1, f.storage)
+                if (f.handle != 0L) assertTrue(
+                    "$fixture/${f.name}: handle 0x%08x should carry the internal bit".format(f.handle),
+                    f.handle >= 0x40000000L,
+                )
+            }
+        }
+    }
+
+    /**
+     * A blob the split can't attribute falls back to the merged parse, unstamped.
+     *
+     * Two ways that happens: a camera that doesn't echo the request counter, and one that answers
+     * both store queries with the same list. Either way the files must still decode — an empty grid
+     * would be far worse than a HEAD probe — and must be left for the old per-file resolution.
+     */
+    @Test
+    fun `an unattributable blob still decodes and stays unstamped`() {
+        val clean = raw("nano_45.bin")
+        // Rewrite every response sub-header counter to 7, a value neither query uses.
+        val odd = clean.copyOf()
+        var i = 0
+        while (i + 13 <= odd.size) {
+            if (odd[i] != 0x55.toByte()) { i++; continue }
+            val len = ((odd[i + 1].toInt() and 0xFF) or ((odd[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+            if (len < 13 || i + len > odd.size) { i++; continue }
+            val p = i + 11
+            if (len - 13 > 10 && odd[p] == 0x4A.toByte() && odd[p + 1] == 0x01.toByte()) odd[p + 4] = 7
+            i += len
+        }
+        val files = session(9004).collectStoresForTest(odd)
+        assertEquals("must still decode, not blank the grid", 45, files.size)
+        assertTrue("nothing to attribute, so nothing claimed", files.none { it.storageKnown })
+    }
+
+    /**
      * A short page ends the library, a full one does not.
      *
      * `xtra_13.bin` returned 13 of the 45 we asked for, so there is nothing older and the pull-up

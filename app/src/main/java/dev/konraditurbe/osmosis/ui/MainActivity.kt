@@ -1123,6 +1123,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun resolveStorage(f: CameraFile): Int {
         // Pocket 3 (single microSD) is pinned to 0 — no handle math, no probe. See StorageRules.
         if (currentModel.singleSdStorage) return 0
+        // The session already knows: this record came back from the store-specific query (cursor
+        // 0x00000001 = SD, 0x40000001 = internal), so the mount is a fact, not an inference. Nothing
+        // below this line runs for such a file — no handle bit, no HEAD.
+        if (f.storageKnown) return f.storage
         // Guess the mount from the record handle's store bit, then confirm with one HEAD (cached per bit).
         val bit = dev.konraditurbe.osmosis.core.StorageRules.mountGuess(false, f.handle, f.cmdHandle)
             ?: return probeStorage(f)

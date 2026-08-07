@@ -40,6 +40,12 @@ data class CameraFile(
     // Modification time, unix seconds — drones put it straight in the manifest record, where cameras
     // encode it in the filename ([timestamp]). 0 = unknown.
     val mtimeEpoch: Long = 0L,
+    // True when [storage] came from the store-specific query that returned this record, rather than
+    // from a handle-bit guess confirmed by a HEAD. Set by CameraSession.collectStores; when it is set
+    // there is nothing left to resolve and no probe to run. Deliberately last in the parameter list —
+    // several call sites still construct a CameraFile positionally, so inserting anywhere else
+    // silently rebinds their arguments.
+    val storageKnown: Boolean = false,
 ) {
     /** DCF-index-addressed media, fetched over `/v1` rather than by path over `/v2`. */
     val isIndexed: Boolean get() = fileIndex != 0L

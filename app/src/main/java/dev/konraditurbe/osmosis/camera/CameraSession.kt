@@ -111,6 +111,12 @@ class CameraSession(
      * obviously tied to what we actually asked for.
      */
     private val PAGE_SIZE = 45
+
+    // Request counters we put at byte 4 of each 0x00/0x26, echoed back at sub-header byte 4 of every
+    // 0x00/0x27 chunk answering it. Counter 1 always carries cursor 0x00000001 (SD), counter 2 either
+    // 0x40000001 (internal, initial load) or an internal page handle — both the internal store.
+    private val SD_QUERY_CTR = 1
+    private val INTERNAL_QUERY_CTR = 2
     // Frame limit for a burst/interval group-expand query (byte 14). Generous — covers long interval
     // timelapses; any spill into older files is filtered out by the group base name. See expandBurstGroup.
     private val GROUP_EXPAND_LIMIT = 120
@@ -180,7 +186,7 @@ class CameraSession(
             if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = count
         }
-        val files = decodeManifest(manifestBytes(blob.toByteArray()))
+        val files = collectStores(blob.toByteArray())
         // Seed lazy-pagination state: dedup set + cursor = oldest video handle on this page.
         seenPaths.clear(); seenPaths.addAll(files.map { it.path })
         pageCursor = files.map { it.handle }.filter { it >= VIDEO_HANDLE_BASE }.minOrNull() ?: 0L
@@ -219,7 +225,7 @@ class CameraSession(
         if (keepAliveOn) {
             val blob = runManifestQuery(
                 listCmd(1, 1L), hex("4a040e1001000000000001000000"), listCmd(2, pageCursor))
-            val page = blob?.let { decodeManifest(manifestBytes(it)) } ?: emptyList()
+            val page = blob?.let { collectStores(it) } ?: emptyList()
             if (page.isNotEmpty()) {
                 val step = stepPagination(pageCursor, page, seenPaths)
                 pageCursor = step.nextCursor; moreAvailable = step.moreAvailable
@@ -256,7 +262,7 @@ class CameraSession(
             if (batch >= 4 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = c
         }
-        val page = decodeManifest(manifestBytes(blob.toByteArray()))
+        val page = collectStores(blob.toByteArray())
         val step = stepPagination(pageCursor, page, seenPaths)
         pageCursor = step.nextCursor
         moreAvailable = step.moreAvailable
@@ -874,7 +880,7 @@ class CameraSession(
      * we decode it. Walks the whole blob (not per-datagram) so a frame split across two UDP packets is
      * still reassembled.
      */
-    private fun manifestBytes(raw: ByteArray): ByteArray {
+    private fun manifestBytes(raw: ByteArray, requestCtr: Int? = null): ByteArray {
         // The file list streams back as DUML data frames (cmd 0x00/0x27) whose payload is
         //   [10-byte sub-header][chunk]:  4A 01 .. .. <seq:u16le @6> 00 00, then the chunk bytes.
         // byte1==0x01 marks a data chunk; the control frames (4A 04.. start / 4A 03.. end) are 10
@@ -898,17 +904,58 @@ class CameraSession(
             val cmdSet = raw[i + 9].toInt() and 0xFF
             val cmdId = raw[i + 10].toInt() and 0xFF
             val plStart = i + 11; val plLen = len - 13
-            if (cmdSet == 0x00 && cmdId == 0x27 &&
+            // Sub-header byte 4 echoes the counter from the request that asked for this chunk (our
+            // requests put it at the same offset). That is what lets one blob be split back into the
+            // per-store answers it actually contains — see [collectStores].
+            val ctrOk = requestCtr == null || (raw[plStart + 4].toInt() and 0xFF) == requestCtr
+            if (cmdSet == 0x00 && cmdId == 0x27 && ctrOk &&
                 plLen > 10 && (raw[plStart].toInt() and 0xFF) == 0x4A && (raw[plStart + 1].toInt() and 0xFF) == 0x01
             ) out.write(raw, plStart + 10, plLen - 10) // drop the 10-byte sub-header, keep the chunk
             i += len
         }
         val bytes = out.toByteArray()
+        // A per-counter slice is a subset by construction, so the whole-blob comparison below would
+        // always reject it. Callers handle an empty slice themselves.
+        if (requestCtr != null) return bytes
         // Guard: only use the reassembled stream if it carries at least as many intact media-path
         // fields as the raw blob, so a model that streams the list some other way falls back to the
         // old whole-blob parse. (A path split across a frame boundary won't parse as a field, which is
         // exactly the straddling case reassembly fixes.)
         return if (countMediaPaths(bytes) >= countMediaPaths(raw) && bytes.isNotEmpty()) bytes else raw
+    }
+
+    /**
+     * Split one collected blob into its per-store answers, so each file's `/v2?storage=` mount is
+     * known from the query that returned it instead of guessed from its handle.
+     *
+     * Both queries are already sent — cursor `0x00000001` under counter 1 and `0x40000001` under
+     * counter 2 — and the **cursor's top bit is the store selector**, which the Mimo captures settle:
+     * on a Nano `0x00000001` returns the single dock-SD clip and `0x40000001` the 45 internal ones; on
+     * an Xtra, 35 SD against 45 internal. Those map straight onto DJI's own `FileLocation`
+     * (`SD_CARD=0`, `INTERNAL_STORAGE=1`), which is the same integer the HTTP mount wants. So the two
+     * halves only ever needed telling apart, and the response counter does that for free — no extra
+     * round trip, no HEAD probe, no handle-bit inference.
+     *
+     * Falls back to the merged parse (and the old per-file resolution) in the two cases where the
+     * split can't be trusted: a camera that doesn't echo the counter, and one that answers both
+     * queries with the same list — a single-store body, where there is nothing to attribute.
+     */
+    private fun collectStores(raw: ByteArray): List<CameraFile> {
+        val sd = decodeManifest(manifestBytes(raw, requestCtr = SD_QUERY_CTR))
+        val internal = decodeManifest(manifestBytes(raw, requestCtr = INTERNAL_QUERY_CTR))
+        val ambiguous = sd.isNotEmpty() && internal.isNotEmpty() &&
+            sd.map { it.path }.toSet() == internal.map { it.path }.toSet()
+        if ((sd.isEmpty() && internal.isEmpty()) || ambiguous) {
+            val merged = decodeManifest(manifestBytes(raw))
+            log("datalink: store split unavailable (${if (ambiguous) "both queries same list" else "no counter echo"})" +
+                " — ${merged.size} files, storage resolved per file")
+            return merged
+        }
+        log("datalink: per-store lists — SD ${sd.size}, internal ${internal.size} (no probing needed)")
+        // Internal first: it is the larger store on every camera we have, so on the rare overlap the
+        // kept copy is the one more likely to be right.
+        return (internal.map { it.copy(storage = 1, storageKnown = true) } +
+            sd.map { it.copy(storage = 0, storageKnown = true) }).distinctBy { it.path }
     }
 
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
@@ -921,6 +968,9 @@ class CameraSession(
     /** Test seam: run the full raw-blob → frame-reassemble → decode pipeline on a captured manifest. */
     internal fun decodeManifestBlobForTest(rawBlob: ByteArray): List<CameraFile> =
         decodeManifest(manifestBytes(rawBlob))
+
+    /** Test seam: the per-store split, so it can be checked against the handle-bit rule it replaces. */
+    internal fun collectStoresForTest(rawBlob: ByteArray): List<CameraFile> = collectStores(rawBlob)
 
     /** Test seam: decode an already-reassembled CompositePack manifest (post frame-reassembly). */
     internal fun decodeCompositeForTest(manifest: ByteArray): List<CameraFile> = decodeComposite(manifest)
