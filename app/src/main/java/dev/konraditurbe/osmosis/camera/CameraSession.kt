@@ -1,6 +1,8 @@
 package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.dcf.DcfRecords
+import dev.konraditurbe.osmosis.dcf.DcfTransferProbe
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.net.DumlSession
 import dev.konraditurbe.osmosis.net.DumlTransport
@@ -25,6 +27,16 @@ class CameraSession(
     log: (String) -> Unit,
     port: Int = 9004,
     tcpPoke: Boolean = true,
+    /**
+     * `--ez probe4a true` — run [probeTransferKinds] on an Action-1 manifest.
+     *
+     * **Default off, deliberately.** It ran unattended in the first probe build, and that build is the
+     * one where a tester's Action 1 started rebooting. The probe is not established as the cause — the
+     * same build also made the grid non-empty for the first time, so preview became reachable in the
+     * same step — but sending speculative transfer frames to firmware is exactly the kind of thing that
+     * could do it, and it is not a tester's job to run an experiment we can't yet exonerate.
+     */
+    private val probeTransfers: Boolean = false,
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
     /**
@@ -921,7 +933,115 @@ class CameraSession(
         }
     }
 
+    /**
+     * Is the Action 1's HTTP server **state-gated behind playback mode**?
+     *
+     * ROADMAP #6's leading hypothesis: `:80` is enabled by the `duss_proxy` plugin and `dji_media_server`
+     * handles `enter_playback` / "switch workmode", so the port should only listen once the camera is in
+     * playback. Every attempt so far has been made with the camera in whatever mode it woke up in, and
+     * `:80` refused — which is consistent with the hypothesis but never actually tested it.
+     *
+     * So: enter playback with the command we **already send to every other Osmo** for pagination
+     * (`0x02/0x0c` `01 01 00 01`), then try to open a socket to `:80` and say what happened. Unlike the
+     * `0x4a` transfer probe this is not a speculative frame — it is a documented command this camera
+     * family accepts, and a TCP connect that either completes or doesn't.
+     *
+     * Read-only, and the result is one line either way.
+     */
+    private fun probeHttpAfterPlayback(ip: String) {
+        log("datalink: entering playback mode, then testing :80 (ROADMAP #6 — is HTTP gated on playback?)")
+        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)
+        recvAll(600); sendAck()
+        for (attempt in 1..3) {
+            val t0 = System.currentTimeMillis()
+            val result = runCatching {
+                java.net.Socket().use { s ->
+                    s.connect(java.net.InetSocketAddress(ip, 80), 2000)
+                    "OPEN"
+                }
+            }.getOrElse { "${it.javaClass.simpleName}: ${it.message}" }
+            val ms = System.currentTimeMillis() - t0
+            log("datalink:   :80 attempt $attempt after playback → $result (${ms}ms)")
+            if (result == "OPEN") {
+                log("datalink: --- :80 IS OPEN once in playback mode — HTTP media is reachable, report this ---")
+                return
+            }
+            recvAll(700); sendAck()   // keep the session alive between tries; the port may open late
+        }
+        log("datalink: --- :80 still refused in playback mode. That weakens the playback-gating theory, " +
+            "though it does not rule out a further activation step ---")
+    }
+
+    /**
+     * ROADMAP #6's open question, asked directly: does this camera serve file bytes over the datalink?
+     *
+     * Runs once per session on an Action-1-style manifest, right after the list lands and while the
+     * session is provably alive. See [DcfTransferProbe] for the reasoning, what a silent result is
+     * worth (little), and why every probe releases. Read-only: query + release, nothing that writes.
+     */
+    private fun probeTransferKinds(fileIndex: Long) {
+        log("datalink: --- 0x4a transfer-kind probe on index 0x%08x (read-only) ---".format(fileIndex))
+        var answered = 0
+        var sawState = 0
+        for ((n, base) in DcfTransferProbe.BASES.withIndex()) {
+            val seq = 0x60 + n
+            sendDuml(0x00, 0x26, DcfTransferProbe.query(base, seq, fileIndex),
+                receiverType = 0x01, receiverId = 0)
+            val heard = LinkedHashMap<Int, Int>()
+            var sample: ByteArray? = null
+            for (round in 0 until 3) {
+                for (dg in recvAll(250)) {
+                    for ((set, cmd, pl) in scanFrames(dg)) {
+                        if (set != 0x00 || cmd != 0x27) continue
+                        DcfTransferProbe.familyMember(pl, base, seq)?.let { off ->
+                            heard.merge(off, 1, Int::plus)
+                            if (sample == null) sample = pl.copyOfRange(0, minOf(40, pl.size))
+                        }
+                    }
+                }
+                sendAck()
+            }
+            // Always release, answer or not — a leaked slot makes the camera go quiet later and looks
+            // exactly like "unsupported", which would send us away from a route that works.
+            sendDuml(0x00, 0x26, DcfTransferProbe.release(base, seq), receiverType = 0x01, receiverId = 0)
+            recvAll(150); sendAck()
+
+            if (heard.isEmpty()) {
+                log("datalink:   base 0x%02x — no reply".format(base))
+            } else {
+                answered++
+                if (DcfTransferProbe.STATE in heard.keys) sawState++
+                log("datalink:   base 0x%02x — ANSWERED: %s".format(base,
+                    heard.entries.joinToString(", ") { "${DcfTransferProbe.kindName(it.key)}×${it.value}" }))
+                sample?.let { log("datalink:     %s".format(it.joinToString("") { b -> "%02x".format(b) })) }
+            }
+        }
+        // Distinguish "the kind exists" from "a transfer started". An Action 1 answered base 0x20 with
+        // a `release` and nothing else: the family IS understood there — a foreign base would be
+        // ignored outright — but the camera closed the transfer instead of raising a state and sending.
+        // The earlier wording called any reply "transfer is LIVE", which overstated exactly this case.
+        log(when {
+            sawState > 0 -> "datalink: --- probe: $sawState kind(s) raised STATE — a transfer STARTED, report this ---"
+            answered > 0 -> "datalink: --- probe: $answered/${DcfTransferProbe.BASES.size} kind(s) replied but none " +
+                "raised STATE — the transfer family is understood there, the transfer was refused. " +
+                "Most likely our query payload is wrong, not that the route is closed ---"
+            else -> "datalink: --- probe: nothing answered. NOT a refutation — the query payload is a guess, " +
+                "and a wrong shape looks the same as an unsupported kind. See DcfTransferProbe ---"
+        })
+    }
+
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
+        // The older Osmo Action generation answers with a flat DCF record array instead of
+        // CompositePack — no paths, no filenames, files addressed by packed index. Its header is
+        // self-describing ([u32 count][u32 totalBytes] where totalBytes covers itself), so this can be
+        // tried first without risking a CompositePack manifest being misread as one.
+        val dcf = DcfRecords.decodeAction1(bytes)
+        if (dcf.isNotEmpty()) {
+            log("datalink: decoded ${dcf.size} DCF index records (older Osmo Action generation)")
+            tx.peerIp?.let { probeHttpAfterPlayback(it) }
+            if (probeTransfers) probeTransferKinds(dcf.first().fileIndex)
+            return dcf.map { it.toCameraFile() }
+        }
         val comp = decodeComposite(bytes)
         if (comp.isNotEmpty()) {
             log("datalink: decoded ${comp.size} CompositePack records " +

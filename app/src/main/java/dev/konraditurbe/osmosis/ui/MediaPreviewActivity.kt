@@ -45,7 +45,20 @@ import dev.konraditurbe.osmosis.net.ImageLoader
 class MediaPreviewActivity : AppCompatActivity() {
 
     private val main = Handler(Looper.getMainLooper())
-    private val http by lazy { HttpClient(ip) { Log.i("Osmosis", it) } }
+
+    /**
+     * Log to logcat **and** to the shared session file, the way [MainActivity] does.
+     *
+     * This used to be a bare `Log.i`, which meant "Save logs" captured the whole connect flow and then
+     * went silent the moment a preview opened — so a tester log covering a camera that misbehaved
+     * *during playback* contained no trace of playback at all, and every question about it was
+     * unanswerable from the only artefact we had.
+     */
+    private fun plog(s: String) {
+        Log.i("Osmosis", s)
+        dev.konraditurbe.osmosis.core.FileLog.write(s)
+    }
+    private val http by lazy { HttpClient(ip) { plog(it) } }
 
     private lateinit var videoView: VideoView
     private lateinit var photoView: ImageView
@@ -88,14 +101,14 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var selectedFrame = 0
     private lateinit var burstRow: LinearLayout
     private lateinit var burstStrip: View
-    private val imageLoader by lazy { ImageLoader(http) { Log.i("Osmosis", it) } }
+    private val imageLoader by lazy { ImageLoader(http) { plog(it) } }
 
     // Scrub preview: the frame under the thumb, floated above the seek bar during a drag.
     private lateinit var previewRoot: View
     private lateinit var scrubPreview: View
     private lateinit var scrubImage: ImageView
     private lateinit var scrubTime: TextView
-    private val scrubFrames by lazy { ScrubFrames { Log.i("Osmosis", it) } }
+    private val scrubFrames by lazy { ScrubFrames { plog(it) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -568,7 +581,24 @@ class MediaPreviewActivity : AppCompatActivity() {
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
         streamCandidates = file.previewCandidates()
         streamIdx = 0
-        startStream(streamCandidates[streamIdx])
+        // Check the port is even open before handing the URL to MediaPlayer. When it isn't — the older
+        // Osmo Action generation, whose HTTP server we can't yet get to listen — MediaPlayer sits on
+        // each candidate for a full 30 s before reporting `what=1 extra=-2147483648`, so a two-candidate
+        // list is a minute of spinner and then a generic failure. A refused connect is instant and
+        // says something specific.
+        Thread {
+            val open = runCatching {
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, 80), 2500); true }
+            }.getOrDefault(false)
+            main.post {
+                if (isFinishing) return@post
+                if (open) startStream(streamCandidates[streamIdx])
+                else {
+                    plog("preview: $ip:80 refused — not attempting to stream (camera is not serving HTTP)")
+                    showStatus("This camera isn't serving media over HTTP yet.\nPreview and download aren't available on it.")
+                }
+            }
+        }.start()
     }
 
     /**
@@ -578,11 +608,11 @@ class MediaPreviewActivity : AppCompatActivity() {
      */
     private fun startStream(path: String) {
         val uri = Uri.parse("http://$ip$path")
-        Log.i("Osmosis", "preview stream $uri")
+        plog("preview stream $uri")
         videoView.visibility = VideoView.VISIBLE
         videoView.setVideoURI(uri)
         videoView.setOnPreparedListener { mp ->
-            Log.i("Osmosis", "preview PREPARED ${mp.videoWidth}x${mp.videoHeight}")
+            plog("preview PREPARED ${mp.videoWidth}x${mp.videoHeight}")
             mp.isLooping = true
             spinner.visibility = ProgressBar.GONE
             videoView.start()
@@ -594,10 +624,10 @@ class MediaPreviewActivity : AppCompatActivity() {
             startScrubFrames(path)   // the candidate that actually opened, so previews match the stream
         }
         videoView.setOnErrorListener { _, what, extra ->
-            Log.i("Osmosis", "preview ERROR what=$what extra=$extra (candidate ${streamIdx + 1}/${streamCandidates.size}: $path)")
+            plog("preview ERROR what=$what extra=$extra (candidate ${streamIdx + 1}/${streamCandidates.size}: $path)")
             if (streamIdx < streamCandidates.size - 1) {
                 streamIdx++
-                Log.i("Osmosis", "preview falling back to ${streamCandidates[streamIdx]}")
+                plog("preview falling back to ${streamCandidates[streamIdx]}")
                 startStream(streamCandidates[streamIdx])
                 return@setOnErrorListener true
             }
