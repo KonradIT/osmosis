@@ -1,6 +1,171 @@
 <resources>
-    <string name="app_name">Osmosis</string>
+    <string name="app_name" translatable="false">Osmosis</string>
     <string name="action_share">Share the downloaded file</string>
     <string name="action_edit">Edit the downloaded file in another app</string>
     <string name="drone_power_button_desc">The drone\'s power button, on the rear of the aircraft</string>
+
+    <!-- Common buttons -->
+    <string name="cancel">Cancel</string>
+    <string name="save">Save</string>
+    <string name="delete">Delete</string>
+    <string name="share">Share</string>
+    <string name="no">No</string>
+    <string name="stop">Stop</string>
+
+    <!-- Camera selector -->
+    <string name="cameras">Cameras</string>
+    <string name="save_logs">Save logs</string>
+    <string name="rescan">Rescan</string>
+    <string name="scanning">Scanning…</string>
+    <string name="no_cameras_hint">No cameras yet — turn one on and tap Rescan.</string>
+    <string name="cameras_in_range">%1$d/%2$d saved in range · %3$d new</string>
+    <string name="new_tag">NEW</string>
+    <string name="no_bluetooth">This device has no Bluetooth.</string>
+    <string name="camera_not_in_range">%1$s isn\'t in range — turn it on, then Rescan</string>
+
+    <!-- Bluetooth off dialog -->
+    <string name="bluetooth_off_title">Bluetooth is off</string>
+    <string name="bluetooth_off_message">Osmosis finds and pairs with your camera over Bluetooth. Turn it on to scan for cameras.</string>
+    <string name="turn_on">Turn on</string>
+
+    <!-- Pairing approval dialog -->
+    <string name="pairing_approval_title">Confirm pairing on %1$s</string>
+    <string name="pairing_approval_message">Approve the pairing on the camera\'s screen.</string>
+    <string name="drone_approval_message">The drone\'s lights should be flashing / chasing around now — that means it got the request.\n\nPress and hold its power button for 2–3 seconds to confirm the connection.</string>
+
+    <!-- Camera long-press menu -->
+    <string name="reenter_wifi_password">Re-enter WiFi password</string>
+    <string name="forget_camera">Forget camera</string>
+
+    <!-- Wi-Fi password dialog -->
+    <string name="wifi_password_hint">Wi-Fi password</string>
+    <string name="wifi_password_for">Wi-Fi password for %1$s</string>
+    <string name="wifi_password_message">Shown on the camera screen under Connection settings. Saved per-camera.</string>
+
+    <!-- Wi-Fi off dialog -->
+    <string name="wifi_off_title">Wi-Fi is off</string>
+    <string name="wifi_off_message">Osmosis joins the camera\'s own Wi-Fi network to browse and download media. Turn Wi-Fi on, then continue.</string>
+    <string name="turn_on_wifi">Turn on Wi-Fi</string>
+
+    <!-- Wi-Fi join failed dialog -->
+    <string name="couldnt_join_wifi">Couldn\'t join %1$s</string>
+    <string name="wifi_join_failed_message">The camera Wi-Fi join failed. This usually means the saved password is out of date — e.g. after a camera factory reset. Re-enter it and try again?</string>
+    <string name="wifi_join_failed_wpa_message">This phone couldn\'t join %1$s over either WPA3 or WPA2 — likely a Wi-Fi compatibility limit on the phone, not the password. You can still re-enter the password to rule it out.</string>
+    <string name="reenter_password">Re-enter password</string>
+    <string name="back_to_cameras">Back to cameras</string>
+
+    <!-- GPS sync -->
+    <string name="the_camera">the camera</string>
+    <string name="gps_sync_active_banner">🛰️ GPS sync active with %1$s\nMedia browsing is disabled while GPS is streaming. Tap 🛰️ to stop.</string>
+    <string name="gps_sync_connecting_banner">🛰️ GPS sync connecting to %1$s… approve on the camera if it prompts. Tap 🛰️ to cancel.</string>
+    <string name="gps_sync_starting">GPS sync starting for %1$s — approve on the camera if it prompts</string>
+    <string name="gps_active_select_blocked">GPS sync is active — tap 🛰️ to stop before selecting a camera.</string>
+    <string name="gps_stop_before_browse">Stop GPS sync (tap 🛰️) before browsing media.</string>
+
+    <!-- GPS sync notification -->
+    <string name="notif_channel_gps">GPS sync</string>
+    <string name="gps_notif_title">GPS sync · %1$s</string>
+    <string name="gps_notif_text">Mode - %1$s - Rec - %2$s - gps: %3$s</string>
+    <string name="gps_notif_connecting">connecting…</string>
+    <string name="gps_notif_rec_yes">yes</string>
+    <string name="gps_notif_rec_no">no</string>
+    <string name="gps_notif_healthy">healthy</string>
+    <string name="gps_notif_not_healthy">not healthy</string>
+
+    <!-- Gallery -->
+    <string name="filter_photos">Photos</string>
+    <string name="filter_videos">Videos</string>
+    <string name="filter_faved">Faved</string>
+    <string name="select">Select</string>
+    <string name="download">Download</string>
+    <string name="download_count">Download (%1$d)</string>
+    <string name="connected_wifi">Connected · WiFi</string>
+    <string name="loading_burst">Loading burst…</string>
+    <string name="not_connected">Not connected</string>
+
+    <!-- Date headers -->
+    <string name="today">TODAY</string>
+    <string name="yesterday">YESTERDAY</string>
+    <string name="date_unknown">UNKNOWN DATE</string>
+    <string name="date_header">%1$s %2$s %3$s</string>
+    <string-array name="month_abbreviations">
+        <item>JAN</item>
+        <item>FEB</item>
+        <item>MAR</item>
+        <item>APR</item>
+        <item>MAY</item>
+        <item>JUN</item>
+        <item>JUL</item>
+        <item>AUG</item>
+        <item>SEP</item>
+        <item>OCT</item>
+        <item>NOV</item>
+        <item>DEC</item>
+    </string-array>
+
+    <!-- Favorite / delete -->
+    <string name="favorite">Favorite</string>
+    <string name="unfavorite">Unfavorite</string>
+    <string name="favoriting">Favoriting %1$s…</string>
+    <string name="unfavoriting">Unfavoriting %1$s…</string>
+    <string name="favorite_failed">Favorite failed</string>
+    <string name="favorite_no_handle">Can\'t favorite %1$s — no handle</string>
+    <string name="delete_from_camera_title">Delete from camera?</string>
+    <string name="delete_from_camera_message">%1$s\nhandle %2$s\n\nThis permanently deletes the file on the camera\'s card. It cannot be undone.</string>
+    <string name="deleting">Deleting %1$s…</string>
+    <string name="deleted">Deleted %1$s</string>
+    <string name="delete_no_response">Delete: no response</string>
+    <string name="delete_failed">Delete failed (0x%1$04x)</string>
+
+    <!-- Download progress -->
+    <string name="overall_progress_bytes">Overall: 0/%1$d — %2$s</string>
+    <string name="overall_progress_files">Overall: %1$d/%2$d files</string>
+    <string name="file_progress">%1$d%% — %2$s/%3$s</string>
+    <string name="download_done">Done: %1$d saved, %2$d skipped, %3$d failed</string>
+    <string name="fmt_bytes_gb">%.1f GB</string>
+    <string name="fmt_bytes_mb">%.0f MB</string>
+    <string name="fmt_bytes_kb">%.0f KB</string>
+    <string name="fmt_bytes_b">%1$d B</string>
+
+    <!-- Log sharing -->
+    <string name="share_logs_title">Share logs with Konrad?</string>
+    <string name="share_logs_chooser">Share logs with Konrad</string>
+    <string name="share_logs_failed">Couldn\'t share logs: %1$s</string>
+    <string name="logs_email_subject">Osmosis logs — %1$s</string>
+
+    <!-- Media preview -->
+    <string name="add_to_queue">Add to Queue</string>
+    <string name="add_to_queue_trimmed">Add to Queue (trimmed)</string>
+    <string name="remove_from_queue">Remove from Queue</string>
+    <string name="already_downloaded">Already downloaded</string>
+    <string name="no_preview">No preview for .%1$s</string>
+    <string name="cant_play_clip">Can\'t play this clip (%1$d/%2$d)</string>
+    <string name="preview_unavailable">Preview unavailable</string>
+    <string name="pause_then_set_start">Pause, then set the start point</string>
+    <string name="pause_then_set_end">Pause, then set the end point</string>
+    <string name="set_start_first">Set the start point [ first</string>
+    <string name="end_after_start">End must be after the start point</string>
+    <string name="edit_with">Edit with</string>
+    <string name="no_app_available_share">No app available to share this file</string>
+    <string name="no_app_available_edit">No app available to edit this file</string>
+
+    <!-- Content descriptions -->
+    <string name="cd_preview">preview</string>
+    <string name="cd_thumbnail">thumbnail</string>
+    <string name="cd_rewind">rewind</string>
+    <string name="cd_play_pause">play/pause</string>
+    <string name="cd_fast_forward">fast forward</string>
+    <string name="cd_scrub_preview">scrub preview</string>
+
+    <!-- Status pill -->
+    <string name="sd_card">SD card</string>
+    <string name="internal_storage">Internal</string>
+    <string name="storage">Storage</string>
+    <string name="storage_line_unknown">%1$s · —</string>
+    <string name="storage_line_total">%1$s · %2$.1f / %3$.1f GB</string>
+    <string name="storage_line_free">%1$s · %2$.1f GB free</string>
+    <string name="power_charging">charging %1$d mA</string>
+    <string name="power_drawing">drawing %1$d mA</string>
+    <string name="power_idle">idle</string>
+    <string name="power_docked_suffix"> · docked</string>
 </resources>

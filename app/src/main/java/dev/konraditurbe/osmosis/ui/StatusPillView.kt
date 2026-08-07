@@ -103,12 +103,12 @@ class StatusPillView @JvmOverloads constructor(
         val volts = "%.2f V".format(s.batteryMilliVolts / 1000f)
         val ma = s.batteryMilliAmps
         val flow = when {
-            ma > 0 -> "charging %d mA".format(ma)
-            ma < 0 -> "drawing %d mA".format(-ma)
-            else -> "idle"
+            ma > 0 -> context.getString(R.string.power_charging, ma)
+            ma < 0 -> context.getString(R.string.power_drawing, -ma)
+            else -> context.getString(R.string.power_idle)
         }
         // Attached but not (yet) taking charge — seen mid-transition and when the pack is full.
-        val dock = if (s.docked && !s.charging) " · docked" else ""
+        val dock = if (s.docked && !s.charging) context.getString(R.string.power_docked_suffix) else ""
         return "$volts · $flow$dock"
     }
 
@@ -119,9 +119,9 @@ class StatusPillView @JvmOverloads constructor(
      */
     private fun storeLines(s: CameraStatus): List<Triple<String, Int, Int>> {
         val lines = ArrayList<Triple<String, Int, Int>>()
-        if (s.sdInserted) lines.add(Triple("SD card", s.sdFreeMb, s.sdTotalMb))
-        if (s.internalTotalMb > 0) lines.add(Triple("Internal", s.internalFreeMb, s.internalTotalMb))
-        if (lines.isEmpty()) lines.add(Triple("Storage", s.storageFreeMb, s.storageTotalMb))
+        if (s.sdInserted) lines.add(Triple(context.getString(R.string.sd_card), s.sdFreeMb, s.sdTotalMb))
+        if (s.internalTotalMb > 0) lines.add(Triple(context.getString(R.string.internal_storage), s.internalFreeMb, s.internalTotalMb))
+        if (lines.isEmpty()) lines.add(Triple(context.getString(R.string.storage), s.storageFreeMb, s.storageTotalMb))
         return lines
     }
 
@@ -132,10 +132,10 @@ class StatusPillView @JvmOverloads constructor(
     }
 
     private fun storeLabel(store: String, freeMb: Int, totalMb: Int): String {
-        if (freeMb < 0) return "$store · —"
+        if (freeMb < 0) return context.getString(R.string.storage_line_unknown, store)
         val freeGb = freeMb / 1024f
-        return if (totalMb > 0) "$store · %.1f / %.1f GB".format(freeGb, totalMb / 1024f)
-        else "$store · %.1f GB free".format(freeGb)
+        return if (totalMb > 0) context.getString(R.string.storage_line_total, store, freeGb, totalMb / 1024f)
+        else context.getString(R.string.storage_line_free, store, freeGb)
     }
 
     private fun row(dotColor: Int, label: String) {

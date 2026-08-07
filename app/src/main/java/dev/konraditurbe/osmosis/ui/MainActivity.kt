@@ -377,16 +377,16 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      */
     private fun renderGpsLock(phase: GpsSyncState.Phase, name: String?) {
         val locked = phase != GpsSyncState.Phase.STOPPED
-        val who = name ?: "the camera"
+        val who = name ?: getString(R.string.the_camera)
         when (phase) {
             GpsSyncState.Phase.ACTIVE -> {
                 gpsBanner.setBackgroundColor(ContextCompat.getColor(this, R.color.osmo_danger))
-                gpsBanner.text = "🛰️ GPS sync active with $who\nMedia browsing is disabled while GPS is streaming. Tap 🛰️ to stop."
+                gpsBanner.text = getString(R.string.gps_sync_active_banner, who)
                 gpsBanner.visibility = View.VISIBLE
             }
             GpsSyncState.Phase.STARTING -> {
                 gpsBanner.setBackgroundColor(ContextCompat.getColor(this, R.color.osmo_amber))
-                gpsBanner.text = "🛰️ GPS sync connecting to $who… approve on the camera if it prompts. Tap 🛰️ to cancel."
+                gpsBanner.text = getString(R.string.gps_sync_connecting_banner, who)
                 gpsBanner.visibility = View.VISIBLE
             }
             GpsSyncState.Phase.STOPPED -> gpsBanner.visibility = View.GONE
@@ -419,7 +419,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** Scan ~4s for DJI/Xtra cameras (bonds aren't reliable for these), then feed the selector list. */
     private fun startCameraScan(select: Boolean, pick: String? = null) {
-        val adapter = btAdapter ?: run { logLine("No Bluetooth adapter."); toast("This device has no Bluetooth."); return }
+        val adapter = btAdapter ?: run { logLine("No Bluetooth adapter."); toast(getString(R.string.no_bluetooth)); return }
         if (!adapter.isEnabled) { promptEnableBluetooth(select, pick); return }
         val missing = requiredPerms().filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -431,7 +431,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         autoPick = pick
         discovered.clear()
         connecting = false
-        selectorHint.text = "Scanning…"
+        selectorHint.text = getString(R.string.scanning)
         rebuildCameraList()
         val s = OsmoScanner(adapter, this); scanner = s; s.start()
         main.postDelayed({
@@ -453,10 +453,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun promptEnableBluetooth(select: Boolean, pick: String?) {
         logLine("Bluetooth is OFF — prompting to enable.")
         AlertDialog.Builder(this)
-            .setTitle("Bluetooth is off")
-            .setMessage("Osmosis finds and pairs with your camera over Bluetooth. Turn it on to scan for cameras.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Turn on") { _, _ ->
+            .setTitle(R.string.bluetooth_off_title)
+            .setMessage(R.string.bluetooth_off_message)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.turn_on) { _, _ ->
                 pendingScan = select to pick
                 runCatching { enableBtLauncher.launch(android.content.Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)) }
                     .onFailure {
@@ -485,27 +485,27 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         camRows = savedRows + newRows
         cameraList.adapter = CameraListAdapter(camRows)
         if (scanner?.isScanning() != true) {
-            selectorHint.text = if (camRows.isEmpty()) "No cameras yet — turn one on and tap Rescan."
-            else "${savedRows.count { it.inRange }}/${savedRows.size} saved in range · ${newRows.size} new"
+            selectorHint.text = if (camRows.isEmpty()) getString(R.string.no_cameras_hint)
+            else getString(R.string.cameras_in_range, savedRows.count { it.inRange }, savedRows.size, newRows.size)
         }
     }
 
     private fun onCamRowClick(pos: Int) {
         // Locked out while a GPS link is bound — the satellite button is the only way forward.
         if (dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
-            toast("GPS sync is active — tap 🛰️ to stop before selecting a camera.")
+            toast(getString(R.string.gps_active_select_blocked))
             return
         }
         val r = camRows.getOrNull(pos) ?: return
         // 🛰️ GPS-sync mode: connect over R-SDK (BLE only, no WiFi) via the foreground service.
         if (btnGps.isChecked) {
             if (r.device != null || r.saved) startGpsMode(r.mac, r.name ?: r.mac)
-            else Toast.makeText(this, "${r.name ?: r.mac} isn't in range — turn it on, then Rescan", Toast.LENGTH_SHORT).show()
+            else Toast.makeText(this, getString(R.string.camera_not_in_range, r.name ?: r.mac), Toast.LENGTH_SHORT).show()
             return
         }
         val dev = r.device
         if (dev != null) onCameraChosen(dev)
-        else Toast.makeText(this, "${r.name ?: r.mac} isn't in range — turn it on, then Rescan", Toast.LENGTH_SHORT).show()
+        else Toast.makeText(this, getString(R.string.camera_not_in_range, r.name ?: r.mac), Toast.LENGTH_SHORT).show()
     }
 
     /** Start the R-SDK GPS-sync foreground service for [mac], requesting location/notification perms first. */
@@ -523,7 +523,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // owns it exclusively. Running both at once is what caused the field disconnections.
         teardownOffload()
         GpsService.start(this, mac, name)
-        Toast.makeText(this, "GPS sync starting for $name — approve on the camera if it prompts", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, getString(R.string.gps_sync_starting, name), Toast.LENGTH_LONG).show()
     }
 
     /** Drop any live WiFi-offload session (BLE GATT + datalink + WiFi request) so the R-SDK GPS flow
@@ -546,7 +546,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         if (!r.saved) return false
         AlertDialog.Builder(this)
             .setTitle("${r.model.name}  (${r.name ?: r.mac})")
-            .setItems(arrayOf("Re-enter WiFi password", "Forget camera")) { _, i ->
+            .setItems(arrayOf(getString(R.string.reenter_wifi_password), getString(R.string.forget_camera))) { _, i ->
                 when (i) {
                     0 -> promptPasswordFor(r.mac) { logLine("Password updated.") }
                     1 -> {
@@ -581,7 +581,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     private fun onCameraChosen(device: BluetoothDevice) {
         if (dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
-            toast("Stop GPS sync (tap 🛰️) before browsing media.")
+            toast(getString(R.string.gps_stop_before_browse))
             return
         }
         val cam = discovered[device.address]
@@ -628,19 +628,19 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun promptPasswordFor(addr: String, onSaved: () -> Unit) {
         val prefs = getSharedPreferences("osmosis", MODE_PRIVATE)
         val input = EditText(this).apply {
-            hint = "Wi-Fi password"; setText(savedPassFor(addr)); setSelection(text.length)
+            setHint(R.string.wifi_password_hint); setText(savedPassFor(addr)); setSelection(text.length)
         }
         AlertDialog.Builder(this)
-            .setTitle("Wi-Fi password for $offloadSsid")
-            .setMessage("Shown on the camera screen under Connection settings. Saved per-camera.")
+            .setTitle(getString(R.string.wifi_password_for, offloadSsid))
+            .setMessage(R.string.wifi_password_message)
             .setView(input)
-            .setPositiveButton("Save") { _, _ ->
+            .setPositiveButton(R.string.save) { _, _ ->
                 val p = input.text.toString().trim()
                 if (p.isEmpty()) { logLine("Password empty — not saved."); return@setPositiveButton }
                 prefs.edit().putString("pass_$addr", p).apply()
                 onSaved()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -699,16 +699,16 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         if (isFinishing || isDestroyed) return
         pairingAlert?.dismiss()
         val b = AlertDialog.Builder(this)
-            .setTitle("Confirm pairing on ${currentModel.name}")
+            .setTitle(getString(R.string.pairing_approval_title, currentModel.name))
             .setCancelable(false)
-            .setNegativeButton("Cancel") { _, _ -> gattClient?.disconnect() }
+            .setNegativeButton(R.string.cancel) { _, _ -> gattClient?.disconnect() }
         if (currentModel.isDrone) {
             val view = layoutInflater.inflate(R.layout.dialog_drone_approval, null)
-            view.findViewById<TextView>(R.id.approvalText).text = DronePairing.APPROVAL_MESSAGE
+            view.findViewById<TextView>(R.id.approvalText).text = getString(R.string.drone_approval_message)
             startPowerBlink(view.findViewById(R.id.powerBlink))
             b.setView(view)
         } else {
-            b.setMessage("Approve the pairing on the camera's screen.")
+            b.setMessage(R.string.pairing_approval_message)
         }
         pairingAlert = b.show()
     }
@@ -840,10 +840,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun promptEnableWifi() {
         logLine("Wi-Fi is OFF — prompting to enable before the camera join.")
         AlertDialog.Builder(this)
-            .setTitle("Wi-Fi is off")
-            .setMessage("Osmosis joins the camera's own Wi-Fi network to browse and download media. Turn Wi-Fi on, then continue.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Turn on Wi-Fi") { _, _ ->
+            .setTitle(R.string.wifi_off_title)
+            .setMessage(R.string.wifi_off_message)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.turn_on_wifi) { _, _ ->
                 val intent = if (Build.VERSION.SDK_INT >= 29)
                     android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI)
                 else android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)
@@ -954,24 +954,19 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // password is almost certainly fine — it's the phone not joining this AP's Wi-Fi security.
         // Don't send the user chasing a password that isn't the problem (as the 360 did before).
         val bothSecuritiesTried = currentModel.wpa3 && wpa3FallbackDone
-        val message = if (bothSecuritiesTried)
-            "This phone couldn't join $offloadSsid over either WPA3 or WPA2 — likely a Wi-Fi " +
-                "compatibility limit on the phone, not the password. You can still re-enter the " +
-                "password to rule it out."
-        else
-            "The camera Wi-Fi join failed. This usually means the saved password is out of date " +
-                "— e.g. after a camera factory reset. Re-enter it and try again?"
+        val message = if (bothSecuritiesTried) getString(R.string.wifi_join_failed_wpa_message, offloadSsid)
+        else getString(R.string.wifi_join_failed_message)
         AlertDialog.Builder(this)
-            .setTitle("Couldn't join $offloadSsid")
+            .setTitle(getString(R.string.couldnt_join_wifi, offloadSsid))
             .setMessage(message)
-            .setPositiveButton("Re-enter password") { _, _ ->
+            .setPositiveButton(R.string.reenter_password) { _, _ ->
                 promptPasswordFor(addr) {
                     offloadPass = savedPassFor(addr)
                     logLine("Retrying Wi-Fi join with the updated password…")
                     startWifiFlow(offloadSsid, offloadPass)
                 }
             }
-            .setNegativeButton("Back to cameras") { _, _ -> switchToSelector() }
+            .setNegativeButton(R.string.back_to_cameras) { _, _ -> switchToSelector() }
             .setCancelable(false)
             .show()
     }
@@ -983,7 +978,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         setConnectProgress(100) // first media in — connection complete
         currentAddress?.let { savedCameras.save(it, offloadSsid, currentModelId) }
         switchToGrid()
-        statusPill.render(pillName(), "Connected · WiFi", currentStatus, showPower = isNano())
+        statusPill.render(pillName(), getString(R.string.connected_wifi), currentStatus, showPower = isNano())
         applyOrientationChrome()   // hide the pill if we're (re)entering the grid in landscape
         if (!preserveFilters) resetGalleryChips()      // a fresh camera list starts unfiltered
         if (files.isEmpty()) {
@@ -997,7 +992,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         imageLoader = loader
         metaLoader = ml
         gridCols = gridColumns()
-        val ad = MediaGridAdapter(files, loader, ml, gridCols,
+        val ad = MediaGridAdapter(this, files, loader, ml, gridCols,
             onOpen = { openPreview(it) }, onLongPress = { onGridLongPress(it) })
         adapter = ad
         ad.onQueueChanged = { updateDownloadFab() }
@@ -1070,7 +1065,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun updateDownloadFab() {
         val n = adapter?.selectedCount() ?: 0
         findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabDownload)
-            ?.text = if (n > 0) "Download ($n)" else "Download"
+            ?.text = if (n > 0) getString(R.string.download_count, n) else getString(R.string.download)
     }
 
     private fun resetGalleryChips() {
@@ -1215,7 +1210,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun onCameraStatus(s: CameraStatus) {
         currentStatus = s
         if (gridGroup.visibility == View.VISIBLE)
-            statusPill.render(pillName(), "Connected · WiFi", s, showPower = isNano())
+            statusPill.render(pillName(), getString(R.string.connected_wifi), s, showPower = isNano())
     }
 
     /** The `0x0d/0x02` power/dock frame was only mapped on the Nano, so its pill line is Nano-only. */
@@ -1243,7 +1238,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun openPreview(f: CameraFile) {
         val dl = datalink
         if (f.isBurst && dl != null) {
-            toast("Loading burst…")
+            toast(getString(R.string.loading_burst))
             Thread {
                 val frames = runCatching { dl.expandBurstGroup(f) }.getOrElse { listOf(f) }
                 main.post { launchPreview(f, frames) }
@@ -1266,13 +1261,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * these on the grid (not the preview) means the preview never touches the datalink.
      */
     private fun onGridLongPress(f: CameraFile) {
-        val dl = datalink ?: run { logLine("Long-press: no live datalink session."); toast("Not connected"); return }
-        val fav = if (f.starred) "Unfavorite" else "Favorite"
-        val actions = if (f.deletable) arrayOf(fav, "Delete") else arrayOf(fav)
+        val dl = datalink ?: run { logLine("Long-press: no live datalink session."); toast(getString(R.string.not_connected)); return }
+        val fav = getString(if (f.starred) R.string.unfavorite else R.string.favorite)
+        val del = getString(R.string.delete)
+        val actions = if (f.deletable) arrayOf(fav, del) else arrayOf(fav)
         AlertDialog.Builder(this)
             .setTitle(f.name)
             .setItems(actions) { _, which ->
-                if (actions[which] == "Delete") confirmDelete(f, dl) else toggleFavorite(f, dl)
+                if (actions[which] == del) confirmDelete(f, dl) else toggleFavorite(f, dl)
             }
             .show()
     }
@@ -1284,14 +1280,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // Videos carry their own handle; photos don't, so fall back to the manifest-fitted one (a
         // hardcoded Nano formula is why photo favorites failed on the Xtra). See withCmdHandles.
         val favHandle = if (f.handle != 0L) f.handle else f.cmdHandle
-        if (favHandle == 0L) { toast("Can't favorite ${f.name} — no handle"); return }
+        if (favHandle == 0L) { toast(getString(R.string.favorite_no_handle, f.name)); return }
         // Optimistic badge only — the camera's manifest is the single source of truth for star state, so a
         // reload shows whatever the camera reports (the Xtra reports none; that's fine, we don't fake it).
         adapter?.setStarredByPath(f.path, on)
-        toast(if (on) "Favoriting ${f.name}…" else "Unfavoriting ${f.name}…")
+        toast(getString(if (on) R.string.favoriting else R.string.unfavoriting, f.name))
         cmdExec.execute {
             val ok = runCatching { dl.setFavorite(favHandle, on) }.getOrDefault(false)
-            if (!ok) main.post { adapter?.setStarredByPath(f.path, !on); toast("Favorite failed") }
+            if (!ok) main.post { adapter?.setStarredByPath(f.path, !on); toast(getString(R.string.favorite_failed)) }
         }
     }
 
@@ -1299,25 +1295,25 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun confirmDelete(f: CameraFile, dl: MediaSession) {
         val hx = "0x%08x".format(f.handle)
         AlertDialog.Builder(this)
-            .setTitle("Delete from camera?")
-            .setMessage("${f.name}\nhandle $hx\n\nThis permanently deletes the file on the camera's card. It cannot be undone.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Delete") { _, _ ->
+            .setTitle(R.string.delete_from_camera_title)
+            .setMessage(getString(R.string.delete_from_camera_message, f.name, hx))
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.delete) { _, _ ->
                 logLine("DELETE requested: ${f.name} (handle $hx)")
-                toast("Deleting ${f.name}…")
+                toast(getString(R.string.deleting, f.name))
                 cmdExec.execute {
                     val status = runCatching { dl.deleteFiles(listOf(f.handle)) }.getOrNull()
                     main.post {
                         when (status) {
                             0 -> {
                                 logLine("DELETE OK (status 0x0000): ${f.name}")
-                                toast("Deleted ${f.name}")
+                                toast(getString(R.string.deleted, f.name))
                                 removeFromGrid(f.path)
                             }
-                            null -> { logLine("DELETE: no response (timeout / no session)."); toast("Delete: no response") }
+                            null -> { logLine("DELETE: no response (timeout / no session)."); toast(getString(R.string.delete_no_response)) }
                             else -> {
                                 logLine("DELETE failed: status 0x%04x for %s".format(status, f.name))
-                                toast("Delete failed (0x%04x)".format(status))
+                                toast(getString(R.string.delete_failed, status))
                             }
                         }
                     }
@@ -1372,7 +1368,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 totalBytes = tb; count = totalFiles
                 main.post {
                     progressArea.visibility = View.VISIBLE
-                    overallText.text = "Overall: 0/$totalFiles — ${fmtBytes(tb)}"
+                    overallText.text = getString(R.string.overall_progress_bytes, totalFiles, fmtBytes(tb))
                     overallBar.progress = 0; fileBar.progress = 0
                 }
             }
@@ -1380,7 +1376,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             override fun onFileStart(index: Int, name: String, fileBytes: Long) {
                 fileTotal = fileBytes; lastF = -1
                 main.post {
-                    overallText.text = "Overall: ${index + 1}/$count files"
+                    overallText.text = getString(R.string.overall_progress_files, index + 1, count)
                     fileText.text = name; fileBar.progress = 0
                 }
             }
@@ -1393,7 +1389,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 main.post {
                     overallBar.progress = op
                     fileBar.progress = fp
-                    fileText.text = "$fp% — ${fmtBytes(fileDone)}/${fmtBytes(fileTotal)}"
+                    fileText.text = getString(R.string.file_progress, fp, fmtBytes(fileDone), fmtBytes(fileTotal))
                 }
             }
 
@@ -1404,7 +1400,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     adapter?.dequeuePaths(doneKeys.toList())
                     updateDownloadFab()
                     overallBar.progress = 100
-                    overallText.text = "Done: $saved saved, $skipped skipped, $failed failed"
+                    overallText.text = getString(R.string.download_done, saved, skipped, failed)
                     fileText.text = ""
                     main.postDelayed({ progressArea.visibility = View.INVISIBLE }, 3000)
                 }
@@ -1415,10 +1411,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     private fun fmtBytes(b: Long): String = when {
-        b >= 1_000_000_000 -> "%.1f GB".format(b / 1e9)
-        b >= 1_000_000 -> "%.0f MB".format(b / 1e6)
-        b >= 1_000 -> "%.0f KB".format(b / 1e3)
-        else -> "$b B"
+        b >= 1_000_000_000 -> getString(R.string.fmt_bytes_gb, b / 1e9)
+        b >= 1_000_000 -> getString(R.string.fmt_bytes_mb, b / 1e6)
+        b >= 1_000 -> getString(R.string.fmt_bytes_kb, b / 1e3)
+        else -> getString(R.string.fmt_bytes_b, b)
     }
 
     // ---- OsmoScanner.Listener ----------------------------------------------
@@ -1613,10 +1609,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** After the user turns "Save logs" off, ask whether to send the just-closed log to Konrad. */
     private fun offerToShareLogs(log: java.io.File) {
         androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Share logs with Konrad?")
+            .setTitle(R.string.share_logs_title)
             .setMessage(log.name)
-            .setPositiveButton("Share") { _, _ -> shareLogGzipped(log) }
-            .setNegativeButton("No", null)
+            .setPositiveButton(R.string.share) { _, _ -> shareLogGzipped(log) }
+            .setNegativeButton(R.string.no, null)
             .show()
     }
 
@@ -1633,13 +1629,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                 type = "application/gzip"
                 putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                putExtra(android.content.Intent.EXTRA_SUBJECT, "Osmosis logs — ${log.name}")
+                putExtra(android.content.Intent.EXTRA_SUBJECT, getString(R.string.logs_email_subject, log.name))
                 addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            startActivity(android.content.Intent.createChooser(send, "Share logs with Konrad"))
+            startActivity(android.content.Intent.createChooser(send, getString(R.string.share_logs_chooser)))
         }.onFailure {
             android.util.Log.e("Osmosis", "shareLogGzipped failed", it)
-            android.widget.Toast.makeText(this, "Couldn't share logs: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+            android.widget.Toast.makeText(this, getString(R.string.share_logs_failed, it.message), android.widget.Toast.LENGTH_LONG).show()
         }
     }
 

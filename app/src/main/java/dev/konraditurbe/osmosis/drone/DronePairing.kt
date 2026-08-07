@@ -10,7 +10,8 @@ import dev.konraditurbe.osmosis.duml.OsmoCommands
  * Four things, all of which were sitting in `MainActivity` next to the camera flow:
  *  - the token: a drone releases WiFi credentials only for **`DJI FLY`** (see `CameraModel`);
  *  - the identity: a persistent per-install UUID ([identifier]);
- *  - the approval: confirmed at the aircraft, by hand ([APPROVAL_MESSAGE]);
+ *  - the approval: confirmed at the aircraft, by hand (the prompt is `R.string.drone_approval_message`;
+ *    the hold is 2 s on most models, 3 s on the newest, so it gives a range);
  *  - a post-pair setup sequence DJI Fly runs before it will do anything useful ([sendBleSetup]).
  *
  * The GATT plumbing itself is identical, so it stays in `ble/`.
@@ -37,17 +38,6 @@ object DronePairing {
             }
 
     private const val KEY_IDENTITY = "drone_app_identity"
-
-    /**
-     * A drone is confirmed at the aircraft, not on a screen it doesn't have.
-     *
-     * The hold is 2 s on most models and 3 s on the newest (DJI's own QuickTransfer setup page splits
-     * it that way: Mini 3 Pro / Mini 4 Pro = two seconds, Mini 5 Pro = three), so the prompt gives the
-     * range rather than a duration that is wrong on half the line-up.
-     */
-    const val APPROVAL_MESSAGE =
-        "The drone's lights should be flashing / chasing around now — that means it got the request.\n\n" +
-            "Press and hold its power button for 2–3 seconds to confirm the connection."
 
     /**
      * The setup sequence DJI Fly runs **over BLE** right after pairing a Mavic, replayed verbatim from a
