@@ -25,7 +25,25 @@ class CameraSession(
     log: (String) -> Unit,
     port: Int = 9004,
     tcpPoke: Boolean = true,
+    /**
+     * Hex-dump the raw file-list blob even when it decodes cleanly.
+     *
+     * A failed decode has always dumped, which is useless for the case that actually matters: a new
+     * camera whose manifest decodes *fine* but whose bytes we have never seen. A Pocket 4 Pro listed
+     * 46 files perfectly and left us with no fixture to test against, because success is silent.
+     * Enabled automatically for unverified models and by hand from the UI — see [dumpBudgetBytes].
+     */
+    private val dumpManifests: Boolean = false,
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
+
+    /**
+     * Remaining hex-dump budget for this session, in bytes of manifest.
+     *
+     * A 45-record manifest is ~37 KB, which is ~1200 log lines — fine once as a diagnostic, ruinous
+     * on every page of an infinite scroll. Two pages' worth is enough to reconstruct a fixture and
+     * see how paging changes the blob; past that the log stops being something a tester can send.
+     */
+    private var dumpBudgetBytes = 80_000
 
     /**
      * The status keys to subscribe to (`0x00/0x99`). Eight, deliberately — NOT Mimo's 54.
@@ -928,10 +946,13 @@ class CameraSession(
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
             warnOnHandleCollisions(comp)
+            if (dumpManifests) dumpManifest(bytes)
             return comp
         }
         log("datalink: no CompositePack records — dumping manifest, falling back to flat scrape")
-        dumpManifest(bytes)
+        // Unbudgeted: a decode failure is rare, and it is the one case where the bytes are the
+        // whole report. Losing them to a budget would defeat the point.
+        dumpManifest(bytes, budgeted = false)
         return parseFlat(bytes)
     }
 
@@ -1197,8 +1218,20 @@ class CameraSession(
      * extension / handle fields sit. Contents are paths and filenames only; the passphrase and GPS
      * never travel on this datalink, so this is safe for the shared "Save logs" file.
      */
-    private fun dumpManifest(bytes: ByteArray) {
-        log("datalink: --- manifest hex (${bytes.size}B), report this to crack the layout ---")
+    private fun dumpManifest(bytes: ByteArray, budgeted: Boolean = true) {
+        if (budgeted) {
+            if (dumpBudgetBytes <= 0) return
+            if (bytes.size > dumpBudgetBytes) {
+                log("datalink: manifest hex suppressed (${bytes.size}B, budget ${dumpBudgetBytes}B left) " +
+                    "— earlier pages in this log already carry the layout")
+                dumpBudgetBytes = 0
+                return
+            }
+            dumpBudgetBytes -= bytes.size
+        }
+        // MANIFEST-HEX is the marker tools/hexdump_to_bin.py looks for; keep both fences in step
+        // with it if this format ever changes.
+        log("datalink: --- MANIFEST-HEX BEGIN (${bytes.size}B), report this to crack the layout ---")
         var off = 0
         while (off < bytes.size) {
             val end = minOf(off + 32, bytes.size)
@@ -1212,7 +1245,7 @@ class CameraSession(
             log("  %04x  %-65s %s".format(off, hex.toString(), asc.toString()))
             off = end
         }
-        log("datalink: --- end manifest hex ---")
+        log("datalink: --- MANIFEST-HEX END ---")
     }
 
     /** Fallback scrape: whole-blob regex, joining fields by filename base. No per-record structure or
