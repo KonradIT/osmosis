@@ -33,7 +33,13 @@ class RsdkController(private val context: Context, private val listener: Listene
     private var gatt: GattClient? = null
     private var seq = 0
     private var connected = false
-    private val approvalTimeout = Runnable { fail("Camera didn't approve the R-SDK connection (approve it on-screen, then retry)") }
+    private var loggedForeignFrame = false  // one line per session, not per notification
+    // Silence here has two very different causes — an unapproved popup, or a camera with no R-SDK at
+    // all (DJI lists the Nano as unsupported and doesn't list the Pocket 3) — and they look identical
+    // from our side, so the message names both rather than assuming the popup.
+    private val approvalTimeout = Runnable {
+        fail("No R-SDK reply in 40s — approve the popup on-screen and retry, or this model may not support R-SDK")
+    }
 
     // Stable per-install controller identity (the camera remembers us by these).
     private val prefs = context.getSharedPreferences("osmosis", Context.MODE_PRIVATE)
@@ -93,7 +99,21 @@ class RsdkController(private val context: Context, private val listener: Listene
     }
 
     override fun onNotification(sourceChar: UUID, raw: ByteArray, parsed: DjiMessage?) {
-        val f = RsdkProtocol.parse(raw) ?: return // ignore non-R-SDK / partial notifications
+        val f = RsdkProtocol.parse(raw)
+        if (f == null) {
+            // Not an R-SDK frame. Silence and "answered in a protocol we discard" are indistinguishable
+            // from the timeout alone, and a camera that rejects R-SDK is exactly the case that would
+            // answer here in media-path DUML (SOF 0x55, e0 = reject) instead. Say so, once.
+            if (!connected && !loggedForeignFrame) {
+                loggedForeignFrame = true
+                val sof = if (raw.isNotEmpty()) "0x%02X".format(raw[0].toInt() and 0xFF) else "empty"
+                listener.onLog(
+                    "R-SDK: camera answered with a non-R-SDK frame (SOF $sof, ${raw.size} B): " +
+                        raw.take(16).joinToString("") { "%02x".format(it) }
+                )
+            }
+            return
+        }
         when {
             f.cmdSet == RsdkProtocol.SET_GENERAL && f.cmdId == RsdkProtocol.ID_CONNECTION -> onConnectionFrame(f)
             f.cmdSet == RsdkProtocol.SET_CAMERA && f.cmdId == RsdkProtocol.ID_STATUS_PUSH ->
@@ -108,8 +128,14 @@ class RsdkController(private val context: Context, private val listener: Listene
             if (f.payload.size > 4 && f.payload[4].toInt() != 0) fail("Camera rejected the connection (ret_code=${f.payload[4].toInt()})")
             return
         }
-        // Command frame = connection_request_command_frame: verify_mode @26, verify_data @27 (u16 LE).
+        // Command frame = connection_request_command_frame: device_id @0 (u32 LE), verify_mode @26,
+        // verify_data @27 (u16 LE). On the camera's own request the device_id is *its* model — the
+        // only place R-SDK names the camera. Logged, not acted on: model resolution for the media
+        // path stays with the BLE manufacturer byte, which every camera has.
         if (f.payload.size < 29) return
+        RsdkProtocol.cameraDeviceId(f.payload)?.let {
+            listener.onLog("R-SDK: camera device_id=${RsdkProtocol.deviceIdLabel(it)}")
+        }
         val verifyMode = f.payload[26].toInt() and 0xFF
         val verifyData = (f.payload[27].toInt() and 0xFF) or ((f.payload[28].toInt() and 0xFF) shl 8)
         if (verifyMode != 2) { listener.onLog("R-SDK: unexpected verify_mode=$verifyMode"); return }

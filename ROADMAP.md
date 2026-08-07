@@ -431,8 +431,28 @@ read it with [`pyosmogps`](https://github.com/francescocaponio/pyosmogps)
 (`python -m pyosmogps extract -r discard -f 10 clip.mp4 out.gpx`), which doubles as the regression harness:
 a healthy feed shows many distinct positions and advancing timestamps.
 
+**Which cameras can do this at all** — DJI's R-SDK docs publish a `device_id` per camera, and that
+table *is* the support list: Action 4 `0xFF33`, Action 5 Pro `0xFF44`, Action 6 `0xFF55`, Osmo 360
+`0xFF66`. The **Nano is listed "not supported yet"** and the **Pocket 3 isn't listed at all**. The
+camera's own connection request carries its id at payload offset 0, so the session names the model it
+reached ([RsdkProtocol.DEVICE_IDS](app/src/main/java/dev/konraditurbe/osmosis/rsdk/RsdkProtocol.kt));
+that stays inside the R-SDK feature — media-path model resolution keeps using the BLE manufacturer
+byte, which every camera has.
+
+**The Xtra rebrand has no R-SDK — tested 2026-07-24, not assumed** (this line previously read "probably
+won't honor R-SDK"). Pointing the GPS feature at the Xtra Edge Pro: GATT connects, MTU 517, notify
+armed on `fff4`+`fff5`, connection request written — and **25 ms later the camera answers with a
+media-path DUML battery push** (`0x0D/0x02`, sender Battery `0x05`/id 0, valid CRC8, 4029 mV), never a
+single SOF `0xAA` frame in 40 s, and **nothing on the camera screen**. So it isn't an unapproved popup:
+the camera is awake and talking, just not in R-SDK. Since a genuine Action 5 Pro *is* `0xFF44` and has
+GPS sync hardware-verified, **the rebrand firmware strips R-SDK out** — a second concrete divergence
+alongside the 10004 datalink port (#2).
+
+That silence was only readable because the R-SDK path now logs a frame it can't parse instead of
+dropping it; an unparseable reply and no reply at all look identical from a timeout alone.
+
 **Remaining (optional):** a control UI on top of the live R-SDK session (record `0x1D/0x03`, mode
-`0x1D/0x04` — see #8). The Xtra rebrand probably won't honor R-SDK at all.
+`0x1D/0x04` — see #8), on a camera that actually speaks it.
 
 ## 10. Wake a sleeping camera over BLE — ✅ DONE, verified on the Nano (2026-07-23)
 
