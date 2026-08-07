@@ -60,6 +60,12 @@ data class CameraModel(
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
             0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
             0x0021 to CameraModel("Osmo Pocket 4"),
+            // Tester-confirmed 2026-08-07 on 9004 + poke: pair, creds, AP, datalink handshake, a
+            // 46-file manifest across two stores, playback held, and 43 MB of a clip transferred over
+            // /v2. The transfer then died with the AP, not with the protocol — so the datalink config
+            // this flag governs really is confirmed, even though no download has yet finished.
+            // It advertises the new format (product type 218 / HG224), not a classic model byte.
+            0x0022 to CameraModel("Osmo Pocket 4 Pro", verified = true),
             // Drones (see ROADMAP #14). The datalink is the SAME handshake as a camera but on
             // **udp/9003** with NO tcp-7001 poke — plus a `0x51/0x02` session-open the cameras don't
             // need, before which the aircraft answers nothing at all.
@@ -138,6 +144,9 @@ data class CameraModel(
             // Edge Pro. "edgepro" is tested before "edge" so the Pro isn't swallowed by the Action 4.
             return when {
                 n.contains("pocket3") || n.contains("muse") -> BY_ID.getValue(0x0020)
+                // "pocket4p" before "pocket4", same reason as "edgepro" before "edge": the Pro's
+                // BLE name is OsmoPocket4P-XXXX and would otherwise resolve as a plain Pocket 4.
+                n.contains("pocket4p") -> BY_ID.getValue(0x0022)
                 n.contains("pocket4") -> BY_ID.getValue(0x0021)
                 n.contains("360") -> BY_ID.getValue(0x0017)
                 n.contains("nano") || n.contains("atto") -> BY_ID.getValue(0x0019)
