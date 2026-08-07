@@ -26,6 +26,16 @@ class DroneSession(
     log: (String) -> Unit,
     port: Int = 9003,
     /**
+     * Test hook (`--ez nobeacon true`): ignore the serial the beacon offers, forcing it to come from
+     * the `0x51/0x08` challenge instead.
+     *
+     * Without this the challenge path is **unreachable on the one aircraft that can verify it**: a
+     * Mavic 3 beacons first, [latchDroneSerial] latches and returns early, and the challenge is never
+     * parsed. So a green Mavic run would prove only "not broken", saying nothing about whether the
+     * reactive path works — and that is exactly the path we're about to hand a tester as the fix.
+     */
+    private val ignoreBeaconSerial: Boolean = false,
+    /**
      * The serial + tag already read off the aircraft's BLE identity beacon, if one arrived while
      * pairing. Verified on a Mavic 3: the same `0x51/0x13` beacon lands as a GATT notification ~30 s
      * before the AP exists, so the serial can be in hand before the datalink even opens — no beacon
@@ -34,8 +44,8 @@ class DroneSession(
     knownSerial: Pair<ByteArray, Int>? = null,
 ) : DumlSession(log, port, tcpPoke = false, isDrone = true) {
 
-    /** The serial read off the aircraft's BLE identity beacon, if one arrived while pairing. */
-    private val bleSerial = knownSerial
+    /** The BLE-supplied serial, unless `nobeacon` is forcing it to come off the wire. */
+    private val bleSerial = knownSerial?.takeIf { !ignoreBeaconSerial }
 
     private var droneCursor = 0L
     private val droneSeen = HashSet<Long>()
@@ -346,6 +356,11 @@ class DroneSession(
     /** First `0x51/0x13` payload seen, kept verbatim for the log when the serial can't be read out. */
     @Volatile private var beacon13: ByteArray? = null
 
+    /** Everything the aircraft sends before we have a serial — see [DroneFrameCensus]. Collected on
+     *  every session (it stops the moment a serial latches, so a Mavic pays almost nothing) and only
+     *  printed when the open fails, which is the one time anybody needs it. */
+    private val census = DroneFrameCensus { parseDroneSerial(it) }
+
     /** The serial-shaped run in a beacon payload — see [DroneSerial] for why it's found by shape. */
     internal fun parseDroneSerial(payload: ByteArray): Pair<ByteArray, Int>? = DroneSerial.inPayload(payload)
 
@@ -364,6 +379,7 @@ class DroneSession(
             if (inner != 0x13 && inner != 0x08) continue
             val body = pl.copyOfRange(11, ln - 2)
             if (inner == 0x13 && beacon13 == null) beacon13 = body
+            if (inner == 0x13 && ignoreBeaconSerial) continue   // --ez nobeacon: force the challenge path
             parseDroneSerial(body)?.let { (serial, tag) ->
                 droneSerial = serial
                 serialTag = tag
@@ -379,9 +395,15 @@ class DroneSession(
         val inner = seen51.entries.joinToString(", ") { "0x%02x×%d".format(it.key, it.value) }
         log("datalink: 0x51 inner cmds seen: ${if (inner.isEmpty()) "NONE" else inner}")
         beacon13?.let {
-            log("datalink: a 0x51/0x13 beacon DID arrive but carried no readable serial — payload " +
+            // Don't claim it was unreadable when we're the ones who ignored it — that reads as a
+            // parser bug and sends whoever's debugging this straight down the wrong hole.
+            val why = if (ignoreBeaconSerial) "was ignored on purpose (nobeacon)"
+                      else "carried no readable serial"
+            log("datalink: a 0x51/0x13 beacon DID arrive but $why — payload " +
                 it.copyOfRange(0, minOf(64, it.size)).joinToString("") { b -> "%02x".format(b) })
         }
+        // "NONE" only says this airframe isn't a Mavic. The census says what it IS doing.
+        census.report().forEach { log("datalink: $it") }
     }
 
     /** One `0x51`-channel frame: inner DUML (target 0xe9ee) + the shared 22-byte tail. */
@@ -442,8 +464,9 @@ class DroneSession(
             log("datalink: drone serial ${String(s, Charsets.US_ASCII)} (${s.size} chars, " +
                 "tag 0x%02x) — already known from BLE, no datalink beacon needed".format(tag))
         }
-        val waitUntil = System.currentTimeMillis() + 3000
+        val waitUntil = System.currentTimeMillis() + if (ignoreBeaconSerial) 0 else 3000
         while (droneSerial == null && System.currentTimeMillis() < waitUntil) dronePump(200)
+        if (ignoreBeaconSerial) log("datalink: nobeacon — skipping the beacon fast path on purpose")
 
         // Send the open request whether or not we know a serial. It carries none — and the drone's
         // reply to it is the step-2 challenge, which *names the serial*. Bailing here was circular:
@@ -657,8 +680,13 @@ class DroneSession(
                 val pktType = if (dg.size > 6) dg[6].toInt() and 0xFF else -1
                 if (dg.size > 8 && pktType == 0x01) parseDroneStatus(dg)
                 // The beacon has only ever been *seen* on pktType 0x01 — but "only ever" is one
-                // airframe, so look on every packet type until a serial latches.
-                if (dg.size > 8 && droneSerial == null) latchDroneSerial(dg)
+                // airframe. Until we have a serial, look on every packet type and census what does
+                // arrive; a model that beacons elsewhere was previously invisible, indistinguishable
+                // in the log from one that never beacons at all.
+                if (dg.size > 8 && droneSerial == null) {
+                    latchDroneSerial(dg)
+                    census.record(pktType, dg)
+                }
                 if (sink == null) continue
                 if (!manifestStream) sink.write(dg)
                 else if (dg.size > 20 && (dg[6].toInt() and 0xFF) == 0x03) sink.write(dg, 20, dg.size - 20)
