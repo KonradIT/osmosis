@@ -102,6 +102,15 @@ class CameraSession(
     // record handles live at/above VIDEO_HANDLE_BASE (0x4010xxxx on the Nano); the paging cursor only
     // steps through those, so stray low-namespace handles don't derail it.
     private val VIDEO_HANDLE_BASE = 0x40000000L
+
+    /**
+     * Records requested per file-list query — the `2d` at byte 14 of every `0x00/0x26` we build.
+     *
+     * Not a number we picked: Mimo's own `BaseFetchData.mCount` is 45, and byte 14 is `0x2d` in all 36
+     * list requests across four Mimo captures. Named here so the short-page end-of-list test below is
+     * obviously tied to what we actually asked for.
+     */
+    private val PAGE_SIZE = 45
     // Frame limit for a burst/interval group-expand query (byte 14). Generous — covers long interval
     // timelapses; any spill into older files is filtered out by the group base name. See expandBurstGroup.
     private val GROUP_EXPAND_LIMIT = 120
@@ -175,7 +184,7 @@ class CameraSession(
         // Seed lazy-pagination state: dedup set + cursor = oldest video handle on this page.
         seenPaths.clear(); seenPaths.addAll(files.map { it.path })
         pageCursor = files.map { it.handle }.filter { it >= VIDEO_HANDLE_BASE }.minOrNull() ?: 0L
-        moreAvailable = pageCursor > 0L
+        moreAvailable = hasOlderPage(files.size, pageCursor)
         log("datalink: parsed ${files.size} media files (newest page; more=$moreAvailable)")
         onFetchProgress?.invoke(100)
         return files
@@ -325,6 +334,23 @@ class CameraSession(
         log("datalink: group-expand $base → ${group.size} frames (of ${all.size} returned)")
         return group
     }
+
+    /**
+     * Is there an older page to fetch? Needs a usable cursor **and** a page that came back full.
+     *
+     * A short page is the end of the library: we asked for [PAGE_SIZE] records and the camera gave us
+     * fewer, so it had no more. This used to be the cursor test alone, which is true for any camera
+     * holding at least one video — so the pull-up spinner armed on libraries that were already
+     * complete, and a pull spent a whole page fetch to append nothing.
+     *
+     * Mimo answers the same question from a per-record `isPageLastFile` flag it gets in the manifest.
+     * That flag is not at any fixed offset in our decoded records — searched every marker-relative
+     * position against a known-final page (`xtra_13.bin`, 13 records) versus a known-continuing one
+     * (`nano_45.bin`, a full 45 of 195) and nothing separates them — so the page-size test stands in
+     * for it. Same conclusion, one less unknown, and it needs no new byte to be right.
+     */
+    internal fun hasOlderPage(pageSize: Int, cursor: Long): Boolean =
+        cursor > 0L && pageSize >= PAGE_SIZE
 
     internal data class PageStep(val fresh: List<CameraFile>, val nextCursor: Long, val moreAvailable: Boolean)
 
@@ -863,9 +889,18 @@ class CameraSession(
             if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
             val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
             if (len < 13 || i + len > raw.size) { i++; continue }
+            // Match on the frame's DUML command, not on its payload prefix. The 11-byte header is
+            // [55][len:2][crc8][target:2][id:2][type][set][cmd], so the command is right here — there
+            // was never a reason to guess from the body. `4A 01` alone also matches subscription state,
+            // which is why raising paramSubs to Mimo's 54 keys drowned the media stream in parameter
+            // names (see paramSubs). Verified against the captures: in nano_45.bin and xtra_13.bin
+            // every `4A 01` chunk arrives on 0x00/0x27 and nothing else does.
+            val cmdSet = raw[i + 9].toInt() and 0xFF
+            val cmdId = raw[i + 10].toInt() and 0xFF
             val plStart = i + 11; val plLen = len - 13
-            if (plLen > 10 && (raw[plStart].toInt() and 0xFF) == 0x4A && (raw[plStart + 1].toInt() and 0xFF) == 0x01)
-                out.write(raw, plStart + 10, plLen - 10) // drop the 10-byte sub-header, keep the chunk
+            if (cmdSet == 0x00 && cmdId == 0x27 &&
+                plLen > 10 && (raw[plStart].toInt() and 0xFF) == 0x4A && (raw[plStart + 1].toInt() and 0xFF) == 0x01
+            ) out.write(raw, plStart + 10, plLen - 10) // drop the 10-byte sub-header, keep the chunk
             i += len
         }
         val bytes = out.toByteArray()
@@ -1167,14 +1202,27 @@ class CameraSession(
      * are inconsistent downstream copies; this map is built empirically from clips cross-referenced
      * against the SD card. Unknown → null → the app falls back to the MP4 `moov`.
      */
-    /** ⭐ favourite flag: the byte 9 past the record's `[ff|fe] 19 06` marker is 1 when starred, 0
-     *  otherwise. Unified across videos (`03 ff 19 06`) and photos (`fe 19 06`). */
+    /**
+     * ⭐ favourite flag: the byte 9 past the record's `[ff|fe] 19 06` marker, 1 when starred.
+     *
+     * **Only trusted when it actually reads as a boolean.** That offset is a real flag on the Nano —
+     * `nano_delete.bin`, captured while favourites were being tested, splits 19 zeros to 26 ones — but
+     * on an Xtra the same offset lands on a *length* byte: its records run `1a <len> 00 00 00 01
+     * DCIM/…`, so the byte reads 44 or 48, the length of the path that follows. Those records simply
+     * carry a different field order, and reading a length as a flag is how a "starred" badge could
+     * appear on every file at once. Anything other than 0 or 1 means the layout is not the one this
+     * offset was derived from, so say "not starred" rather than guess.
+     *
+     * ⚠️ Consequence: favourites still do not survive a re-list on the Xtra. Reading them there needs
+     * that record layout worked out — a manifest dumped with known favourites will show it, which
+     * `dumpManifest` now makes a one-run job.
+     */
     private fun starFlag(bytes: ByteArray, lo: Int, hi: Int): Boolean {
         var q = lo
         while (q < hi - 9) {
             if ((bytes[q] == 0xFF.toByte() || bytes[q] == 0xFE.toByte()) &&
                 bytes[q + 1] == 0x19.toByte() && bytes[q + 2] == 0x06.toByte()
-            ) return (bytes[q + 9].toInt() and 0xFF) == 1
+            ) return (bytes[q + 9].toInt() and 0xFF) == 1   // strictly 1; 44/48 on an Xtra is a length
             q++
         }
         return false
