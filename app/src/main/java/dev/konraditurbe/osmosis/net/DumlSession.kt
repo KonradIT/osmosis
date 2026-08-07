@@ -56,6 +56,7 @@ abstract class DumlSession(
     protected var status = CameraStatus()
     private var lastSig = ""          // last display signature fired to onStatus (throttles UI updates)
     private var lastBattSig = ""      // dock-relevant bytes of 0x0d/02; log only on change (#5)
+    private var lastStorageSig = ""   // the 0x02/0xdc body; log only when the numbers move
 
     /**
      * The handshake (SYN) payload: our proposed **base sequence** followed by the window/MTU parameters
@@ -165,6 +166,7 @@ abstract class DumlSession(
         status = CameraStatus()
         lastSig = ""
         lastBattSig = ""
+        lastStorageSig = ""
     }
 
     /** Fire [onStatus] if anything the UI displays has actually changed. */
@@ -209,6 +211,17 @@ abstract class DumlSession(
                 val inTotal = if (hasInternal) u32le(p, 24).toInt() else 0
                 val inFree = if (hasInternal) u32le(p, 28).toInt() else 0
                 fun sane(v: Int) = v in 0..50_000_000
+                // The pill's whole input, logged once per change. Without this a one-line pill is
+                // indistinguishable from three different faults: the camera never sent the frame, it
+                // sent a single-store body, or it sent two stores we mis-parsed. A Nano browse showed
+                // exactly that ambiguity — one line on screen and nothing in the log to explain it.
+                val dcSig = "${p.size}|$sdTotal|$sdFree|$inTotal|$inFree"
+                if (dcSig != lastStorageSig) {
+                    lastStorageSig = dcSig
+                    log("storage: 0x02/0xdc ${p.size}B stores=${p[2].toInt() and 0xFF} " +
+                        "first=$sdTotal/$sdFree MB" +
+                        (if (hasInternal) " built-in=$inTotal/$inFree MB" else " (no built-in block)"))
+                }
                 status = status.copy(
                     sdTotalMb = if (sane(sdTotal)) sdTotal else status.sdTotalMb,
                     sdFreeMb = if (sane(sdFree)) sdFree else status.sdFreeMb,

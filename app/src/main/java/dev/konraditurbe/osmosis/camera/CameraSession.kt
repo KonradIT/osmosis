@@ -1217,6 +1217,12 @@ class CameraSession(
      * never travel on this datalink, so this is safe for the shared "Save logs" file.
      */
     private fun dumpManifest(bytes: ByteArray, budgeted: Boolean = true) {
+        // File-only. The dump exists to turn a *saved* log into a fixture; sending it to logcat as
+        // well actively destroys the thing it was meant to help with. Measured on a Nano browse: the
+        // 256 KiB ring buffer ended up 61% hex with only 39 of our lines left in it, and the whole
+        // session — connect, storage pushes, the manifest summary — had already been evicted by the
+        // time anyone went looking. Logging off means no dump, which is also the right default.
+        if (!dev.konraditurbe.osmosis.core.FileLog.isOn()) return
         if (budgeted) {
             if (dumpBudgetBytes <= 0) return
             if (bytes.size > dumpBudgetBytes) {
