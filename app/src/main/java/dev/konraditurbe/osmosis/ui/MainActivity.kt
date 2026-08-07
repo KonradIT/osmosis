@@ -100,6 +100,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private var apJoiner: ApJoiner? = null
     private var connecting = false
 
+    // ---- download / AP-loss state (all main-thread confined) ----------------
+    // One download run at a time. Without this every tap on Download spawned another thread over the
+    // same jobs: otherwise we got N MediaDownloaders opening the
+    // SAME MediaStore URI "rw", each seeking to the shared statSize — three writers racing on one
+    // file and three transfers competing for the camera's AP, for one file's worth of progress.
+    private var downloadRunning = false
+    private var wifiUp = false
+    /** True once the first join has kicked off [startDatalink]; a later join is a rejoin, not a start. */
+    private var datalinkStarted = false
+    private var wifiRejoins = 0
+    private var resumeDownloadOnRejoin = false
+
     private val http = HttpClient("192.168.2.1") { s -> logLine(s) }
     private var imageLoader: ImageLoader? = null
     private var metaLoader: MetaLoader? = null
@@ -535,6 +547,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         apJoiner?.release(); apJoiner = null
         gattClient?.disconnect(); gattClient?.close(); gattClient = null
         offloadMode = false; offloadTriggered = false; connecting = false
+        // A stale datalinkStarted would make the next session's first join look like a rejoin and skip
+        // startDatalink entirely, leaving the camera connected with no grid.
+        wifiUp = false; datalinkStarted = false; wifiRejoins = 0; resumeDownloadOnRejoin = false
         // close() above cancels the gatt callback, so onDisconnected won't fire to reset these — do it
         // here, or the next camera's pairing/REQ replies get mis-deduped against the last camera's state.
         lastPairStatus = -99; credsRequested = false; reqSeen.clear()
@@ -858,15 +873,50 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         apJoiner?.release() // release any prior request so only one WiFi specifier is pending
         setConnectProgress(35) // requesting the WiFi join
         logLine("WiFi flow: ssid=\"$ssid\" passLen=${pass.length}")
+        datalinkStarted = false; wifiRejoins = 0; resumeDownloadOnRejoin = false
         val joiner = ApJoiner(this, object : ApJoiner.Listener {
             override fun onLog(s: String) = logLine(s)
             override fun onFailed(reason: String) { logLine(reason); main.post { onWifiJoinFailed() } }
+            // Both callbacks arrive on a ConnectivityManager thread; hop to main so the download /
+            // AP-loss flags stay single-threaded and the check-and-set in onDownloadClicked is safe.
             override fun onNetwork(network: Network, link: LinkProperties?) {
                 val ip4 = link?.linkAddresses?.map { it.address }
                     ?.firstOrNull { it is java.net.Inet4Address }
-                setConnectProgress(58) // WiFi joined + bound
-                logLine("WiFi link: ip=${ip4?.hostAddress}")
-                startDatalink()
+                main.post {
+                    wifiUp = true
+                    // A second onAvailable is a rejoin. Do NOT re-run startDatalink: it would re-fetch
+                    // the whole manifest and rebuild the grid, throwing away the user's queue and
+                    // scroll position mid-transfer. Downloads only need HTTP, which the rebind in
+                    // onAvailable has just restored.
+                    if (datalinkStarted) {
+                        logLine("WiFi: rejoined (ip=${ip4?.hostAddress}) — grid kept; " +
+                            "list/delete/paging may need a fresh Offload")
+                        maybeResumeAfterRejoin()
+                        return@post
+                    }
+                    datalinkStarted = true
+                    setConnectProgress(58) // WiFi joined + bound
+                    logLine("WiFi link: ip=${ip4?.hostAddress}")
+                    startDatalink()
+                }
+            }
+            override fun onLost() {
+                main.post {
+                    wifiUp = false
+                    if (!offloadMode) return@post
+                    // Remember to pick the transfer back up: the in-flight run is about to fail out
+                    // with ENONET and its own resume loop can't help — with no network it moves zero
+                    // bytes, trips the "no progress" guard, and pauses on the first attempt.
+                    if (downloadRunning) resumeDownloadOnRejoin = true
+                    if (wifiRejoins >= MAX_WIFI_REJOINS) {
+                        logLine("WiFi: AP gone and $MAX_WIFI_REJOINS rejoin attempts used — " +
+                            "giving up, tap Offload to restart")
+                        return@post
+                    }
+                    wifiRejoins++
+                    logLine("WiFi: AP gone — rejoining (attempt $wifiRejoins/$MAX_WIFI_REJOINS)")
+                    if (apJoiner?.rejoin() != true) logLine("WiFi: nothing to rejoin")
+                }
             }
         })
         apJoiner = joiner
@@ -1070,7 +1120,16 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun updateDownloadFab() {
         val n = adapter?.selectedCount() ?: 0
         findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabDownload)
-            ?.text = if (n > 0) "Download ($n)" else "Download"
+            ?.apply {
+                text = when {
+                    downloadRunning -> "Downloading…"
+                    n > 0 -> "Download ($n)"
+                    else -> "Download"
+                }
+                // Belt to the guard's braces: the guard is what actually prevents a second run, this
+                // just stops the button looking tappable while one is in flight.
+                isEnabled = !downloadRunning
+            }
     }
 
     private fun resetGalleryChips() {
@@ -1344,7 +1403,28 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun toast(s: String) =
         main.post { android.widget.Toast.makeText(this, s, android.widget.Toast.LENGTH_SHORT).show() }
 
+    /**
+     * Pick a transfer back up after the AP dropped and we got it back.
+     *
+     * Only fires when the previous run has actually finished — the loss and the rejoin race each
+     * other, so this is called from both the rejoin and the run's teardown and whichever lands last
+     * does the work. Failed items are still queued (`dequeuePaths` only drops what landed), and
+     * `downloadOne` resumes from the partial file's size, so this continues rather than restarts.
+     */
+    private fun maybeResumeAfterRejoin() {
+        if (!resumeDownloadOnRejoin || downloadRunning || !wifiUp) return
+        resumeDownloadOnRejoin = false
+        if ((adapter?.selectedCount() ?: 0) == 0) return
+        logLine("resuming interrupted download after the WiFi rejoin")
+        onDownloadClicked()
+    }
+
     private fun onDownloadClicked() {
+        // Re-entrancy guard. Main-thread confined, so a plain read/write is enough.
+        if (downloadRunning) {
+            logLine("Download already running — ignoring the extra tap.")
+            return
+        }
         val ad = adapter ?: run { logLine("Nothing listed yet — tap Offload first."); return }
         val jobs = ad.selectedEntries().map { MediaDownloader.Job(it.first, it.second) }
         // Queue keys parallel to [jobs] — used to drop each cell from the queue once it lands. Bursts queue
@@ -1411,7 +1491,21 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 logLine("DONE: $saved saved, $skipped skipped, $failed failed")
             }
         }
-        Thread { MediaDownloader(this, http, ::logLine).run(jobs, listener) }.start()
+        downloadRunning = true
+        updateDownloadFab()
+        Thread {
+            try {
+                MediaDownloader(this, http, ::logLine).run(jobs, listener)
+            } finally {
+                // In a finally, not in onComplete: a throw anywhere in the run would otherwise wedge
+                // the guard on and leave Download dead for the rest of the session.
+                main.post {
+                    downloadRunning = false
+                    updateDownloadFab()
+                    maybeResumeAfterRejoin()
+                }
+            }
+        }.start()
     }
 
     private fun fmtBytes(b: Long): String = when {
@@ -1648,6 +1742,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     companion object {
         private const val REQ_PERMS = 1001
         private const val REQ_GPS_PERMS = 1002
+        /** Total AP rejoins allowed per offload session — a cap, deliberately not reset on success,
+         *  so a flapping AP ends in a clear "tap Offload" rather than an endless reconnect loop. */
+        private const val MAX_WIFI_REJOINS = 3
     }
 }
 
