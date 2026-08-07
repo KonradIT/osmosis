@@ -29,6 +29,7 @@ import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.core.previewCandidates
 import dev.konraditurbe.osmosis.core.urlPath
+import dev.konraditurbe.osmosis.net.Highlights
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.net.ImageLoader
 
@@ -88,6 +89,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var selectedFrame = 0
     private lateinit var burstRow: LinearLayout
     private lateinit var burstStrip: View
+    private lateinit var highlightRow: LinearLayout
+    private lateinit var highlightStrip: View
     private val imageLoader by lazy { ImageLoader(http) { Log.i("Osmosis", it) } }
 
     // Scrub preview: the frame under the thumb, floated above the seek bar during a drag.
@@ -137,6 +140,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnFf = findViewById(R.id.btnFf)
         burstRow = findViewById(R.id.burstRow)
         burstStrip = findViewById(R.id.burstStrip)
+        highlightRow = findViewById(R.id.highlightRow)
+        highlightStrip = findViewById(R.id.highlightStrip)
         previewRoot = findViewById(R.id.previewRoot)
         scrubPreview = findViewById(R.id.scrubPreview)
         scrubImage = findViewById(R.id.scrubImage)
@@ -212,6 +217,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         selectedFrame = 0
         groupPaths = emptyList(); groupThumbs = emptyList()   // strip only for the initially-tapped burst
         burstRow.removeAllViews(); burstStrip.visibility = View.GONE
+        main.removeCallbacks(highlightsRunnable)
+        highlightRow.removeAllViews(); highlightStrip.visibility = View.GONE
         scrubFrames.close()
         hideScrubPreview()
         runCatching { videoView.stopPlayback() }
@@ -242,7 +249,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         refreshQueueButton()
 
         when {
-            file.isVideo -> loadVideo()
+            file.isVideo -> { loadVideo(); loadHighlights() }
             file.isImage -> {
                 resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
                 if (groupPaths.size > 1) setupBurstStrip()     // frames came from the DUML group-expand
@@ -484,6 +491,46 @@ class MediaPreviewActivity : AppCompatActivity() {
         topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
     }
 
+    /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge) and show ⚑ m:ss
+     *  chips that seek the player. **Debounced** so swiping through clips doesn't spam the datalink (each
+     *  fetch can be a fresh session on the Xtra); the result is dropped if we've since moved on. */
+    private val highlightsRunnable = Runnable {
+        val handle = file.handle
+        if (handle == 0L) return@Runnable
+        val at = navIndex
+        Thread {
+            val marks = runCatching { Highlights.provider?.invoke(handle) }.getOrNull().orEmpty()
+            if (marks.isNotEmpty()) main.post { if (!isFinishing && navIndex == at) showHighlights(marks) }
+        }.start()
+    }
+    private fun loadHighlights() {
+        main.removeCallbacks(highlightsRunnable)
+        main.postDelayed(highlightsRunnable, 400)
+    }
+
+    private fun showHighlights(marks: List<Int>) {
+        highlightStrip.visibility = View.VISIBLE
+        val accent = ContextCompat.getColor(this, R.color.osmo_accent)
+        val d = resources.displayMetrics.density
+        for (ms in marks) {
+            val chip = TextView(this).apply {
+                text = "⚑ ${mmss(ms.toLong())}"
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 12f
+                setPadding((10 * d).toInt(), (5 * d).toInt(), (10 * d).toInt(), (5 * d).toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins((4 * d).toInt(), 0, (4 * d).toInt(), 0) }
+                setBackgroundColor(accent)
+                setOnClickListener {
+                    seekToMs(ms.toLong())
+                    if (controls.visibility != View.VISIBLE) toggleControls()
+                }
+            }
+            highlightRow.addView(chip)
+        }
+    }
+
     /**
      * Start decoding preview frames for the clip we're actually streaming (see [ScrubFrames]): a
      * coarse grid up front so the bubble is never empty, then sharper frames on demand as the thumb
@@ -671,6 +718,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         main.removeCallbacks(tick)
+        main.removeCallbacks(highlightsRunnable)
         runCatching { videoView.stopPlayback() }
         scrubFrames.close()
         imageLoader.shutdown()
@@ -686,7 +734,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         const val EXTRA_PATH = "path"
         private const val EXTRA_STORAGE = "storage"
         private const val EXTRA_SIZE = "size"    // full manifest byte size → already-downloaded check
-        private const val EXTRA_HANDLE = "handle"    // manifest handle → delete / favourite
+        private const val EXTRA_HANDLE = "handle"    // video handle → highlight pull (0x02/0xff)
         private const val EXTRA_RES = "res"          // fps label ("25fps")
         private const val EXTRA_RESOLUTION = "resolution"  // pixel W×H ("3840x2160") from the manifest
         private const val EXTRA_PROXY = "proxy"
