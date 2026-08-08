@@ -28,6 +28,25 @@ class CameraSession(
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
     /**
+     * Remaining hex-dump budget for this session, in bytes of manifest.
+     *
+     * The raw file-list blob is dumped for **every** camera, verified or not: a failed decode has
+     * always dumped, which is useless for the case that actually matters — a new camera whose
+     * manifest decodes *fine* but whose bytes we have never seen. A Pocket 4 Pro listed 46 files
+     * perfectly and left us with no fixture, because success was silent.
+     *
+     * The budget is the only thing keeping that affordable. A 45-record manifest is ~37 KB, which is
+     * ~1200 log lines: fine once as a diagnostic, ruinous on every page of an infinite scroll. Two
+     * pages' worth is enough to reconstruct a fixture and see how paging changes the blob; past that
+     * the log stops being something a tester can send. Lines only reach a file when "Save logs" is
+     * on, so an ordinary run pays nothing but logcat.
+     */
+    private var dumpBudgetBytes = 80_000
+
+    /** Ceiling on a single dump, budgeted or not — the head carries the layout, the tail is noise. */
+    private val DUMP_MAX_BYTES = 64_000
+
+    /**
      * The status keys to subscribe to (`0x00/0x99`). Eight, deliberately — NOT Mimo's 54.
      *
      * Tried and reverted (2026-08-07). Mimo subscribes to 54 keys, so we matched it. The camera then
@@ -576,6 +595,9 @@ class CameraSession(
                     if (tick % 3 == 0)
                         sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
                     if (tick % 3 == 0) sendDuml(0x02, 0xA0, ByteArray(0), receiverType = 0x01, receiverId = 0)
+                    // Says once, on change, whether the gimbal is still turning — the Pocket 3
+                    // question nobody could answer from a log before. Rate-limited internally.
+                    reportGimbalActivity()
                     if (tick % 6 == 0) sendDuml(0x02, 0x61, ByteArray(0), receiverType = 0x01, receiverId = 0)
                     // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode
                     // should simply stay, but the camera can also be knocked out of it by something we
@@ -1020,10 +1042,13 @@ class CameraSession(
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
             warnOnHandleCollisions(comp)
+            dumpManifest(bytes)
             return comp
         }
         log("datalink: no CompositePack records — dumping manifest, falling back to flat scrape")
-        dumpManifest(bytes)
+        // Unbudgeted: a decode failure is rare, and it is the one case where the bytes are the
+        // whole report. Losing them to a budget would defeat the point.
+        dumpManifest(bytes, budgeted = false)
         return parseFlat(bytes)
     }
 
@@ -1302,11 +1327,38 @@ class CameraSession(
      * extension / handle fields sit. Contents are paths and filenames only; the passphrase and GPS
      * never travel on this datalink, so this is safe for the shared "Save logs" file.
      */
-    private fun dumpManifest(bytes: ByteArray) {
-        log("datalink: --- manifest hex (${bytes.size}B), report this to crack the layout ---")
+    private fun dumpManifest(bytes: ByteArray, budgeted: Boolean = true) {
+        // File-only. The dump exists to turn a *saved* log into a fixture; sending it to logcat as
+        // well actively destroys the thing it was meant to help with. Measured on a Nano browse: the
+        // 256 KiB ring buffer ended up 61% hex with only 39 of our lines left in it, and the whole
+        // session — connect, storage pushes, the manifest summary — had already been evicted by the
+        // time anyone went looking. Logging off means no dump, which is also the right default.
+        if (!dev.konraditurbe.osmosis.core.FileLog.isOn()) return
+        if (budgeted) {
+            if (dumpBudgetBytes <= 0) return
+            if (bytes.size > dumpBudgetBytes) {
+                log("datalink: manifest hex suppressed (${bytes.size}B, budget ${dumpBudgetBytes}B left) " +
+                    "— earlier pages in this log already carry the layout")
+                dumpBudgetBytes = 0
+                return
+            }
+            dumpBudgetBytes -= bytes.size
+        }
+        // Hard cap even on the unbudgeted failure path. "A decode failure is rare, so dump it all"
+        // was wrong: when reassembly finds no chunks, manifestBytes hands back the whole RAW blob —
+        // every datagram the collect loop hoovered up, telemetry included. A Pocket 3 log did this
+        // twice in 90 s, 541 KB and 878 KB, and 21000 of that log's 44578 lines were the two dumps.
+        // The head is where the layout lives; past that it is a transcript of the camera talking to
+        // itself, and a log too big to send is a log we do not get.
+        val shown = minOf(bytes.size, DUMP_MAX_BYTES)
+        // The declared size must be what is actually dumped: tools/hexdump_to_bin.py verifies the
+        // recovered length against it and drops the block on a mismatch. Total goes after it.
+        log("datalink: --- MANIFEST-HEX BEGIN (${shown}B" +
+            (if (shown < bytes.size) " of ${bytes.size}B" else "") +
+            "), report this to crack the layout ---")
         var off = 0
-        while (off < bytes.size) {
-            val end = minOf(off + 32, bytes.size)
+        while (off < shown) {
+            val end = minOf(off + 32, shown)
             val hex = StringBuilder(); val asc = StringBuilder()
             for (i in off until end) {
                 val b = bytes[i].toInt() and 0xFF
@@ -1317,7 +1369,7 @@ class CameraSession(
             log("  %04x  %-65s %s".format(off, hex.toString(), asc.toString()))
             off = end
         }
-        log("datalink: --- end manifest hex ---")
+        log("datalink: --- MANIFEST-HEX END ---")
     }
 
     /** Fallback scrape: whole-blob regex, joining fields by filename base. No per-record structure or
