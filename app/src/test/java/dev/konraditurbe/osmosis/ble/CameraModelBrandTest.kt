@@ -74,13 +74,46 @@ class CameraModelBrandTest {
     @Test
     fun `drones resolve as drones and pair with the DJI FLY token`() {
         val mavic = CameraModel.resolve(0x0070, "1001", Brand.DJI)
-        assertEquals("Mavic 3", mavic.name)
+        assertEquals("DJI Mavic 3", mavic.name)
         assertTrue(mavic.isDrone)
         assertEquals("DJI FLY", mavic.pairingToken)
 
         val neo = CameraModel.resolve(0x007e, "DJI-NEO2-168D", Brand.DJI)
         assertTrue(neo.isDrone)
         assertEquals("DJI FLY", neo.pairingToken)
+    }
+
+    /**
+     * An aircraft nobody here has flown still resolves to its real name and the drone transport.
+     *
+     * Before the roster existed, every id but two fell through to the `>= 0x40` guess and came out as
+     * "DJI drone" — right about the transport, useless to a user deciding whether the thing in front of
+     * them is supported.
+     */
+    @Test
+    fun `the whole Fly roster resolves by id, not by the aircraft-range guess`() {
+        for ((id, expected) in listOf(
+            0x0071 to "DJI Mini 3 Pro",
+            0x0075 to "DJI Mini 3",
+            0x007c to "DJI Air 3S",
+            0x007a to "DJI Flip",
+            0x00d0 to "DJI Lito X1",
+        )) {
+            val m = CameraModel.resolve(id, "whatever", Brand.DJI)
+            assertEquals(expected, m.name)
+            assertTrue("$expected must take the drone transport", m.isDrone)
+            assertEquals(9003, m.datalinkPort)
+            assertFalse("only the Mavic 3 is hardware-verified", m.verified)
+        }
+    }
+
+    /** Past the roster, the range guess still catches something newer than the app we read. */
+    @Test
+    fun `an id beyond the roster still falls back to drone defaults`() {
+        val unknown = CameraModel.resolve(0x00f0, "SOMETHING-NEW", Brand.DJI)
+        assertTrue(unknown.isDrone)
+        assertEquals(9003, unknown.datalinkPort)
+        assertEquals("DJI drone (SOMETHING-NEW)", unknown.name)
     }
 
     @Test

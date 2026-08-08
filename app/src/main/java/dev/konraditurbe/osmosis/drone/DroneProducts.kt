@@ -24,18 +24,26 @@ internal object DroneProducts {
 
         /** The aircraft installs no HTTP download at all; bytes stay on the native transfer path. */
         NATIVE_ONLY,
+
+        /** Known aircraft with no QuickTransfer workflow: it has WLM config but no WiFiFast asset. */
+        NONE,
     }
 
-    data class Product(val name: String, val http: Http)
+    data class Product(val name: String, val http: Http) {
+        /** Can this aircraft be offloaded at all? [Http.NONE] aircraft are named so a refusal can say why. */
+        val quickTransfer: Boolean get() = http != Http.NONE
+    }
 
     /**
      * Model id → product. Ids are the BLE product byte, which is the same value our scanner reads out
      * of the manufacturer data — a Mavic 3 is `0x70` here and `mfr[cid=08aa 7000…]` on the wire.
      *
-     * Absent ids are aircraft the app knows but cannot QuickTransfer (DJI FPV, Air 2S, the Mavic 3
-     * Enterprise Series), so an unknown id is better treated as unsupported than guessed at.
+     * The Mavic 3 Enterprise Series is deliberately absent: the app gives it literal product id 0,
+     * which is a sentinel rather than an aircraft, and it has no Fly camera backend at all.
      */
     private val BY_ID: Map<Int, Product> = mapOf(
+        0x8B to Product("DJI FPV", Http.NONE),            // WLM row, but no WiFiFast asset
+        0x8C to Product("DJI Air 2S", Http.NONE),         // likewise — pairing refuses it
         0x8D to Product("DJI Mini 2", Http.NATIVE_ONLY),
         0x70 to Product("DJI Mavic 3", Http.V1),          // hardware-verified end to end
         0x71 to Product("DJI Mini 3 Pro", Http.V1),

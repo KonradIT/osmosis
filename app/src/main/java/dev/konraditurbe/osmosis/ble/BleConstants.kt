@@ -39,7 +39,16 @@ object BleConstants {
         // Verified 2026-08-07: OsmoPocket4P-6E55 advertised the new format with product type 218
         // (HG224), which corresponds to classic id 0x22.
         0x0022 to "OsmoPocket4Pro",
-        0x0070 to "Mavic3",   // drone — offload confirmed end-to-end on hardware (see DroneSession)
-        0x007e to "Neo2",     // drone — never offloaded; datalink port unconfirmed
+        // Aircraft names come from DroneProducts, which enumerates the whole DJI Fly roster — see
+        // [nameFor]. Listing a couple of them here as well only creates a second table to forget.
     )
+
+    /**
+     * Display name for a scanned model id: cameras from [MODEL_NAMES], aircraft from the Fly roster.
+     *
+     * Null when neither knows it, which is the signal to fall back to the advertised local name and
+     * log the raw manufacturer bytes so the id can be pinned.
+     */
+    fun nameFor(modelId: Int): String? =
+        MODEL_NAMES[modelId] ?: dev.konraditurbe.osmosis.drone.DroneProducts.of(modelId)?.name
 }
