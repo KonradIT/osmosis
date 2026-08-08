@@ -321,7 +321,7 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 - Request: `40 2f 00 01 0b 00 00 00 [handle:u32-LE] 00 00` — `handle` = the video's manifest delete-handle ([§2](#2-delete-media)).
 - Reply: `00 · 40 2f 00 01 · [len:u32-LE] · [handle:u32-LE] · [count:u8] · 00 · { 00 [startTimeMs:u32-LE] } × count`. Count at reply byte 13, first mark at 16, stride 5.
 - **Read-only**, so it runs inline on the live session. Each mark is a `startTimeMs` (ms); marks read as points (no separate duration).
-- Example replies: a 2-mark clip → `4000, 7000` ms; a 3-mark clip → `1000, 3000, 5000` ms. Handles: Xtra `0x4004xxxx`, Nano `0x4010xxxx` (same command). See ROADMAP #7.
+- Example replies: a 2-mark clip → `4000, 7000` ms; a 3-mark clip → `1000, 3000, 5000` ms. Handles: Xtra `0x4004xxxx`, Nano `0x4010xxxx` (same command). The UI that consumed this is parked on branch `highlights`.
 
 ---
 

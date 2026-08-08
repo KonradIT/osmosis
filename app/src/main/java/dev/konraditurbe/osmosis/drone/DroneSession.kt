@@ -6,8 +6,8 @@ import dev.konraditurbe.osmosis.duml.DjiMessage
 import dev.konraditurbe.osmosis.net.DumlSession
 
 /**
- * A media session with a DJI **drone** (Mavic 3 family) over QuickTransfer WiFi. See ROADMAP #14 and
- * MEDIA_PROTOCOL.md § "DJI Drone QuickTransfer media offload".
+ * A media session with a DJI **drone** (Mavic 3 family) over QuickTransfer WiFi. See
+ * MEDIA_PROTOCOL.md § "DJI Drone QuickTransfer media offload" (§27–31).
  *
  * Nothing below the [DumlSession] handshake is shared with a camera:
  *
@@ -41,7 +41,7 @@ class DroneSession(
     private val droneSeen = HashSet<Long>()
     private var querySeq = 0x0C
 
-    // ---- paging diagnostics (ROADMAP #14, "paging stops after page 2") -----------------------------
+    // ---- paging diagnostics (the "paging stops after page 2" bug) ----------------------------------
     // Every datagram seen during a query, counted by transport pktType. This is the field the old
     // failure log could NOT show: its sink keeps only pktType 0x03 (the data stream), so "no valid DUML
     // at all" was equally consistent with a silent drone and a chatty one that simply ignored the query.
@@ -495,7 +495,7 @@ class DroneSession(
      * four instrumented sessions, every media query at t ≤ 28.5 s succeeded and every one at t ≥ 28.9 s
      * came back empty — while the drone was still pushing ~850 telemetry packets per query. The uplink
      * stream keeps the *link* alive, so nothing looks wrong; it is the `0x51` data session underneath
-     * that lapses. See ROADMAP #14.
+     * that lapses. See MEDIA_PROTOCOL.md §27.
      */
     @Volatile private var beaconOn = false
     private var lastBeaconMs = 0L

@@ -653,7 +653,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // advertises. The sleeping camera keeps advertising ADV_IND itself, and Mimo simply connects
         // and drives it with DUML (0x00/0x2b -> pair -> 0x53/0x10). That's the sequence we follow in
         // onReady/onPaired. (DJI also documents a 'WKP' wake *broadcast*; an HCI snoop proved Mimo
-        // never advertises, so it isn't used here — see ROADMAP #10.)
+        // never advertises, so it isn't used here — see MEDIA_PROTOCOL.md § "Waking a sleeping camera".)
         val gc = GattClient(this, this)
         gattClient = gc
         gc.connect(device)
@@ -853,7 +853,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // bindProcessToNetwork pins our sockets to the AP network and bypasses that VPN — so a VPN-mode
         // capture sees none of our traffic (and on this tablet the bind then fails outright, killing the
         // datalink). Joining the AP normally makes it the DEFAULT route, so our traffic goes through the
-        // VPN, gets captured, and still reaches the drone. See ROADMAP #14.
+        // VPN, gets captured, and still reaches the drone.
         if (noJoin) {
             logLine("OFFLOAD: --ez nojoin — skipping the WiFi join, using the current default network")
             main.postDelayed({ startDatalink() }, 1500)
@@ -961,7 +961,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     fun open(m: CameraModel): Pair<MediaSession, List<CameraFile>> {
                         logLine("=== media list [${m.name}] via udp/${m.datalinkPort} (poke=${m.tcpPoke}) ===")
                         // A drone speaks a different protocol end to end — the 0x51 session-open gate,
-                        // flat DCF records instead of CompositePack, /v1 instead of /v2 (ROADMAP #14).
+                        // flat DCF records instead of CompositePack, /v1 instead of /v2 (DroneSession).
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
                             if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)

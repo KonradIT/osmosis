@@ -11,8 +11,8 @@ import org.junit.Test
  * The datalink's wire framing.
  *
  * Worth having specifically because the two worst outages in this code's history were both **wrong
- * values in the 12-byte routing header** — leaking the peer's telemetry seq into our ack (ROADMAP #12,
- * which forced a fresh registered session for every delete/favourite/page/burst), and then freezing the
+ * values in the 12-byte routing header** — leaking the peer's telemetry seq into our ack (which forced a
+ * fresh registered session for every delete/favourite/page/burst), and then freezing the
  * drone's ack at the handshake channel (a healthy-looking session that answered no command at all).
  * Both were silent in the same asymmetric way: reads and keepalive kept flowing while writes were
  * dropped by the receive window. Neither was catchable by a test while these builders were private and
@@ -51,7 +51,7 @@ class DumlTransportTest {
 
     @Test
     fun `the ack is our own previous seq, never the peer's channel`() {
-        // ROADMAP #12: r0-1 once held the camera's telemetry seq, which runs ~10x faster than our
+        // r0-1 once held the camera's telemetry seq, which runs ~10x faster than our
         // commands and wraps to a different phase, so it drifted out of the receive window.
         val rt = DumlTransport.routingHeader(seq = 0x1570, cmdCounter = 3, drone = false)
         assertEquals(12, rt.size)

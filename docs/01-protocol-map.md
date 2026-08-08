@@ -176,9 +176,10 @@ HEAD supported (Content-Length) ; Range supported (206 partial)
 - **Thumbnails:** `MISC/THM/.../<name>.scr` (same storage id), served by `/v2`; the `.scr` decodes as a
   JPEG (`BitmapFactory` renders it directly).
 - Both verified cameras are `/v2` servers. The `/v1?file_index=…&file_subtype=…&file_seg_subindex=…`
-  form exists in DJI apps for other/older models; on the Xtra it is connection-reset. See ROADMAP #6
-  for the older Osmo Action generation (different, index-based list — parked, code on the
-  `add-osmo-action-support` branch).
+  form exists in DJI apps for other/older models; on the Xtra it is connection-reset. The older Osmo
+  Action generation uses that endpoint with a different, index-based list — see
+  [MEDIA_PROTOCOL §1](../MEDIA_PROTOCOL.md#1-get-media-list) ("Parsed — index-based"); code is parked
+  on the `support-osmo-action-1` branch.
 
 ---
 
@@ -354,7 +355,8 @@ bits 29:16 = DCF directory, 14 bits (100 -> 100MEDIA)
 bits 15:0  = DCF file number (554 -> DJI_0554)
 ```
 
-Full detail, ground truth and open questions: **[ROADMAP #14](../ROADMAP.md)**; implementation in
+Full detail and ground truth:
+**[MEDIA_PROTOCOL §27–31](../MEDIA_PROTOCOL.md#dji-drone-quicktransfer-media-offload)**; implementation in
 [DcfRecords.kt](../app/src/main/java/dev/konraditurbe/osmosis/dcf/DcfRecords.kt), pinned by
 [DroneManifestTest](../app/src/test/java/dev/konraditurbe/osmosis/drone/DroneManifestTest.kt) against
 the captured frames.

@@ -277,7 +277,7 @@ abstract class DumlSession(
                 // type 0x05 id 0), so the dock signal lives in this frame: u16@1 = pack mV,
                 // i32@5 = current mA (signed, -ve = discharging), @20 = percent, @27 = dock
                 // attached, @32 = taking charge. Confirmed over six live dock/undock transitions
-                // (ROADMAP #5). Logged on change only — a state line, not a 1 Hz stream.
+                // (MEDIA_PROTOCOL.md §20). Logged on change only — a state line, not a 1 Hz stream.
                 if (p.size >= 34) {
                     val mv = (p[1].toInt() and 0xFF) or ((p[2].toInt() and 0xFF) shl 8)
                     val cur = ((p[5].toInt() and 0xFF) or ((p[6].toInt() and 0xFF) shl 8) or

@@ -54,7 +54,8 @@ object DcfRecords {
     /**
      * Osmo Action 1 record stride — its list is `[u32 count][u32 totalBytes]` then fixed 65-byte records
      * carrying **unix** seconds at `+0` (not FAT) and the packed index at `+8`. Decoder lands with the
-     * `add-osmo-action-support` branch, which has the fixture to test it against; see ROADMAP #6.
+     * `support-osmo-action-1` branch, which has the fixture to test it against. Layout:
+     * MEDIA_PROTOCOL.md §1 ("Parsed — index-based").
      */
     const val ACTION1_STRIDE = 65
 
