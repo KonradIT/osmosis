@@ -40,12 +40,31 @@ data class CameraFile(
     // Modification time, unix seconds — drones put it straight in the manifest record, where cameras
     // encode it in the filename ([timestamp]). 0 = unknown.
     val mtimeEpoch: Long = 0L,
+    // True when [storage] came from the store-specific query that returned this record, rather than
+    // from a handle-bit guess confirmed by a HEAD. Set by CameraSession.collectStores; when it is set
+    // there is nothing left to resolve and no probe to run. Deliberately last in the parameter list —
+    // several call sites still construct a CameraFile positionally, so inserting anywhere else
+    // silently rebinds their arguments.
+    val storageKnown: Boolean = false,
+    /**
+     * Another record in the same manifest carries this file's [handle].
+     *
+     * Delete addresses a file **by handle**, so a shared one does not fail — it destroys whichever
+     * file the camera has under that handle and the grid then drops the cell that was asked for,
+     * which reads as success. Silently deleting the wrong file is the worst outcome this app has, so
+     * a shared handle disables delete for every record holding it. Seen on a Pocket 3: of 43 records
+     * only 11 carried handles, and two of those pairs collided (`0x00042ca0`, `0x00042d80`), each
+     * time a JPG sharing with the video shot seconds earlier.
+     *
+     * Last in the parameter list on purpose — several call sites construct a CameraFile positionally.
+     */
+    val handleShared: Boolean = false,
 ) {
     /** DCF-index-addressed media, fetched over `/v1` rather than by path over `/v2`. */
     val isIndexed: Boolean get() = fileIndex != 0L
 
     /** True once the manifest yielded a delete handle for this file (see DatalinkClient.deleteFiles). */
-    val deletable: Boolean get() = handle != 0L
+    val deletable: Boolean get() = handle != 0L && !handleShared
 
     val name: String get() = path.substringAfterLast('/')
     val ext: String get() = name.substringAfterLast('.', "").uppercase()

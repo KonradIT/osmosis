@@ -1,0 +1,3 @@
+Adds DJI drone offload over QuickTransfer, verified on a Mavic 3: grid, thumbnails, preview and download.
+
+Cameras get a steadier session. Playback mode is held for the whole browse, so the camera stays out of capture and a Pocket 3 parks its gimbal during a transfer. Deleting takes a second instead of half a minute, and several in a row no longer break the connection. The favourite heart appears at once. An SD card alongside internal storage is listed properly. Broken downloads resume themselves.

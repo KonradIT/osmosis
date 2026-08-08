@@ -79,6 +79,7 @@
     <string name="select">选择</string>
     <string name="download">下载</string>
     <string name="download_count">下载（%1$d）</string>
+    <string name="download_running">正在下载…</string>
     <string name="connected_wifi">已连接 · Wi-Fi</string>
     <string name="loading_burst">正在加载连拍…</string>
     <string name="not_connected">未连接</string>

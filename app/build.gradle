@@ -23,8 +23,8 @@ android {
         targetSdk 34
         // 21, not 20: testers are holding 1.3.3-action1-playback at versionCode 20, so anything
         // at or below that would never offer them an upgrade.
-        versionCode 21
-        versionName "1.3.0"
+        versionCode 22
+        versionName "1.3.1"
     }
 
     signingConfigs {
@@ -56,11 +56,11 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_11
-        targetCompatibility JavaVersion.VERSION_11
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
     }
     kotlinOptions {
-        jvmTarget = '11'
+        jvmTarget = '21'
     }
 }
 

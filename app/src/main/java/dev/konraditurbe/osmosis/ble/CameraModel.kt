@@ -55,11 +55,30 @@ data class CameraModel(
             0x0017 to CameraModel("Osmo 360", wpa3 = true),
             0x0018 to CameraModel("Osmo Action 6", verified = true),
             ID_OSMO_NANO to CameraModel("Osmo Nano", verified = true),
-            // Broadcasts no BLE mfr data — name fallback. Tester-confirmed on 9004; its _OP3-suffixed
+            // It DOES broadcast mfr data. This said otherwise, copied from the reverse-engineered
+            // Pocket 3 BLE library in reference/, which states it in four places. Our own captures say
+            // no: 32 scan hits across TWO different units carry it, every one with model id 0x0020 in
+            // the classic field —
+            //     58:B8:58:CC:F8:23  mfr[cid=08aa 2000{00,80,c0}58b858ccf823]   31 hits, 5 sessions
+            //     E4:7A:2C:78:D1:E9  mfr[cid=08aa 200040e47a2c78d1e9]            2026-08-07
+            // (byte 2 cycles 00/40/80/c0 — the top two bits look like a boot counter, and the MAC
+            // follows.) Either their macOS BLE stack hid it or older firmware omitted it. Resolving by
+            // id works; the name fallback stays for units that genuinely don't advertise.
+            // Tester-confirmed on 9004; its _OP3-suffixed
             // naming decodes in full (path + ext + delete handle). Note: rejects 0x53/0x10 (e0) but its
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
             0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
-            0x0021 to CameraModel("Osmo Pocket 4"),
+            // Tester-confirmed 2026-08-08 on Android 10 (our minSdk): connect, a 45-file internal
+            // manifest, playback held, and downloads the tester rated "same or maybe faster than
+            // Mimo". Its `0x02/0xdc` reports real capacity, unlike the Nano's. Note it advertises
+            // the CLASSIC format while the Pro sibling below uses the newer one — see BleAdvert.
+            0x0021 to CameraModel("Osmo Pocket 4", verified = true),
+            // Tester-confirmed 2026-08-07 on 9004 + poke: pair, creds, AP, datalink handshake, a
+            // 46-file manifest across two stores, playback held, and 43 MB of a clip transferred over
+            // /v2. The transfer then died with the AP, not with the protocol — so the datalink config
+            // this flag governs really is confirmed, even though no download has yet finished.
+            // It advertises the new format (product type 218 / HG224), not a classic model byte.
+            0x0022 to CameraModel("Osmo Pocket 4 Pro", verified = true),
             // Drones (see ROADMAP #14). The datalink is the SAME handshake as a camera but on
             // **udp/9003** with NO tcp-7001 poke — plus a `0x51/0x02` session-open the cameras don't
             // need, before which the aircraft answers nothing at all.
@@ -138,6 +157,9 @@ data class CameraModel(
             // Edge Pro. "edgepro" is tested before "edge" so the Pro isn't swallowed by the Action 4.
             return when {
                 n.contains("pocket3") || n.contains("muse") -> BY_ID.getValue(0x0020)
+                // "pocket4p" before "pocket4", same reason as "edgepro" before "edge": the Pro's
+                // BLE name is OsmoPocket4P-XXXX and would otherwise resolve as a plain Pocket 4.
+                n.contains("pocket4p") -> BY_ID.getValue(0x0022)
                 n.contains("pocket4") -> BY_ID.getValue(0x0021)
                 n.contains("360") -> BY_ID.getValue(0x0017)
                 n.contains("nano") || n.contains("atto") -> BY_ID.getValue(0x0019)

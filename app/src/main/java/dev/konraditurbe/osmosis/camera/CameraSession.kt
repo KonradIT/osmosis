@@ -28,35 +28,46 @@ class CameraSession(
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
     /**
-     * The status keys to subscribe to (`0x00/0x99`), in Mimo's own order.
+     * Remaining hex-dump budget for this session, in bytes of manifest.
      *
-     * Lifted verbatim from a Mimo↔Nano capture (reference/captures/wifi/mimo_nano_delete.pcap): Mimo
-     * subscribes to all 54 of these and the camera then pushes state for them. We used to send just the
-     * eight below `cam_storage`, and on a Nano that was not enough to make it report per-store capacity
-     * at all — the camera pushed `0x02/0x80` (one aggregate store) and never `0x02/0xdc` (the per-store
-     * block), so a dock SD card was invisible in the pill. The same eight keys DO get 0x02/0xdc out of an
-     * Xtra, so this is a Nano-side strictness rather than a broken frame.
+     * The raw file-list blob is dumped for **every** camera, verified or not: a failed decode has
+     * always dumped, which is useless for the case that actually matters — a new camera whose
+     * manifest decodes *fine* but whose bytes we have never seen. A Pocket 4 Pro listed 46 files
+     * perfectly and left us with no fixture, because success was silent.
      *
-     * Sending all of them is also FASTER than what we did before: Mimo fires all 80 of its subscription
-     * frames back to back in 258 ms without waiting for a reply, where our loop paused ~300 ms after each
-     * of eight keys — 2.4 s of the connect spent idling.
+     * The budget is the only thing keeping that affordable. A 45-record manifest is ~37 KB, which is
+     * ~1200 log lines: fine once as a diagnostic, ruinous on every page of an infinite scroll. Two
+     * pages' worth is enough to reconstruct a fixture and see how paging changes the blob; past that
+     * the log stops being something a tester can send. Lines only reach a file when "Save logs" is
+     * on, so an ordinary run pays nothing but logcat.
+     */
+    private var dumpBudgetBytes = 80_000
+
+    /** Ceiling on a single dump, budgeted or not — the head carries the layout, the tail is noise. */
+    private val DUMP_MAX_BYTES = 64_000
+
+    /**
+     * The status keys to subscribe to (`0x00/0x99`). Eight, deliberately — NOT Mimo's 54.
+     *
+     * Tried and reverted (2026-08-07). Mimo subscribes to 54 keys, so we matched it. The camera then
+     * pushes state for all of them, and that push traffic arrives as `4A 01` data chunks on the SAME
+     * stream the media manifest uses — so [manifestBytes] cannot filter it out and [decodeManifest] sees
+     * a 35-70 KB blob of parameter names with no `DCIM/` paths in it at all. On an Xtra Edge Pro that
+     * broke burst group-expand outright:
+     *
+     *     group-expand(inline) CAM_20260802162559_0057_D -> 0 frames (of 0)
+     *     no CompositePack records - dumping manifest, falling back to flat scrape
+     *     ...the dumped "manifest" contains camcap_photo_time_limited_burst_param...
+     *
+     * and each failure fell through to a fresh session, so it looped. With eight keys the push volume is
+     * small enough not to swamp a manifest query. Raising this again needs [manifestBytes] to filter by
+     * DUML cmd (0x00/0x27) rather than by the `4A 01` payload prefix alone.
+     *
+     * The frame FORMAT fix stays — see [subscription]; that one was real and is unrelated.
      */
     private val paramSubs = listOf(
-        "camcap_base", "camcap_video_format", "camcap_fov", "camcap_iso",
-        "camcap_photo_storage_format", "camcap_color_mode", "camcap_wb", "camcap_photo_size",
-        "camcap_video_codec", "camcap_shutter", "camcap_photo_timer_interval", "camcap_exposure_mode",
-        "camcap_zoom", "camcap_antiflicker", "camcap_sharpness", "camcap_denoise",
-        "camcap_aperture", "camcap_shutter_max", "camcap_eis", "camcap_iso_auto_max",
-        "camcap_loop_video_duration", "camcap_hyperlapse_ratio", "camcap_slowmotion_ratio",
-        "camcap_timelapse_duration", "camcap_countdown", "camcap_photo_time_limited_burst_param",
-        "camcap_capture_aspect_type", "camcap_style_filter_mode",
-        "cam_storage", "cam_status", "cam_record_time", "cam_expo_param",
-        "shutter_param", "cam_photo_param_new", "cam_lapse_param", "cam_video_param_v2",
-        "cam_image_effect", "v_quality_enhance_status", "cam_fov", "cam_lens_state",
-        "cam_audio_status_v2", "audio_timecode_status", "temp_curve", "camcap_common",
-        "cam_imu_calib_info", "timecode_info", "cam_custom_mode_params", "cam_super_slowmotion_status",
-        "media_file_sync", "upgrade_status", "cam_capture_aspect_type", "gui_autorecord_param",
-        "cam_style_filter_status",
+        "camcap_mode_profile", "camcap_video_format", "camcap_fov", "camcap_iso",
+        "camcap_photo_storage_format", "camcap_color_mode", "cam_storage", "cam_status",
     )
 
     private val VIDEO_EXTS = setOf("MP4", "MOV", "OSV", "INSV")
@@ -110,6 +121,21 @@ class CameraSession(
     // record handles live at/above VIDEO_HANDLE_BASE (0x4010xxxx on the Nano); the paging cursor only
     // steps through those, so stray low-namespace handles don't derail it.
     private val VIDEO_HANDLE_BASE = 0x40000000L
+
+    /**
+     * Records requested per file-list query — the `2d` at byte 14 of every `0x00/0x26` we build.
+     *
+     * Not a number we picked: Mimo's own `BaseFetchData.mCount` is 45, and byte 14 is `0x2d` in all 36
+     * list requests across four Mimo captures. Named here so the short-page end-of-list test below is
+     * obviously tied to what we actually asked for.
+     */
+    private val PAGE_SIZE = 45
+
+    // Request counters we put at byte 4 of each 0x00/0x26, echoed back at sub-header byte 4 of every
+    // 0x00/0x27 chunk answering it. Counter 1 always carries cursor 0x00000001 (SD), counter 2 either
+    // 0x40000001 (internal, initial load) or an internal page handle — both the internal store.
+    private val SD_QUERY_CTR = 1
+    private val INTERNAL_QUERY_CTR = 2
     // Frame limit for a burst/interval group-expand query (byte 14). Generous — covers long interval
     // timelapses; any spill into older files is filtered out by the group base name. See expandBurstGroup.
     private val GROUP_EXPAND_LIMIT = 120
@@ -179,11 +205,11 @@ class CameraSession(
             if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = count
         }
-        val files = decodeManifest(manifestBytes(blob.toByteArray()))
+        val files = collectStores(blob.toByteArray())
         // Seed lazy-pagination state: dedup set + cursor = oldest video handle on this page.
         seenPaths.clear(); seenPaths.addAll(files.map { it.path })
         pageCursor = files.map { it.handle }.filter { it >= VIDEO_HANDLE_BASE }.minOrNull() ?: 0L
-        moreAvailable = pageCursor > 0L
+        moreAvailable = hasOlderPage(files.size, pageCursor)
         log("datalink: parsed ${files.size} media files (newest page; more=$moreAvailable)")
         onFetchProgress?.invoke(100)
         return files
@@ -207,6 +233,7 @@ class CameraSession(
      * window, so each call runs in a FRESH registered session (like the delete flow), then restores the
      * browse keep-alive. Blocking; call off the UI thread.
      */
+    @Synchronized
     override fun fetchNextPage(): List<CameraFile> {
         if (!moreAvailable) return emptyList()
 
@@ -217,7 +244,7 @@ class CameraSession(
         if (keepAliveOn) {
             val blob = runManifestQuery(
                 listCmd(1, 1L), hex("4a040e1001000000000001000000"), listCmd(2, pageCursor))
-            val page = blob?.let { decodeManifest(manifestBytes(it)) } ?: emptyList()
+            val page = blob?.let { collectStores(it) } ?: emptyList()
             if (page.isNotEmpty()) {
                 val step = stepPagination(pageCursor, page, seenPaths)
                 pageCursor = step.nextCursor; moreAvailable = step.moreAvailable
@@ -254,7 +281,7 @@ class CameraSession(
             if (batch >= 4 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = c
         }
-        val page = decodeManifest(manifestBytes(blob.toByteArray()))
+        val page = collectStores(blob.toByteArray())
         val step = stepPagination(pageCursor, page, seenPaths)
         pageCursor = step.nextCursor
         moreAvailable = step.moreAvailable
@@ -270,6 +297,7 @@ class CameraSession(
      * session (the live keep-alive would drop the write), like [fetchNextPage]. Blocking; call off-UI.
      * Returns the frames in sub-index order, or just [lead] if it isn't a group / the query came back empty.
      */
+    @Synchronized
     override fun expandBurstGroup(lead: CameraFile): List<CameraFile> {
         val base = lead.groupKey ?: return listOf(lead)
         val ip = tx.peerIp ?: return listOf(lead)
@@ -331,6 +359,23 @@ class CameraSession(
         log("datalink: group-expand $base → ${group.size} frames (of ${all.size} returned)")
         return group
     }
+
+    /**
+     * Is there an older page to fetch? Needs a usable cursor **and** a page that came back full.
+     *
+     * A short page is the end of the library: we asked for [PAGE_SIZE] records and the camera gave us
+     * fewer, so it had no more. This used to be the cursor test alone, which is true for any camera
+     * holding at least one video — so the pull-up spinner armed on libraries that were already
+     * complete, and a pull spent a whole page fetch to append nothing.
+     *
+     * Mimo answers the same question from a per-record `isPageLastFile` flag it gets in the manifest.
+     * That flag is not at any fixed offset in our decoded records — searched every marker-relative
+     * position against a known-final page (`xtra_13.bin`, 13 records) versus a known-continuing one
+     * (`nano_45.bin`, a full 45 of 195) and nothing separates them — so the page-size test stands in
+     * for it. Same conclusion, one less unknown, and it needs no new byte to be right.
+     */
+    internal fun hasOlderPage(pageSize: Int, cursor: Long): Boolean =
+        cursor > 0L && pageSize >= PAGE_SIZE
 
     internal data class PageStep(val fresh: List<CameraFile>, val nextCursor: Long, val moreAvailable: Boolean)
 
@@ -444,10 +489,16 @@ class CameraSession(
     /**
      * How long a registered session keeps accepting inline command WRITES.
      *
-     * Measured on a Nano, one session: deletes at 45 s / 57 s / 66 s came back `status=0x0000` in ~1 s;
-     * at 74 s / 94 s / 124 s / 142 s the camera answered nothing at all. Reads were unaffected — a
-     * pagination query at 82 s in that same session returned normally. 55 s leaves margin under the
-     * observed 66–74 s cliff.
+     * Two cameras, and they do NOT agree — the Xtra's window is the shorter of the two:
+     *
+     *     Nano       ok at 45 s, 57 s, 66 s   ·  no reply at 74 s, 94 s, 124 s, 142 s
+     *     Edge Pro   no reply at 51.6 s
+     *
+     * Reads are unaffected on both — a pagination query at 82 s in the Nano session returned normally.
+     * 40 s sits under the Xtra's only observed failure with room to spare; 55 s did not, and a favourite
+     * at 51.6 s slipped through and missed. Erring low is cheap: the refresh costs one handshake and only
+     * happens when a write is actually requested on an old session, whereas erring high costs the full
+     * dead-wait-plus-verify path the mitigation exists to avoid.
      *
      * This is a MITIGATION, not the fix. Something in the sliding-window sequence handling
      * ([DumlTransport.routingHeader] / advance) drifts out of the camera's write-accept range and we do
@@ -457,7 +508,7 @@ class CameraSession(
      * path burned 10 s waiting for a reply that was never coming, then re-registered anyway and re-listed
      * the whole manifest to verify — ~28 s in total.
      */
-    private val WRITE_WINDOW_MS = 55_000L
+    private val WRITE_WINDOW_MS = 40_000L
 
     /**
      * Re-register before a write when the session is too old to accept one.
@@ -466,11 +517,22 @@ class CameraSession(
      * verify re-list. Briefly drops playback — closing the socket is what takes the camera out of it —
      * which is the same dip the old fallback caused, just sooner and without the wasted wait.
      */
+    // NOTE on @Synchronized, here and on fetchNextPage / expandBurstGroup / deleteFiles / setFavorite:
+    // every one of these can tear the keep-alive down, close the socket and re-register. Two of them at
+    // once is two threads calling openAndRegister on the same transport, and the result is exactly the
+    // wreckage this session's fixes were meant to end. Observed on an Xtra Edge Pro while scrolling and
+    // favouriting at the same time: a write-refresh registered at 09:49:13, pagination's own fallback
+    // opened a second handshake 4 s later, playback then failed all 3 confirm attempts because the socket
+    // went out from under it, the favourite got no reply, and the manifest came back as 41 KB of garbage
+    // with no CompositePack records. Serialising a favourite against a delete was not enough — pagination
+    // runs off the scroll handler and never touched cmdExec. The lock is the CameraSession instance and
+    // Java monitors are reentrant, so deleteFiles -> refreshSessionForWrite nests without deadlocking.
+    @Synchronized
     private fun refreshSessionForWrite(what: String): Boolean {
         if (!keepAliveOn || sessionAgeMs() <= WRITE_WINDOW_MS) return false
         val ip = tx.peerIp ?: return false
         log("datalink: session is ${sessionAgeMs() / 1000}s old — re-registering before $what " +
-            "(writes stop being accepted around 70s)")
+            "(writes stop being answered past ~${WRITE_WINDOW_MS / 1000}s)")
         keepAliveOn = false
         runCatching { Thread.sleep(600) }        // let the keep-alive loop finish its recv and exit
         tx.close()
@@ -533,6 +595,9 @@ class CameraSession(
                     if (tick % 3 == 0)
                         sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
                     if (tick % 3 == 0) sendDuml(0x02, 0xA0, ByteArray(0), receiverType = 0x01, receiverId = 0)
+                    // Says once, on change, whether the gimbal is still turning — the Pocket 3
+                    // question nobody could answer from a log before. Rate-limited internally.
+                    reportGimbalActivity()
                     if (tick % 6 == 0) sendDuml(0x02, 0x61, ByteArray(0), receiverType = 0x01, receiverId = 0)
                     // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode
                     // should simply stay, but the camera can also be knocked out of it by something we
@@ -616,6 +681,7 @@ class CameraSession(
      * ([openAndRegister]) — the one path the camera reliably accepts — issue the delete there, then
      * keep that session for browse. Call on a background thread (blocks ~9 s, the re-handshake cost).
      */
+    @Synchronized
     override fun deleteFiles(handles: List<Long>): Int? {
         if (handles.isEmpty()) return null
         refreshSessionForWrite("delete")
@@ -755,6 +821,7 @@ class CameraSession(
             write(0x00); write(if (on) 0x01 else 0x00); write(byteArrayOf(0x00, 0x00, 0x00))
         }.toByteArray()
 
+    @Synchronized
     override fun setFavorite(handle: Long, on: Boolean): Boolean {
         refreshSessionForWrite("favourite")
         val payload = favoritePayload(handle, favCounter++, on)
@@ -835,7 +902,7 @@ class CameraSession(
      * we decode it. Walks the whole blob (not per-datagram) so a frame split across two UDP packets is
      * still reassembled.
      */
-    private fun manifestBytes(raw: ByteArray): ByteArray {
+    private fun manifestBytes(raw: ByteArray, requestCtr: Int? = null): ByteArray {
         // The file list streams back as DUML data frames (cmd 0x00/0x27) whose payload is
         //   [10-byte sub-header][chunk]:  4A 01 .. .. <seq:u16le @6> 00 00, then the chunk bytes.
         // byte1==0x01 marks a data chunk; the control frames (4A 04.. start / 4A 03.. end) are 10
@@ -850,17 +917,74 @@ class CameraSession(
             if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
             val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
             if (len < 13 || i + len > raw.size) { i++; continue }
+            // Match on the frame's DUML command, not on its payload prefix. The 11-byte header is
+            // [55][len:2][crc8][target:2][id:2][type][set][cmd], so the command is right here — there
+            // was never a reason to guess from the body. `4A 01` alone also matches subscription state,
+            // which is why raising paramSubs to Mimo's 54 keys drowned the media stream in parameter
+            // names (see paramSubs). Verified against the captures: in nano_45.bin and xtra_13.bin
+            // every `4A 01` chunk arrives on 0x00/0x27 and nothing else does.
+            val cmdSet = raw[i + 9].toInt() and 0xFF
+            val cmdId = raw[i + 10].toInt() and 0xFF
             val plStart = i + 11; val plLen = len - 13
-            if (plLen > 10 && (raw[plStart].toInt() and 0xFF) == 0x4A && (raw[plStart + 1].toInt() and 0xFF) == 0x01)
-                out.write(raw, plStart + 10, plLen - 10) // drop the 10-byte sub-header, keep the chunk
+            // Sub-header byte 4 echoes the counter from the request that asked for this chunk (our
+            // requests put it at the same offset). That is what lets one blob be split back into the
+            // per-store answers it actually contains — see [collectStores].
+            val ctrOk = requestCtr == null || (raw[plStart + 4].toInt() and 0xFF) == requestCtr
+            if (cmdSet == 0x00 && cmdId == 0x27 && ctrOk &&
+                plLen > 10 && (raw[plStart].toInt() and 0xFF) == 0x4A && (raw[plStart + 1].toInt() and 0xFF) == 0x01
+            ) out.write(raw, plStart + 10, plLen - 10) // drop the 10-byte sub-header, keep the chunk
             i += len
         }
         val bytes = out.toByteArray()
+        // A per-counter slice is a subset by construction, so the whole-blob comparison below would
+        // always reject it. Callers handle an empty slice themselves.
+        if (requestCtr != null) return bytes
         // Guard: only use the reassembled stream if it carries at least as many intact media-path
         // fields as the raw blob, so a model that streams the list some other way falls back to the
         // old whole-blob parse. (A path split across a frame boundary won't parse as a field, which is
         // exactly the straddling case reassembly fixes.)
         return if (countMediaPaths(bytes) >= countMediaPaths(raw) && bytes.isNotEmpty()) bytes else raw
+    }
+
+    /**
+     * Split one collected blob into its per-store answers, so each file's `/v2?storage=` mount is
+     * known from the query that returned it instead of guessed from its handle.
+     *
+     * Both queries are already sent — cursor `0x00000001` under counter 1 and `0x40000001` under
+     * counter 2 — and the **cursor's top bit is the store selector**, which the Mimo captures settle:
+     * on a Nano `0x00000001` returns the single dock-SD clip and `0x40000001` the 45 internal ones; on
+     * an Xtra, 35 SD against 45 internal. Those map straight onto DJI's own `FileLocation`
+     * (`SD_CARD=0`, `INTERNAL_STORAGE=1`), which is the same integer the HTTP mount wants. So the two
+     * halves only ever needed telling apart, and the response counter does that for free — no extra
+     * round trip, no HEAD probe, no handle-bit inference.
+     *
+     * Falls back to the merged parse (and the old per-file resolution) in the two cases where the
+     * split can't be trusted: a camera that doesn't echo the counter, and one that answers both
+     * queries with the same list — a single-store body, where there is nothing to attribute.
+     */
+    private fun collectStores(raw: ByteArray): List<CameraFile> {
+        // An empty slice means that store answered with nothing — a camera with no card, or a query
+        // that went unanswered. Decoding it anyway logs "no CompositePack records — falling back to
+        // flat scrape" and runs a scrape over zero bytes, which reads in the log exactly like a decode
+        // failure on a real manifest. Seen on a Nano whose SD query came back empty.
+        fun sliceOf(ctr: Int): List<CameraFile> =
+            manifestBytes(raw, requestCtr = ctr).takeIf { it.isNotEmpty() }?.let { decodeManifest(it) }
+                ?: emptyList()
+        val sd = sliceOf(SD_QUERY_CTR)
+        val internal = sliceOf(INTERNAL_QUERY_CTR)
+        val ambiguous = sd.isNotEmpty() && internal.isNotEmpty() &&
+            sd.map { it.path }.toSet() == internal.map { it.path }.toSet()
+        if ((sd.isEmpty() && internal.isEmpty()) || ambiguous) {
+            val merged = decodeManifest(manifestBytes(raw))
+            log("datalink: store split unavailable (${if (ambiguous) "both queries same list" else "no counter echo"})" +
+                " — ${merged.size} files, storage resolved per file")
+            return merged
+        }
+        log("datalink: per-store lists — SD ${sd.size}, internal ${internal.size} (no probing needed)")
+        // Internal first: it is the larger store on every camera we have, so on the rare overlap the
+        // kept copy is the one more likely to be right.
+        return (internal.map { it.copy(storage = 1, storageKnown = true) } +
+            sd.map { it.copy(storage = 0, storageKnown = true) }).distinctBy { it.path }
     }
 
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
@@ -873,6 +997,9 @@ class CameraSession(
     /** Test seam: run the full raw-blob → frame-reassemble → decode pipeline on a captured manifest. */
     internal fun decodeManifestBlobForTest(rawBlob: ByteArray): List<CameraFile> =
         decodeManifest(manifestBytes(rawBlob))
+
+    /** Test seam: the per-store split, so it can be checked against the handle-bit rule it replaces. */
+    internal fun collectStoresForTest(rawBlob: ByteArray): List<CameraFile> = collectStores(rawBlob)
 
     /** Test seam: decode an already-reassembled CompositePack manifest (post frame-reassembly). */
     internal fun decodeCompositeForTest(manifest: ByteArray): List<CameraFile> = decodeComposite(manifest)
@@ -898,14 +1025,18 @@ class CameraSession(
      * Silent when healthy. Small lists are dumped in full: on a controlled 4-file card the handles are
      * the whole point, and the volume is trivial.
      */
-    private fun warnOnHandleCollisions(files: List<CameraFile>) {
+    private fun flagHandleCollisions(files: List<CameraFile>): List<CameraFile> {
         val dupes = files.filter { it.handle != 0L }.groupBy { it.handle }.filter { it.value.size > 1 }
         for ((h, group) in dupes) {
-            log("datalink: ⚠ HANDLE COLLISION 0x%08x shared by %s".format(h, group.joinToString { it.name }))
+            log("datalink: ⚠ HANDLE COLLISION 0x%08x shared by %s — delete disabled for these"
+                .format(h, group.joinToString { it.name }))
         }
         if (files.size <= 12) {
             for (f in files) log("datalink:   %-44s handle=0x%08x".format(f.name.take(44), f.handle))
         }
+        if (dupes.isEmpty()) return files
+        val shared = dupes.keys
+        return files.map { if (it.handle in shared) it.copy(handleShared = true) else it }
     }
 
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
@@ -914,11 +1045,13 @@ class CameraSession(
             log("datalink: decoded ${comp.size} CompositePack records " +
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
-            warnOnHandleCollisions(comp)
-            return comp
+            dumpManifest(bytes)
+            return flagHandleCollisions(comp)
         }
         log("datalink: no CompositePack records — dumping manifest, falling back to flat scrape")
-        dumpManifest(bytes)
+        // Unbudgeted: a decode failure is rare, and it is the one case where the bytes are the
+        // whole report. Losing them to a budget would defeat the point.
+        dumpManifest(bytes, budgeted = false)
         return parseFlat(bytes)
     }
 
@@ -1154,14 +1287,27 @@ class CameraSession(
      * are inconsistent downstream copies; this map is built empirically from clips cross-referenced
      * against the SD card. Unknown → null → the app falls back to the MP4 `moov`.
      */
-    /** ⭐ favourite flag: the byte 9 past the record's `[ff|fe] 19 06` marker is 1 when starred, 0
-     *  otherwise. Unified across videos (`03 ff 19 06`) and photos (`fe 19 06`). */
+    /**
+     * ⭐ favourite flag: the byte 9 past the record's `[ff|fe] 19 06` marker, 1 when starred.
+     *
+     * **Only trusted when it actually reads as a boolean.** That offset is a real flag on the Nano —
+     * `nano_delete.bin`, captured while favourites were being tested, splits 19 zeros to 26 ones — but
+     * on an Xtra the same offset lands on a *length* byte: its records run `1a <len> 00 00 00 01
+     * DCIM/…`, so the byte reads 44 or 48, the length of the path that follows. Those records simply
+     * carry a different field order, and reading a length as a flag is how a "starred" badge could
+     * appear on every file at once. Anything other than 0 or 1 means the layout is not the one this
+     * offset was derived from, so say "not starred" rather than guess.
+     *
+     * ⚠️ Consequence: favourites still do not survive a re-list on the Xtra. Reading them there needs
+     * that record layout worked out — a manifest dumped with known favourites will show it, which
+     * `dumpManifest` now makes a one-run job.
+     */
     private fun starFlag(bytes: ByteArray, lo: Int, hi: Int): Boolean {
         var q = lo
         while (q < hi - 9) {
             if ((bytes[q] == 0xFF.toByte() || bytes[q] == 0xFE.toByte()) &&
                 bytes[q + 1] == 0x19.toByte() && bytes[q + 2] == 0x06.toByte()
-            ) return (bytes[q + 9].toInt() and 0xFF) == 1
+            ) return (bytes[q + 9].toInt() and 0xFF) == 1   // strictly 1; 44/48 on an Xtra is a length
             q++
         }
         return false
@@ -1184,11 +1330,38 @@ class CameraSession(
      * extension / handle fields sit. Contents are paths and filenames only; the passphrase and GPS
      * never travel on this datalink, so this is safe for the shared "Save logs" file.
      */
-    private fun dumpManifest(bytes: ByteArray) {
-        log("datalink: --- manifest hex (${bytes.size}B), report this to crack the layout ---")
+    private fun dumpManifest(bytes: ByteArray, budgeted: Boolean = true) {
+        // File-only. The dump exists to turn a *saved* log into a fixture; sending it to logcat as
+        // well actively destroys the thing it was meant to help with. Measured on a Nano browse: the
+        // 256 KiB ring buffer ended up 61% hex with only 39 of our lines left in it, and the whole
+        // session — connect, storage pushes, the manifest summary — had already been evicted by the
+        // time anyone went looking. Logging off means no dump, which is also the right default.
+        if (!dev.konraditurbe.osmosis.core.FileLog.isOn()) return
+        if (budgeted) {
+            if (dumpBudgetBytes <= 0) return
+            if (bytes.size > dumpBudgetBytes) {
+                log("datalink: manifest hex suppressed (${bytes.size}B, budget ${dumpBudgetBytes}B left) " +
+                    "— earlier pages in this log already carry the layout")
+                dumpBudgetBytes = 0
+                return
+            }
+            dumpBudgetBytes -= bytes.size
+        }
+        // Hard cap even on the unbudgeted failure path. "A decode failure is rare, so dump it all"
+        // was wrong: when reassembly finds no chunks, manifestBytes hands back the whole RAW blob —
+        // every datagram the collect loop hoovered up, telemetry included. A Pocket 3 log did this
+        // twice in 90 s, 541 KB and 878 KB, and 21000 of that log's 44578 lines were the two dumps.
+        // The head is where the layout lives; past that it is a transcript of the camera talking to
+        // itself, and a log too big to send is a log we do not get.
+        val shown = minOf(bytes.size, DUMP_MAX_BYTES)
+        // The declared size must be what is actually dumped: tools/hexdump_to_bin.py verifies the
+        // recovered length against it and drops the block on a mismatch. Total goes after it.
+        log("datalink: --- MANIFEST-HEX BEGIN (${shown}B" +
+            (if (shown < bytes.size) " of ${bytes.size}B" else "") +
+            "), report this to crack the layout ---")
         var off = 0
-        while (off < bytes.size) {
-            val end = minOf(off + 32, bytes.size)
+        while (off < shown) {
+            val end = minOf(off + 32, shown)
             val hex = StringBuilder(); val asc = StringBuilder()
             for (i in off until end) {
                 val b = bytes[i].toInt() and 0xFF
@@ -1199,7 +1372,7 @@ class CameraSession(
             log("  %04x  %-65s %s".format(off, hex.toString(), asc.toString()))
             off = end
         }
-        log("datalink: --- end manifest hex ---")
+        log("datalink: --- MANIFEST-HEX END ---")
     }
 
     /** Fallback scrape: whole-blob regex, joining fields by filename base. No per-record structure or
