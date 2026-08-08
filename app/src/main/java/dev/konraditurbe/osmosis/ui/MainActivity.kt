@@ -971,7 +971,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         // flat DCF records instead of CompositePack, /v1 instead of /v2 (DroneSession).
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
-                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)
+                            if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial, currentModelId)
                             else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98

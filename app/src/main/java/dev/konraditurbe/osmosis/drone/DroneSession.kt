@@ -32,10 +32,20 @@ class DroneSession(
      * parsing on the datalink and no dependence on the challenge. See [DroneSerial.inTunnelFrame].
      */
     knownSerial: Pair<ByteArray, Int>? = null,
+    /**
+     * BLE model id, used only to pick the entry flow — see [enterQuickTransfer].
+     *
+     * Null means "unknown aircraft", which takes the same path as any non-Mavic: the runtime decision
+     * the current DJI Fly handler makes, rather than one model's captured trace.
+     */
+    private val modelId: Int? = null,
 ) : DumlSession(log, port, tcpPoke = false, isDrone = true) {
 
     /** The serial read off the aircraft's BLE identity beacon, if one arrived while pairing. */
     private val bleSerial = knownSerial
+
+    /** The most recent `0x51/0x04` push, latched by [watch51Frames] as frames go by. */
+    @Volatile private var deviceOsd: Wlm.DeviceOsd? = null
 
     private var droneCursor = 0L
     private val droneSeen = HashSet<Long>()
@@ -82,7 +92,7 @@ class DroneSession(
         // Matching that keeps our id sequence identical to its.
         sendDroneIdentity()
         dronePump(400)
-        droneSessionOpen()
+        enterQuickTransfer()
         // From here the beacon must keep being answered or the data session lapses — see [beaconOn].
         // Started only now so the 0x51 message ids during the open still run 1,2,3… as DJI Fly's do.
         beaconOn = true
@@ -400,6 +410,18 @@ class DroneSession(
             if (ln > pl.size) continue
             val inner = pl[10].toInt() and 0xFF
             seen51[inner] = (seen51[inner] ?: 0) + 1
+            // 0x04 is wlm_dev_osd_push, which decides the entry flow — always latched, even once the
+            // serial is known, because the aircraft's version byte can only be read from it.
+            if (inner == Wlm.CMD_DEVICE_OSD_PUSH) {
+                Wlm.parseDeviceOsd(pl.copyOfRange(11, ln - 2))?.let { osd ->
+                    if (deviceOsd == null) {
+                        log("datalink: WLM device OSD — message version ${osd.messageVersion}, " +
+                            "live-view link mode ${osd.localLiveviewLinkMode}/${osd.peerLiveviewLinkMode} " +
+                            "→ ${if (osd.serviceModeSupported) "51/1a service mode" else "51/02 link mode"}")
+                    }
+                    deviceOsd = osd
+                }
+            }
             if (droneSerial != null) continue
             // 0x13 is the unprompted identity beacon; 0x08 is the session-open challenge, which names
             // the serial too — and unlike the beacon, it arrives on *every* airframe that answers the
@@ -461,6 +483,89 @@ class DroneSession(
         "0501040100",   // Mavic 3 (hardware-verified end to end)
         "05ff040200",   // Mini 3 (PCAPdroid capture, 2026-08-09)
     )
+
+    /**
+     * Put the aircraft into QuickTransfer, by whichever route it actually uses.
+     *
+     * There are two, and they are not variants of one another. The Mavic 3's
+     * `0x51/0x02 → 0x08 → 0x06 → 0x06` challenge is a captured trace from that airframe; every other
+     * supported aircraft is driven by the current DJI Fly handler's runtime decision, which waits for
+     * the aircraft's own `0x51/0x04` push and picks from its message-version byte ([Wlm]).
+     *
+     * Sending the Mavic's open to a Neo 2 produces nothing at all — the aircraft keeps beaconing and
+     * the frame rate never climbs. That reads like refusal, but it is simply the wrong command: the
+     * Neo never advertises the challenge the Mavic answers with, so waiting for `0x51/0x08` there is
+     * waiting for a frame that was never coming.
+     */
+    private fun enterQuickTransfer() {
+        if (modelId == MAVIC_3_MODEL_ID) { droneSessionOpen(); return }
+        log("datalink: entering QuickTransfer via the WLM handler" +
+            (modelId?.let { " (model 0x%04x)".format(it) } ?: " (unknown model)"))
+        if (!wifiFastEnter()) {
+            // Not a fallback to the Mavic dance: that would send a challenge-open to an aircraft that
+            // has just told us it speaks the other protocol. Carry on and let the media query be the
+            // test — a drone that entered on its own still answers, and one that did not now says so
+            // with the OSD evidence rather than a bare timeout.
+            log("datalink: WLM entry did not complete — continuing, the media query will show whether " +
+                "the aircraft is serving")
+        }
+    }
+
+    /**
+     * The current handler's entry: wait for the aircraft's `0x51/0x04`, then switch service mode or
+     * fall back to a link-mode switch. Returns whether a request was actually issued.
+     */
+    private fun wifiFastEnter(): Boolean {
+        val deadline = System.currentTimeMillis() + OSD_WAIT_MS
+        while (deviceOsd == null && System.currentTimeMillis() < deadline) dronePump(200)
+        val osd = deviceOsd ?: run {
+            log("datalink: no WLM device OSD (0x51/0x04) in ${OSD_WAIT_MS} ms — cannot choose an entry flow")
+            logBeaconDiagnostics()
+            return false
+        }
+
+        if (osd.serviceModeSupported) {
+            sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
+                Wlm.CMD_SERVICE_MODE_SWITCH, 0x40, 0x007C,
+                Wlm.serviceModeRequest(enter = true, serial = droneSerial)))
+            log("datalink: 51/1a sent — download service to WIFI_HIGHSPEED")
+        } else {
+            val liveview = osd.liveviewLinkModeForFallback ?: run {
+                // Sending a live-view mode the aircraft is not in is worse than not asking: the request
+                // would be built on a guess and its effect is unknown. Say which values disagreed.
+                log("datalink: 51/04 reports different local/peer live-view link modes " +
+                    "(${osd.localLiveviewLinkMode}/${osd.peerLiveviewLinkMode}) — refusing to guess " +
+                    "the 51/02 fallback body")
+                return false
+            }
+            sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
+                Wlm.CMD_LINK_MODE_SWITCH, 0x40, 0x007C,
+                Wlm.linkModeRequest(Wlm.LINK_MODE_WIFI_ONLY, liveview)))
+            log("datalink: 51/02 link-mode switch sent — WIFI_ONLY, live-view $liveview")
+        }
+        dronePump(600)
+        return true
+    }
+
+    /** Hand the link back, mirroring whichever entry ran. Best-effort; never throws. */
+    private fun exitQuickTransfer() {
+        if (modelId == MAVIC_3_MODEL_ID) return   // the Mavic trace has no close command
+        val osd = deviceOsd ?: return
+        runCatching {
+            if (osd.serviceModeSupported) {
+                sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
+                    Wlm.CMD_SERVICE_MODE_SWITCH, 0x40, 0x007C,
+                    Wlm.serviceModeRequest(enter = false, serial = droneSerial)))
+            } else {
+                val liveview = osd.liveviewLinkModeForFallback ?: return
+                sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
+                    Wlm.CMD_LINK_MODE_SWITCH, 0x40, 0x007C,
+                    Wlm.linkModeRequest(Wlm.LINK_MODE_COMMON, liveview)))
+            }
+            dronePump(200)
+            log("datalink: WLM download service handed back to COMMON")
+        }
+    }
 
     /** Steps 3–5, all of which do need the serial the drone named in its step-2 challenge. */
     private fun droneOpenResponses(serial: ByteArray) = listOf(
@@ -742,7 +847,8 @@ class DroneSession(
                 // The beacon has only ever been *seen* on pktType 0x01 — but "only ever" is one
                 // airframe, so look on every packet type. Run this even once a serial is known: it
                 // also keeps the 0x51 census, which the session-open loop reads to tell an answered
-                // variant from an ignored one.
+                // variant from an ignored one, and latches the WLM device OSD that decides the entry
+                // flow and keeps arriving all session.
                 if (dg.size > 8) watch51Frames(dg)
                 if (sink == null) continue
                 if (!manifestStream) sink.write(dg)
@@ -755,5 +861,25 @@ class DroneSession(
             val now = System.currentTimeMillis()
             if (beaconOn && now - lastBeaconMs >= 500) { lastBeaconMs = now; sendDroneIdentity() }
         }
+    }
+
+    /** Leave QuickTransfer before dropping the link, so the aircraft isn't left in high-speed mode. */
+    override fun close() {
+        if (handshakeOk) exitQuickTransfer()
+        super.close()
+    }
+
+    private companion object {
+        /**
+         * The one aircraft whose session-open we have as a captured trace.
+         *
+         * Everything else takes the handler's runtime decision. This is a routing key, not a
+         * capability claim: other aircraft may well accept the same challenge, but nothing has shown
+         * that they do, and the cost of assuming it is a session that silently serves nothing.
+         */
+        const val MAVIC_3_MODEL_ID = 0x0070
+
+        /** How long to wait for the `0x51/0x04` push that chooses the entry flow. */
+        const val OSD_WAIT_MS = 8000L
     }
 }
