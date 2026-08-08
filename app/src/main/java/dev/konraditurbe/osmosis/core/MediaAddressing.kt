@@ -2,6 +2,7 @@ package dev.konraditurbe.osmosis.core
 
 import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.dcf.DcfAddressing
+import dev.konraditurbe.osmosis.dcf.DroneV2Addressing
 
 /**
  * How a device's media is located over HTTP — the one seam between the app's two, mutually exclusive
@@ -43,7 +44,8 @@ interface MediaAddressing {
          * scheme of the one aircraft this app was built against.
          */
         fun of(f: CameraFile): MediaAddressing = when {
-            f.isIndexed && !f.dcfHttpV2 -> DcfAddressing
+            f.isIndexed && f.dcfHttpV2 -> DroneV2Addressing
+            f.isIndexed -> DcfAddressing
             else -> PathAddressing
         }
     }

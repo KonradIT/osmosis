@@ -1,10 +1,13 @@
 package dev.konraditurbe.osmosis.drone
 
 import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.core.previewCandidates
+import dev.konraditurbe.osmosis.core.thumbUrlPath
 import dev.konraditurbe.osmosis.core.urlPath
 import dev.konraditurbe.osmosis.dcf.DcfIndex
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -39,6 +42,35 @@ class DroneAddressingTest {
     fun `a Neo 2 is addressed by path over v2`() {
         assertTrue(DroneProducts.usesHttpV2(0x7E))
         assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0554.MP4", droneFile(0x7E).urlPath())
+    }
+
+    /**
+     * The grid must never fetch originals.
+     *
+     * A drone record has no thumbnail path of its own — the decoder copies the media path into
+     * `thumbPath` — so any scheme that trusts that field turns every cell into a full-clip download.
+     * On a 45-file page of 1.4 GB clips that is ~60 GB to draw one screen.
+     */
+    @Test
+    fun `a v2 drone thumbnail is a sidecar or EXIF, never the original`() {
+        val video = droneFile(0x7E)
+        assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0554.THM", video.thumbUrlPath())
+
+        val still = video.copy(path = "DCIM/100MEDIA/DJI_0554.JPG", durationSec = 0)
+        val thumb = still.thumbUrlPath()
+        assertTrue("a still should come from its own EXIF", thumb.startsWith(CameraFile.EXIF_THUMB))
+
+        for (f in listOf(video, still)) {
+            assertNotEquals("a thumbnail must never be the original", f.urlPath(), f.thumbUrlPath())
+        }
+    }
+
+    /** Preview may end at the original — that is one file the user opened, not a gridful. */
+    @Test
+    fun `a v2 drone preview tries the cheap rendition first`() {
+        val chain = droneFile(0x7E).previewCandidates()
+        assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0554.LRF", chain.first())
+        assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0554.MP4", chain.last())
     }
 
     @Test
