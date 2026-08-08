@@ -58,6 +58,10 @@ jobs:
           name: app-debug
           path: app/build/outputs/apk/debug/*.apk
 
+      # Release APK only. The debug build stays an Actions artifact (above) where it is useful
+      # for triage, and never becomes a release asset: it is signed with the debug key, so a tester
+      # who grabs it instead of the real one gets "App not installed" over their existing install.
+      # That happened on v1.3.1-rc1 and had to be cleaned up by hand.
       - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -66,6 +70,5 @@ jobs:
           draft: true
           files: |
             app/build/outputs/apk/release/*.apk
-            app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
