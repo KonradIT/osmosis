@@ -41,22 +41,32 @@ The model id is a `u16-LE` in the BLE manufacturer data under DJI's company id `
 ([§1 of the protocol map](docs/01-protocol-map.md#1-device-identification-ble-advertisement)). Resolve
 by id first: cameras are frequently renamed, and a renamed body has no usable name to match on.
 
-| Camera | model id | BLE local name | Datalink | TCP-7001 poke | WiFi | State |
-|---|---|---|---|---|---|---|
-| Osmo Action (1) | `0x0006` ⚠️ | `OsmoAction` | 9004 | yes | WPA2 | ⚠️ lists, cannot download — [index-based](#1-get-media-list) |
-| Osmo Action 2 | `0x0010` | `OsmoAction2` | 9004 — | yes — | WPA2 — | — never run |
-| Osmo Action 3 | `0x0012` | `OsmoAction3` | 9004 — | yes — | WPA2 — | — never run |
-| Osmo Action 4 | `0x0014` | `OsmoAction4` | 9004 — | yes — | WPA2 | ❌ pairs and yields creds; **AP never appears** |
-| Osmo Action 5 Pro | `0x0015` | `OsmoAction5Pro` | 9004 | yes | WPA2 | ✅ |
-| **Xtra Edge Pro** | `0x0015` | `XtraEdgePro` | **10004** | **no** | WPA2 | ✅ same id as the A5P — see below |
-| Osmo 360 | `0x0017` | `Osmo360` | 9004 — | yes — | **WPA3** | ❌ pairs; SSID never appears |
-| Osmo Action 6 | `0x0018` | `OsmoAction6` | 9004 | yes | WPA2 | ✅ |
-| Osmo Nano | `0x0019` | `OsmoNano` | 9004 | yes | WPA2 | ✅ |
-| Osmo Pocket 3 | `0x0020` | `OsmoPocket3` | 9004 | yes | WPA2 | ✅ |
-| Osmo Pocket 4 | `0x0021` | `OsmoPocket4` | 9004 | yes | WPA2 | ✅ |
-| Osmo Pocket 4 Pro | `0x0022` | `OsmoPocket4P` | 9004 | yes | WPA2 | ✅ browse; download unfinished |
-| Mavic 3 | `0x0070` | *(varies)* | **9003** | **no** | WPA2 | ✅ drone — [§27](#27-session-open-0x51--required-before-anything-else-mavic-3) |
-| DJI Neo 2 | `0x007e` | *(varies)* | **9003** | **no** | WPA2 | ❌ drone — [§27a](#27a-neo-2--the-same-transport-a-different-unlock) |
+| Camera | model id | BLE local name | Datalink | TCP-7001 poke | WiFi |
+|---|---|---|---|---|---|
+| Osmo Action (1) | `0x0006` ⚠️ | `OsmoAction` | 9004 | yes | WPA2 |
+| Osmo Action 2 | `0x0010` | `OsmoAction2` | 9004 — | yes — | WPA2 — |
+| Osmo Action 3 | `0x0012` | `OsmoAction3` | 9004 — | yes — | WPA2 — |
+| Osmo Action 4 | `0x0014` | `OsmoAction4` | 9004 — | yes — | WPA2 |
+| Osmo Action 5 Pro | `0x0015` | `OsmoAction5Pro` | 9004 | yes | WPA2 |
+| **Xtra Edge Pro** | `0x0015` | `XtraEdgePro` | **10004** | **no** | WPA2 |
+| Osmo 360 | `0x0017` | `Osmo360` | 9004 — | yes — | **WPA3** |
+| Osmo Action 6 | `0x0018` | `OsmoAction6` | 9004 | yes | WPA2 |
+| Osmo Nano | `0x0019` | `OsmoNano` | 9004 | yes | WPA2 |
+| Osmo Pocket 3 | `0x0020` | `OsmoPocket3` | 9004 | yes | WPA2 |
+| Osmo Pocket 4 | `0x0021` | `OsmoPocket4` | 9004 | yes | WPA2 |
+| Osmo Pocket 4 Pro | `0x0022` | `OsmoPocket4P` | 9004 | yes | WPA2 |
+| Mavic 3 | `0x0070` | *(varies)* | **9003** | **no** | WPA2 |
+| DJI Neo 2 | `0x007e` | *(varies)* | **9003** | **no** | WPA2 |
+
+Where a body behaves differently from the rest of the line:
+
+- **Osmo Action (1)** speaks the older [index-based list](#1-get-media-list) and addresses media by
+  numeric index, not by path.
+- **Osmo Action 4** and the **Osmo 360** pair and hand over credentials, but their AP never appears, so
+  neither reaches the datalink. The 360 is the only body advertising an extra `fff7` characteristic.
+- **Mavic 3** and **Neo 2** are aircraft: `udp/9003`, no poke, and a `0x51` session-open before anything
+  ([§27](#27-session-open-0x51--required-before-anything-else-mavic-3),
+  [§27a](#27a-neo-2--the-same-transport-a-different-unlock)).
 
 - **The Xtra rebrand shares the DJI model id.** An Xtra Edge Pro is an Action 5 Pro and advertises
   `0x0015`, but its firmware moves the datalink to **10004 with no poke**. Distinguish it by its own OUI
