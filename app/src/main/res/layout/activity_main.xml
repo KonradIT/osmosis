@@ -43,7 +43,7 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:paddingVertical="4dp"
-                android:text="Cameras"
+                android:text="@string/cameras"
                 android:textColor="@color/osmo_ink"
                 android:textSize="22sp"
                 android:textStyle="bold" />
@@ -66,7 +66,7 @@
                 android:id="@+id/switchSaveLogs"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Save logs"
+                android:text="@string/save_logs"
                 android:textColor="@color/osmo_muted"
                 android:textSize="12sp" />
         </LinearLayout>
@@ -106,7 +106,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Rescan"
+            android:text="@string/rescan"
             app:icon="@android:drawable/ic_popup_sync" />
     </LinearLayout>
 
@@ -148,7 +148,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="6dp"
-                        android:text="Photos" />
+                        android:text="@string/filter_photos" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnFilterVideos"
@@ -156,7 +156,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="6dp"
-                        android:text="Videos" />
+                        android:text="@string/filter_videos" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnFilterFaved"
@@ -164,14 +164,14 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="6dp"
-                        android:text="Faved" />
+                        android:text="@string/filter_faved" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnSelect"
                         style="@style/FilterChip"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Select" />
+                        android:text="@string/select" />
                 </LinearLayout>
             </HorizontalScrollView>
 
@@ -252,7 +252,7 @@
             android:layout_height="wrap_content"
             android:layout_gravity="bottom|end"
             android:layout_margin="18dp"
-            android:text="Download"
+            android:text="@string/download"
             android:textColor="@color/osmo_on_accent"
             app:backgroundTint="@color/osmo_accent"
             app:icon="@drawable/ic_download"

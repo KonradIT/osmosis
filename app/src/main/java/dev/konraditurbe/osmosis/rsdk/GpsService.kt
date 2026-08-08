@@ -20,6 +20,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.core.FileLog
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -126,7 +127,7 @@ class GpsService : Service(), RsdkController.Listener {
         // The Activity may never have run (or be long gone) — open the log ourselves if enabled.
         FileLog.startIfEnabled(this)
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(
-            NotificationChannel(CHANNEL, "GPS sync", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL, getString(R.string.notif_channel_gps), NotificationManager.IMPORTANCE_LOW)
         )
         rsdk = RsdkController(this, this)
     }
@@ -233,19 +234,20 @@ class GpsService : Service(), RsdkController.Listener {
     }
 
     private fun buildNotification(): Notification {
-        val mode = status?.modeName ?: if (connected) "—" else "connecting…"
-        val rec = if (status?.recording == true) "yes" else "no"
-        val gps = if (gpsHealthy()) "healthy" else "not healthy"
+        val mode = status?.modeName
+            ?: if (connected) "—" else getString(R.string.gps_notif_connecting)
+        val rec = getString(if (status?.recording == true) R.string.gps_notif_rec_yes else R.string.gps_notif_rec_no)
+        val gps = getString(if (gpsHealthy()) R.string.gps_notif_healthy else R.string.gps_notif_not_healthy)
         val stop = PendingIntent.getService(
             this, 0, Intent(this, GpsService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("GPS sync · $cameraName")
-            .setContentText("Mode - $mode - Rec - $rec - gps: $gps")
+            .setContentTitle(getString(R.string.gps_notif_title, cameraName))
+            .setContentText(getString(R.string.gps_notif_text, mode, rec, gps))
             .setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stop)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.stop), stop)
             .build()
     }
 

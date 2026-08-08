@@ -248,7 +248,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 if (groupPaths.size > 1) setupBurstStrip()     // frames came from the DUML group-expand
                 loadPhoto()
             }
-            else -> showStatus("No preview for .${file.ext}")
+            else -> showStatus(getString(R.string.no_preview, file.ext))
         }
     }
 
@@ -308,9 +308,9 @@ class MediaPreviewActivity : AppCompatActivity() {
     private fun hasTrim() = trimStartMs >= 0 && trimEndMs > trimStartMs
 
     private fun queueLabel() = when {
-        queued -> "Remove from Queue"
-        hasTrim() -> "Add to Queue (trimmed)"
-        else -> "Add to Queue"
+        queued -> getString(R.string.remove_from_queue)
+        hasTrim() -> getString(R.string.add_to_queue_trimmed)
+        else -> getString(R.string.add_to_queue)
     }
 
     // Name -> "already fully saved" — checked off the UI thread, cached (per burst frame / the single file).
@@ -346,7 +346,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         val alreadySaved = !hasTrim() && downloadedCache[name] == true
         btnQueue.isEnabled = !alreadySaved
         btnQueue.alpha = if (alreadySaved) 0.5f else 1f
-        btnQueue.text = if (alreadySaved) "Already downloaded" else queueLabel()
+        btnQueue.text = if (alreadySaved) getString(R.string.already_downloaded) else queueLabel()
 
         // Share/Edit act on the saved copy, so they only exist once there is one — and they follow the
         // title overlay, since a tap-to-hide should clear the frame completely.
@@ -375,9 +375,10 @@ class MediaPreviewActivity : AppCompatActivity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             }
         }
-        val title = if (action == Intent.ACTION_SEND) "Share" else "Edit with"
+        val title = if (action == Intent.ACTION_SEND) getString(R.string.share) else getString(R.string.edit_with)
+        val noAppRes = if (action == Intent.ACTION_SEND) R.string.no_app_available_share else R.string.no_app_available_edit
         runCatching { startActivity(Intent.createChooser(intent, title)) }
-            .onFailure { toast("No app available to ${title.lowercase()}") }
+            .onFailure { toast(getString(noAppRes)) }
     }
 
     /** Wire the custom player (transport + scrubber) and trim buttons — once. Trim *values* are (re)set
@@ -409,17 +410,17 @@ class MediaPreviewActivity : AppCompatActivity() {
         })
 
         btnMarkIn.setOnClickListener {
-            if (videoView.isPlaying) { toast("Pause, then set the start point"); return@setOnClickListener }
+            if (videoView.isPlaying) { toast(getString(R.string.pause_then_set_start)); return@setOnClickListener }
             trimStartMs = videoView.currentPosition.toLong()
             if (trimEndMs in 0..trimStartMs) trimEndMs = -1L // stale end now before start
             updateTrimUi()
             if (queued) commitQueue()
         }
         btnMarkOut.setOnClickListener {
-            if (videoView.isPlaying) { toast("Pause, then set the end point"); return@setOnClickListener }
-            if (trimStartMs < 0) { toast("Set the start point [ first"); return@setOnClickListener }
+            if (videoView.isPlaying) { toast(getString(R.string.pause_then_set_end)); return@setOnClickListener }
+            if (trimStartMs < 0) { toast(getString(R.string.set_start_first)); return@setOnClickListener }
             val pos = videoView.currentPosition.toLong()
-            if (pos <= trimStartMs) { toast("End must be after the start point"); return@setOnClickListener }
+            if (pos <= trimStartMs) { toast(getString(R.string.end_after_start)); return@setOnClickListener }
             trimEndMs = pos
             updateTrimUi()
             if (queued) commitQueue()
@@ -601,7 +602,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 startStream(streamCandidates[streamIdx])
                 return@setOnErrorListener true
             }
-            showStatus("Can't play this clip ($what/$extra)")
+            showStatus(getString(R.string.cant_play_clip, what, extra))
             true
         }
     }
@@ -640,7 +641,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                     photoZoom?.reset()   // a new bitmap starts fitted, never inheriting the last one's zoom
                     spinner.visibility = ProgressBar.GONE
                     photoView.visibility = ImageView.VISIBLE
-                } else showStatus("Preview unavailable")
+                } else showStatus(getString(R.string.preview_unavailable))
             }
         }.start()
     }

@@ -1,5 +1,6 @@
 package dev.konraditurbe.osmosis.ui
 
+import android.content.Context
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
@@ -29,6 +30,7 @@ import java.util.Calendar
  * always open the preview so the user can pick the frame there.
  */
 class MediaGridAdapter(
+    private val context: Context,
     initial: List<CameraFile>,
     private val loader: ImageLoader,
     private val meta: MetaLoader,
@@ -38,6 +40,9 @@ class MediaGridAdapter(
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     enum class TypeFilter { ALL, PHOTOS, VIDEOS }
+
+    // Month abbreviations for the "30 JUL 2026" date headers, from resources so they localize.
+    private val months: Array<String> = context.resources.getStringArray(R.array.month_abbreviations)
 
     // Backing list grows as older pages load on scroll (append only).
     private val all: MutableList<CameraFile> = initial.toMutableList()
@@ -113,19 +118,19 @@ class MediaGridAdapter(
 
     /** "TODAY" / "YESTERDAY" for the two most recent days, else "30 JUL 2026"; "" → "UNKNOWN DATE". */
     private fun headerLabel(ymd: String): String {
-        if (ymd.length != 8) return "UNKNOWN DATE"
+        if (ymd.length != 8) return context.getString(R.string.date_unknown)
         val now = Calendar.getInstance()
         val today = ymdOf(now)
         now.add(Calendar.DAY_OF_YEAR, -1)
         val yesterday = ymdOf(now)
         return when (ymd) {
-            today -> "TODAY"
-            yesterday -> "YESTERDAY"
+            today -> context.getString(R.string.today)
+            yesterday -> context.getString(R.string.yesterday)
             else -> {
                 val day = ymd.substring(6, 8).trimStart('0').ifEmpty { "0" }
                 val month = ymd.substring(4, 6).toIntOrNull() ?: 0
-                val mon = MONTHS.getOrElse(month - 1) { "?" }
-                "$day $mon ${ymd.substring(0, 4)}"
+                val mon = months.getOrElse(month - 1) { "?" }
+                context.getString(R.string.date_header, day, mon, ymd.substring(0, 4))
             }
         }
     }
@@ -323,7 +328,5 @@ class MediaGridAdapter(
     companion object {
         private const val TYPE_HEADER = 0
         private const val TYPE_ITEM = 1
-        private val MONTHS = arrayOf(
-            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
     }
 }

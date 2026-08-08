@@ -46,7 +46,7 @@
             android:background="@drawable/chip_new"
             android:paddingHorizontal="7dp"
             android:paddingVertical="2dp"
-            android:text="NEW"
+            android:text="@string/new_tag"
             android:textColor="@color/osmo_on_accent"
             android:textSize="10sp"
             android:textStyle="bold"

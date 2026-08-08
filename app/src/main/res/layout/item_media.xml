@@ -10,7 +10,7 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:scaleType="centerCrop"
-        android:contentDescription="thumbnail" />
+        android:contentDescription="@string/cd_thumbnail" />
 
     <TextView
         android:id="@+id/name"
