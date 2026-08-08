@@ -9,7 +9,7 @@ import dev.konraditurbe.osmosis.dcf.DcfAddressing
  *
  * | | path-based camera | DCF-indexed device |
  * |---|---|---|
- * | who | Nano, Osmo Action 5 Pro / Xtra, the 360 | Mavic 3 family; Osmo Action 1 (ROADMAP #6) |
+ * | who | Nano, Osmo Action 5 Pro / Xtra, the 360 | Mavic 3 family; Osmo Action 1 ([DcfRecords]) |
  * | endpoint | `/v2?storage=N&path=…` | `/v1?file_index=…&file_subtype=…` |
  * | proxy | a sidecar file (`.LRF`/`.XRF`) at its own path | a **subtype** of the same index |
  * | impl | [PathAddressing] | [DcfAddressing] |

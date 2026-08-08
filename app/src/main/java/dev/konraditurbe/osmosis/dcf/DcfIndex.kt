@@ -10,7 +10,8 @@ package dev.konraditurbe.osmosis.dcf
  *
  * This is **not drone-specific**. Two very different devices address media this way:
  *  - **drones** (Mavic 3 family) — 94-byte manifest records, see [DcfRecords.decodeDrone];
- *  - the **Osmo Action 1** — 65-byte index records over the same `/v1` endpoint (ROADMAP #6).
+ *  - the **Osmo Action 1** — 65-byte index records over the same `/v1` endpoint, see
+ *    [DcfRecords.ACTION1_STRIDE] and MEDIA_PROTOCOL.md §1 ("Parsed — index-based").
  *
  * Everything else in the app addresses media by *path* over `/v2?storage=N&path=…` instead. Keeping the
  * two schemes in separate packages is the point: a path-based camera never touches this file.

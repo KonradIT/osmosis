@@ -265,7 +265,8 @@ class DumlTransport(
      * 1. r0-1 once held `camChannel` — the *camera's* telemetry seq, refreshed by every received packet.
      *    Telemetry runs ~10× faster than our commands and wraps to a different phase, so r0-1 drifted far
      *    from r2-3 and the receive window dropped our writes. That single divergence is what forced a
-     *    fresh registered session for every delete/favorite/page/burst (ROADMAP #12).
+     *    fresh registered session for every delete/favorite/page/burst. See MEDIA_PROTOCOL.md
+     *    § "Datalink transport / sequencing".
      * 2. A later revision set the *drone* ack to `camChannel`, on the theory that a drone echoes our seq
      *    back in r0-1. It does not — it repeats the handshake channel forever, so the ack froze at
      *    `0x87b8` while our seq ran away with the uplink stream: measured 564 packets stale against DJI

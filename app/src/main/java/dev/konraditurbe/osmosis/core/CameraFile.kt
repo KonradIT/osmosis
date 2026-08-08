@@ -35,7 +35,7 @@ data class CameraFile(
     // DCF-INDEXED DEVICES ONLY (0 on a path-based camera). Drones — and the Osmo Action 1 — address
     // media by a packed numeric index instead of a path, served at `/v1?file_index=N` rather than
     // `/v2?…&path=…`. The [path] above is synthesised from this index for display/naming only — it is
-    // NOT a URL these devices answer. See [DcfIndex], [DcfUrls] and ROADMAP #14.
+    // NOT a URL these devices answer. See [DcfIndex], [DcfUrls] and MEDIA_PROTOCOL.md §29.
     val fileIndex: Long = 0L,
     // Modification time, unix seconds — drones put it straight in the manifest record, where cameras
     // encode it in the filename ([timestamp]). 0 = unknown.

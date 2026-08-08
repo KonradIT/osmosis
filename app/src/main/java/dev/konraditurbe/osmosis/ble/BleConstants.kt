@@ -39,7 +39,7 @@ object BleConstants {
         // Verified 2026-08-07: OsmoPocket4P-6E55 advertised the new format with product type 218
         // (HG224), which corresponds to classic id 0x22.
         0x0022 to "OsmoPocket4Pro",
-        0x0070 to "Mavic3",   // drone — offload confirmed end-to-end on hardware (ROADMAP #14)
+        0x0070 to "Mavic3",   // drone — offload confirmed end-to-end on hardware (see DroneSession)
         0x007e to "Neo2",     // drone — never offloaded; datalink port unconfirmed
     )
 }

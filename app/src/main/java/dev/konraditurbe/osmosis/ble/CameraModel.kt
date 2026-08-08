@@ -23,7 +23,8 @@ data class CameraModel(
     val singleSdStorage: Boolean = false,
     // DJI drones (Mavic, Neo, …) speak the same BLE DUML but differ downstream: their WiFi creds only
     // unlock for the official pairing token ("DJI FLY", not "osmo"), pairing is confirmed by a ~2 s
-    // power-button press, and their media API is NOT the camera datalink (see ROADMAP #14).
+    // power-button press, and their media API is NOT the camera datalink (see DroneSession, and
+    // MEDIA_PROTOCOL.md § "DJI Drone QuickTransfer media offload").
     val isDrone: Boolean = false,
 ) {
     /** The SetPairingPIN token this device expects: a drone only releases WiFi creds to "DJI FLY". */
@@ -79,7 +80,7 @@ data class CameraModel(
             // this flag governs really is confirmed, even though no download has yet finished.
             // It advertises the new format (product type 218 / HG224), not a classic model byte.
             0x0022 to CameraModel("Osmo Pocket 4 Pro", verified = true),
-            // Drones (see ROADMAP #14). The datalink is the SAME handshake as a camera but on
+            // Drones (MEDIA_PROTOCOL.md §27). The datalink is the SAME handshake as a camera but on
             // **udp/9003** with NO tcp-7001 poke — plus a `0x51/0x02` session-open the cameras don't
             // need, before which the aircraft answers nothing at all.
             //

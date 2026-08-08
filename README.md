@@ -35,7 +35,7 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 - Live preview
 - USB-C offload
 - DJI drone offload via QuickTransfer — **working on a Mavic 3**; Neo 2 and Mini 3 in progress
-  ([ROADMAP #14](ROADMAP.md))
+  ([ROADMAP #14 and #18](ROADMAP.md))
 
 ## Supported cameras
 

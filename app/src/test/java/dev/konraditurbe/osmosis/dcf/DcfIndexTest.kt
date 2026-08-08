@@ -7,7 +7,7 @@ import org.junit.Test
 
 /**
  * The DCF addressing scheme on its own, independent of any device's wire format — the layer shared by
- * the drones and (per ROADMAP #6) the Osmo Action 1.
+ * the drones and the Osmo Action 1 (MEDIA_PROTOCOL.md §1, "Parsed — index-based").
  *
  * These assertions were previously reachable only through a Mavic 3 manifest fixture. Pinning them
  * directly is what lets a second record layout be added without re-deriving the packing rules.

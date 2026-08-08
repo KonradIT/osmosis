@@ -227,10 +227,12 @@ abstract class DumlSession(
                 ); return true
             }
             set == 0x02 && id == 0xDC && p.size >= 22 -> {
-                // One [total][free] u32-LE MiB block PER STORE (byte 2 = store count): the first at
-                // @6/@10, the built-in at @24/@28. Two-store bodies send 32 B (SD @6 + built-in @24);
-                // a **single-store body (Pocket 3 = microSD only) sends 22 B** with just the first
-                // block, so read the built-in only when it's actually there. Ground-truthed: an
+                // One [total][free] u32-LE MiB block PER STORE (byte 2 = store count, mirrored at
+                // byte 5): the first at @6/@10, the built-in at @24/@28. Measured payload lengths are
+                // 22 B single-store and 40 B two-store (xtra_13.bin) — @32-39 of the 40 B body is
+                // unmapped. The >= 32 test below is a "is the second block present" gate, NOT the
+                // frame length; a **single-store body (Pocket 3 = microSD only) sends 22 B** with just
+                // the first block, so read the built-in only when it's actually there. Ground-truthed: an
                 // Action 6's @6/@10 (121785/109748 MiB) matched its on-screen 118.9/107.2 GB; the
                 // Action 5 Pro + Xtra rebadge report an identical 48980 MiB built-in; a card-less
                 // Xtra reports @6 = 0. Byte 0 is *not* an inserted flag (0x11 no card / 0x00 with) —
@@ -277,7 +279,7 @@ abstract class DumlSession(
                 // type 0x05 id 0), so the dock signal lives in this frame: u16@1 = pack mV,
                 // i32@5 = current mA (signed, -ve = discharging), @20 = percent, @27 = dock
                 // attached, @32 = taking charge. Confirmed over six live dock/undock transitions
-                // (ROADMAP #5). Logged on change only — a state line, not a 1 Hz stream.
+                // (MEDIA_PROTOCOL.md §20). Logged on change only — a state line, not a 1 Hz stream.
                 if (p.size >= 34) {
                     val mv = (p[1].toInt() and 0xFF) or ((p[2].toInt() and 0xFF) shl 8)
                     val cur = ((p[5].toInt() and 0xFF) or ((p[6].toInt() and 0xFF) shl 8) or

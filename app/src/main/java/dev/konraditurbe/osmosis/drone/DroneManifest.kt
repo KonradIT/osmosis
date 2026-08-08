@@ -7,7 +7,7 @@ import dev.konraditurbe.osmosis.dcf.DcfRecords
  * The DJI **drone** wire format for media listing — a different payload inside the *same*
  * `0x00/0x26` → `0x00/0x27` DUML exchange the Osmo cameras use. Reverse-engineered from a PCAPdroid
  * capture of **DJI Fly ↔ a real Mavic 3** browsing its gallery over QuickTransfer WiFi (2026-08-01);
- * see ROADMAP #14.
+ * see MEDIA_PROTOCOL.md §28.
  *
  * **What's the same as a camera:** the DUML command pair (`0x00/0x26` query, `0x00/0x27` reply,
  * `receiverType = 0x01`), the datalink transport, and the `0x4a` sub-protocol envelope — the drone

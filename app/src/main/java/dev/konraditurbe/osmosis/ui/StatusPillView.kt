@@ -97,7 +97,7 @@ class StatusPillView @JvmOverloads constructor(
     /**
      * Power line from the `0x0d/0x02` battery frame: pack voltage plus charge/draw current, and
      * whether the dock is attached. The dock's *own* charge level isn't reported by the camera at all
-     * (ROADMAP #5), so we show the camera's power state rather than inventing a dock percentage.
+     * (MEDIA_PROTOCOL.md §20), so we show the camera's power state rather than invent a dock percentage.
      */
     private fun powerLabel(s: CameraStatus): String {
         val volts = "%.2f V".format(s.batteryMilliVolts / 1000f)

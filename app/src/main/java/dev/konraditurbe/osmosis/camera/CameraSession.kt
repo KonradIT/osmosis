@@ -673,7 +673,7 @@ class CameraSession(
      * Delete files by their manifest [handles] (DUML **0x00/0x28** — the file-management cmdset, same
      * one the list `0x00/0x26` lives in; reverse-engineered from a Mimo↔Nano pcap). Returns the reply
      * status word (**0x0000 = OK**), or null on failure/timeout. **Irreversible on the SD card** — the
-     * caller must confirm intent and pass only handles it means to destroy. See ROADMAP #4.
+     * caller must confirm intent and pass only handles it means to destroy. MEDIA_PROTOCOL.md §2.
      *
      * Runs in a **fresh registered session**: the browse keep-alive loop advances our `udpSeq` past
      * the window the camera will accept, and while reads (the list) still get answered, writes get

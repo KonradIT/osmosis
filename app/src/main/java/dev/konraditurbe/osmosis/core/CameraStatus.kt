@@ -4,7 +4,7 @@ package dev.konraditurbe.osmosis.core
  * Live camera status decoded off the DUML datalink (battery, power, storage, firmware).
  *
  * The power fields come from the `0x0d/0x02` battery push, mapped by docking/undocking a Nano
- * mid-session and watching which bytes moved (ROADMAP #5). Note the dock's *own* charge level is not
+ * mid-session and watching which bytes moved (MEDIA_PROTOCOL.md §20). Note the dock's *own* charge is not
  * reported anywhere in the protocol — only the camera's, plus whether the dock is attached/charging.
  */
 data class CameraStatus(
