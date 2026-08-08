@@ -1520,7 +1520,7 @@ class CameraSession(
         // subscribes to). Mimo addresses SetTime here; the file/media receiver (0x01) silently drops it.
         sendDuml(0x00, 0x6a, b.toByteArray(), receiverType = 0x08, receiverId = 1)
         recvAll(300); sendAck()
-        log("datalink: time synced → ${tz.id} (${offMin}min), unix $nowSec")
+        log("datalink: time synced (UTC offset ${offMin}min), unix $nowSec")
     }
 
     /**
