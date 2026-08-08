@@ -21,6 +21,18 @@ class BleAdvertTest {
     /** OsmoPocket4P-6E55, as logged. Classic bytes are zero; the id lives at [10:12]. */
     private val pocket4Pro = hex("000000ee0004bd6e5620da000010")
 
+    /**
+     * A plain Osmo Pocket 4, from a tester's scan on 2026-08-08. Same payload *length* as its Pro
+     * sibling above, but the classic format: model id populated, new-format flag clear.
+     *
+     *     OP4   21 00 00 be 00 00 ee 8d d9 a0 00 00 00 00   classic 0x0021, flag clear
+     *     OP4P  00 00 00 ee 00 04 bd 6e 56 20 da 00 00 10   classic 0,      flag set -> 218
+     *
+     * So the two formats are chosen per model, not per generation or payload size — which is exactly
+     * why 1.3.0 handled the Pocket 4 and left the Pocket 4 Pro as unknown(0x0000).
+     */
+    private val pocket4 = hex("210000be0000ee8dd9a000000000")
+
     /** Nano shape: model 0x0019 at [0:2], then MAC, then a trailing byte. */
     private val nano = hex("190000c25a8abdc2d803")
 
@@ -82,6 +94,30 @@ class BleAdvertTest {
     fun `all zeroes is not a model`() {
         assertNull(BleAdvert.modelId(hex("0000")))
         assertNull(BleAdvert.modelId(ByteArray(0)))
+    }
+
+    /**
+     * The Pocket 4 resolves by id even though the tester had **renamed** the camera to `MEGG-OP4`.
+     * Nothing in that name matches the model table, so the name fallback would have failed outright;
+     * only the advert's classic id identifies it. Real devices in the wild are renamed.
+     */
+    @Test
+    fun `pocket 4 resolves by id on a renamed camera`() {
+        val d = BleAdvert.decode(pocket4)
+        assertFalse("classic format: the flag bit at payload[5] is clear", d.newFormat)
+        assertEquals(0x0021, d.modelId)
+        assertEquals("OsmoPocket4", BleConstants.MODEL_NAMES[d.modelId])
+        val m = CameraModel.resolve(d.modelId, "MEGG-OP4")
+        assertEquals("Osmo Pocket 4", m.name)
+        assertEquals(9004, m.datalinkPort)
+    }
+
+    /** The pair differ only in which field carries the model — length alone can't tell them apart. */
+    @Test
+    fun `pocket 4 and pocket 4 pro are the same length but different formats`() {
+        assertEquals(pocket4.size, pocket4Pro.size)
+        assertEquals(0x0021, BleAdvert.modelId(pocket4))
+        assertEquals(0x0022, BleAdvert.modelId(pocket4Pro))
     }
 
     @Test
