@@ -56,6 +56,35 @@ abstract class DumlSession(
     protected var status = CameraStatus()
     private var lastSig = ""          // last display signature fired to onStatus (throttles UI updates)
     private var lastBattSig = ""      // dock-relevant bytes of 0x0d/02; log only on change (#5)
+    private var lastStorageSig = ""   // the 0x02/0xdc body; log only when the numbers move
+
+    /** 0x04/0x05 gimbal-telemetry frames seen this session — see applyStatusFrame. */
+    @Volatile protected var gimbalFrames = 0L
+    private var lastGimbalReport = 0L
+    private var lastGimbalFrames = 0L
+
+    /**
+     * Report whether the gimbal is still running, at most once every [everyMs].
+     *
+     * Exists for one question we could never answer from a log: a Pocket 3 tester reports the gimbal
+     * stays powered during a transfer, and the only evidence either way was someone watching the
+     * camera. The telemetry rate settles it — motors running means frames arriving.
+     */
+    protected fun reportGimbalActivity(everyMs: Long = 5000) {
+        val now = System.currentTimeMillis()
+        if (lastGimbalReport == 0L) { lastGimbalReport = now; lastGimbalFrames = gimbalFrames; return }
+        val dt = now - lastGimbalReport
+        if (dt < everyMs) return
+        val rate = (gimbalFrames - lastGimbalFrames) * 1000.0 / dt
+        lastGimbalReport = now; lastGimbalFrames = gimbalFrames
+        // Only worth a line when the answer changes: streaming vs stopped.
+        val nowMoving = rate >= 1.0
+        if (nowMoving != gimbalWasMoving) {
+            gimbalWasMoving = nowMoving
+            log("gimbal: %s (0x04/0x05 at %.1f/s)".format(if (nowMoving) "RUNNING" else "quiet", rate))
+        }
+    }
+    private var gimbalWasMoving = false
 
     /**
      * The handshake (SYN) payload: our proposed **base sequence** followed by the window/MTU parameters
@@ -165,6 +194,8 @@ abstract class DumlSession(
         status = CameraStatus()
         lastSig = ""
         lastBattSig = ""
+        lastStorageSig = ""
+        gimbalFrames = 0; lastGimbalReport = 0; lastGimbalFrames = 0; gimbalWasMoving = false
     }
 
     /** Fire [onStatus] if anything the UI displays has actually changed. */
@@ -209,6 +240,17 @@ abstract class DumlSession(
                 val inTotal = if (hasInternal) u32le(p, 24).toInt() else 0
                 val inFree = if (hasInternal) u32le(p, 28).toInt() else 0
                 fun sane(v: Int) = v in 0..50_000_000
+                // The pill's whole input, logged once per change. Without this a one-line pill is
+                // indistinguishable from three different faults: the camera never sent the frame, it
+                // sent a single-store body, or it sent two stores we mis-parsed. A Nano browse showed
+                // exactly that ambiguity — one line on screen and nothing in the log to explain it.
+                val dcSig = "${p.size}|$sdTotal|$sdFree|$inTotal|$inFree"
+                if (dcSig != lastStorageSig) {
+                    lastStorageSig = dcSig
+                    log("storage: 0x02/0xdc ${p.size}B stores=${p[2].toInt() and 0xFF} " +
+                        "first=$sdTotal/$sdFree MB" +
+                        (if (hasInternal) " built-in=$inTotal/$inFree MB" else " (no built-in block)"))
+                }
                 status = status.copy(
                     sdTotalMb = if (sane(sdTotal)) sdTotal else status.sdTotalMb,
                     sdFreeMb = if (sane(sdFree)) sdFree else status.sdFreeMb,
@@ -217,6 +259,12 @@ abstract class DumlSession(
                     internalFreeMb = if (!hasInternal) 0 else if (sane(inFree)) inFree else status.internalFreeMb,
                 ); return true
             }
+            // Gimbal position telemetry. A live gimbal pushes this continuously (~20 Hz per the
+            // reverse-engineered Pocket 3 BLE library in reference/lib-osmo-ble, which names cmdSet
+            // 0x04 / cmd 0x05 "push position telemetry"), so its presence is a direct read on whether
+            // the motors are still running — the thing a Pocket 3 tester can otherwise only judge by
+            // looking at the camera. Counted here, reported by the session's keep-alive.
+            set == 0x04 && id == 0x05 -> { gimbalFrames++; return true }
             set == 0x00 && id == 0x00 && p.size >= 6 -> {
                 // GetVersion reply: NUL-separated ASCII (sdk\0name\0firmware); grab the version string.
                 val text = String(p, Charsets.US_ASCII)

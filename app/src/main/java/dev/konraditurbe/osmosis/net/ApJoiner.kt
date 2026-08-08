@@ -18,13 +18,25 @@ class ApJoiner(context: Context, private val listener: Listener) {
         fun onLog(s: String)
         fun onNetwork(network: Network, link: LinkProperties?)
         fun onFailed(reason: String)
+        /**
+         * The AP went away after a successful join. Retry policy lives with the caller, which is the
+         * only thing that knows whether a session is still worth saving — call [rejoin] to try again.
+         */
+        fun onLost()
     }
 
     private val cm = context.applicationContext
         .getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private var cb: ConnectivityManager.NetworkCallback? = null
 
+    // Remembered so [rejoin] can re-issue the identical request without the caller having to hold
+    // the credentials for the whole session.
+    private var lastSsid: String? = null
+    private var lastPassphrase: String = ""
+    private var lastWpa3: Boolean = false
+
     fun join(ssid: String, passphrase: String, wpa3: Boolean = false) {
+        lastSsid = ssid; lastPassphrase = passphrase; lastWpa3 = wpa3
         val specBuilder = WifiNetworkSpecifier.Builder().setSsid(ssid)
         if (passphrase.isNotEmpty()) {
             // The Osmo 360 AP is WPA3-SAE; the rest are WPA2-PSK.
@@ -50,11 +62,30 @@ class ApJoiner(context: Context, private val listener: Listener) {
 
             override fun onLost(network: Network) {
                 listener.onLog("WiFi: onLost")
+                listener.onLost()
             }
         }
         cb = callback
         listener.onLog("WiFi: requesting \"$ssid\" (${if (wpa3) "WPA3" else "WPA2"}, no-internet)...")
         cm.requestNetwork(request, callback)
+    }
+
+    /**
+     * Re-issue the last [join] after the AP dropped.
+     *
+     * A `WifiNetworkSpecifier` request does not reconnect on its own — once the camera's AP goes away
+     * the process stays bound to a dead network and every socket fails `ENONET`, which is exactly how
+     * an interrupted transfer surfaced (a Pocket 4 Pro lost its AP 49 s into a download and nothing
+     * downstream could recover). Unregister and request again; `onAvailable` re-binds the process.
+     *
+     * @return false if there is nothing to retry because [join] was never called.
+     */
+    fun rejoin(): Boolean {
+        val ssid = lastSsid ?: return false
+        cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+        cb = null
+        join(ssid, lastPassphrase, lastWpa3)
+        return true
     }
 
     fun release() {
