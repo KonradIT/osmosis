@@ -82,17 +82,41 @@ class HttpClient(
         }
     }
 
+    /** Outcome of a streamed download — see [download]. */
+    enum class Fetch {
+        /** The server sent the whole (remaining) body and closed cleanly. */
+        DONE,
+        /** The transfer started but ended early. Whatever arrived is valid; resume from the new length. */
+        INTERRUPTED,
+        /** A ranged request was answered `200` (whole file) instead of `206`. The body starts at byte 0,
+         *  so appending it at the resume offset would corrupt the file — restart from zero instead. */
+        RANGE_IGNORED,
+        /** No usable response at all (bad status, connect failure). Nothing was written. */
+        FAILED,
+    }
+
     /**
      * Stream a file to [out], starting at [rangeStart] (0 = whole file). [onProgress] gets the
-     * running total-bytes-written. Returns true on clean completion.
+     * running total-bytes-written.
+     *
+     * `Connection: close` is deliberate: a long transfer the camera cuts leaves a socket that must not
+     * be reused, and Android's connection pool will otherwise hand the same dead socket to the very next
+     * request — which then fails instantly with "unexpected end of stream" having moved no bytes.
      */
-    fun download(path: String, out: OutputStream, rangeStart: Long, onProgress: (Long) -> Unit): Boolean {
-        val c = open(path, "GET", rangeStart)
+    fun download(path: String, out: OutputStream, rangeStart: Long, onProgress: (Long) -> Unit): Fetch {
+        val c = open(path, "GET", rangeStart).apply { setRequestProperty("Connection", "close") }
         return try {
             val code = c.responseCode
             if (code !in 200..299) {
                 log("download $path -> HTTP $code")
-                return false
+                return Fetch.FAILED
+            }
+            // A range was asked for and the server answered with the whole file. Writing this body at
+            // the resume offset would splice the file's opening bytes into its middle, producing a
+            // plausible-sized but corrupt video — so report it and let the caller start over.
+            if (rangeStart > 0 && code != 206) {
+                log("download $path -> HTTP $code for a ranged request (Range ignored) — restarting at 0")
+                return Fetch.RANGE_IGNORED
             }
             val buf = ByteArray(65536)
             var total = rangeStart.coerceAtLeast(0)
@@ -106,10 +130,11 @@ class HttpClient(
                 }
             }
             out.flush()
-            true
+            Fetch.DONE
         } catch (e: Exception) {
+            runCatching { out.flush() }   // keep whatever arrived, so the resume starts from it
             log("download $path ERR ${e.javaClass.simpleName}: ${e.message}")
-            false
+            Fetch.INTERRUPTED
         } finally {
             c.disconnect()
         }
