@@ -563,6 +563,9 @@ class CameraSession(
                     if (tick % 3 == 0)
                         sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
                     if (tick % 3 == 0) sendDuml(0x02, 0xA0, ByteArray(0), receiverType = 0x01, receiverId = 0)
+                    // Says once, on change, whether the gimbal is still turning — the Pocket 3
+                    // question nobody could answer from a log before. Rate-limited internally.
+                    reportGimbalActivity()
                     if (tick % 6 == 0) sendDuml(0x02, 0x61, ByteArray(0), receiverType = 0x01, receiverId = 0)
                     // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode
                     // should simply stay, but the camera can also be knocked out of it by something we

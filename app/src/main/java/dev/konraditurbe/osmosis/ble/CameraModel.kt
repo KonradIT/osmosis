@@ -55,7 +55,16 @@ data class CameraModel(
             0x0017 to CameraModel("Osmo 360", wpa3 = true),
             0x0018 to CameraModel("Osmo Action 6", verified = true),
             ID_OSMO_NANO to CameraModel("Osmo Nano", verified = true),
-            // Broadcasts no BLE mfr data — name fallback. Tester-confirmed on 9004; its _OP3-suffixed
+            // It DOES broadcast mfr data. This said otherwise, copied from the reverse-engineered
+            // Pocket 3 BLE library in reference/, which states it in four places. Our own captures say
+            // no: 32 scan hits across TWO different units carry it, every one with model id 0x0020 in
+            // the classic field —
+            //     58:B8:58:CC:F8:23  mfr[cid=08aa 2000{00,80,c0}58b858ccf823]   31 hits, 5 sessions
+            //     E4:7A:2C:78:D1:E9  mfr[cid=08aa 200040e47a2c78d1e9]            2026-08-07
+            // (byte 2 cycles 00/40/80/c0 — the top two bits look like a boot counter, and the MAC
+            // follows.) Either their macOS BLE stack hid it or older firmware omitted it. Resolving by
+            // id works; the name fallback stays for units that genuinely don't advertise.
+            // Tester-confirmed on 9004; its _OP3-suffixed
             // naming decodes in full (path + ext + delete handle). Note: rejects 0x53/0x10 (e0) but its
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
             0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
