@@ -33,7 +33,7 @@ is small but will stop a client dead if assumed: **the UDP port, the handle geom
 to which `/v2?storage=` index, and the proxy extension.**
 
 Confidence is marked throughout: ✅ exercised on hardware, ⚠️ partial or single-observation, ❌ known
-not to work, — no data.
+not to work, `(unconfirmed)` no data.
 
 ### Identification and transport
 
@@ -44,12 +44,12 @@ by id first: cameras are frequently renamed, and a renamed body has no usable na
 | Camera | model id | BLE local name | Datalink | TCP-7001 poke | WiFi |
 |---|---|---|---|---|---|
 | Osmo Action (1) | `0x0006` ⚠️ | `OsmoAction` | 9004 | yes | WPA2 |
-| Osmo Action 2 | `0x0010` | `OsmoAction2` | 9004 — | yes — | WPA2 — |
-| Osmo Action 3 | `0x0012` | `OsmoAction3` | 9004 — | yes — | WPA2 — |
-| Osmo Action 4 | `0x0014` | `OsmoAction4` | 9004 — | yes — | WPA2 |
+| Osmo Action 2 | `0x0010` | `OsmoAction2` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 `(unconfirmed)` |
+| Osmo Action 3 | `0x0012` | `OsmoAction3` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 `(unconfirmed)` |
+| Osmo Action 4 | `0x0014` | `OsmoAction4` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 |
 | Osmo Action 5 Pro | `0x0015` | `OsmoAction5Pro` | 9004 | yes | WPA2 |
 | **Xtra Edge Pro** | `0x0015` | `XtraEdgePro` | **10004** | **no** | WPA2 |
-| Osmo 360 | `0x0017` | `Osmo360` | 9004 — | yes — | **WPA3** |
+| Osmo 360 | `0x0017` | `Osmo360` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | **WPA3** |
 | Osmo Action 6 | `0x0018` | `OsmoAction6` | 9004 | yes | WPA2 |
 | Osmo Nano | `0x0019` | `OsmoNano` | 9004 | yes | WPA2 |
 | Osmo Pocket 3 | `0x0020` | `OsmoPocket3` | 9004 | yes | WPA2 |
@@ -75,7 +75,7 @@ Where a body behaves differently from the rest of the line:
 - **Two advert formats are in use.** The Pocket 4 carries a classic model byte; the Pocket 4 **Pro**
   uses the newer form where a flag bit at payload byte 5 marks a 16-bit product type at bytes 10–11
   (`218` = Pocket 4 Pro). A client reading only the classic field sees `0x0000` for the Pro.
-- Ports marked "—" are the fallback for an unrecognised body (9004 + poke + WPA2), not a measurement.
+- Ports marked `(unconfirmed)` are the fallback for an unrecognised body (9004 + poke + WPA2), not a measurement.
   Retrying the alternate config (`9004`+poke ⇄ `10004`/no-poke) covers a wrong guess.
 
 ### Media layout
@@ -83,12 +83,12 @@ Where a body behaves differently from the rest of the line:
 | Camera | Path shape | Handle base / step | Store → `/v2?storage=` | Proxy ext | Star byte `@+9` |
 |---|---|---|---|---|---|
 | Osmo Nano | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1**, dock SD → **0** | `.LRF` | ✅ real flag, `0`/`1` |
-| Osmo Pocket 4 | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1** | — none listed | all `0` (nothing favourited) |
-| Osmo Pocket 4 Pro | `DCIM/DJI_001/DJI_…` | `0x00100000` / `0x40` ⚠️ | ⚠️ 45 → **0**, 1 → **1** | — | — |
+| Osmo Pocket 4 | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1** | none listed | all `0` (nothing favourited) |
+| Osmo Pocket 4 Pro | `DCIM/DJI_001/DJI_…` | `0x00100000` / `0x40` ⚠️ | ⚠️ 45 → **0**, 1 → **1** | `(unconfirmed)` | `(unconfirmed)` |
 | Action 5 Pro / Xtra Edge Pro | `DCIM/CAM_001/CAM_…_D` (Xtra)<br>`DCIM/DJI_001_OA5/DJI_…_DOA5` (DJI) | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.XRF` | ❌ `44`/`48` — a length |
-| Osmo Action 6 | `DCIM/DJI_001/DJI_…` | `0x4010xxxx` | internal (only store) → **1** | — | — |
-| Osmo Pocket 3 | `DCIM/DJI_001/DJI_…_D_OP3` | `0x00040000` / `0x10` | microSD (only store) → **0** | — | ❌ `48` — a length |
-| Osmo Action (1) | *(no paths on the wire)* | *(index-based, no handles)* | n/a — `/v1` | n/a | n/a |
+| Osmo Action 6 | `DCIM/DJI_001/DJI_…` | `0x4010xxxx` | internal (only store) → **1** | `(unconfirmed)` | `(unconfirmed)` |
+| Osmo Pocket 3 | `DCIM/DJI_001/DJI_…_D_OP3` | `0x00040000` / `0x10` | microSD (only store) → **0** | `(unconfirmed)` | ❌ `48` — a length |
+| Osmo Action (1) | *(no paths on the wire)* | *(index-based, no handles)* | n/a (uses `/v1`) | n/a | n/a |
 | Mavic 3 | *(synthesised from the index)* | *(no handle)* | packed in `file_index` | subtype `18` | n/a |
 
 - **Fit `base + seq × step` from the manifest's own handles**, per store, rather than hardcoding a row
@@ -110,7 +110,7 @@ Where a body behaves differently from the rest of the line:
 | Osmo Nano | 22 B, `stores=1` | ⚠️ can report `0/0` with a card in and files on internal |
 | Osmo Pocket 3 | 22 B, `stores=1` | the 22 B body is why the decode gate is `>= 22`, not `>= 32` |
 | Xtra Edge Pro / A5P | **40 B**, `stores=2` | e.g. `60776/58151` SD + `48980/44807` built-in |
-| Osmo Action 6 | — | `@6/@10` = `121785/109748` MiB, matching its own screen |
+| Osmo Action 6 | `(unconfirmed)` | `@6/@10` = `121785/109748` MiB, matching its own screen |
 | Osmo Pocket 4 | **40 B**, `stores=2` | two-store body **even with no card** — first block reads `0/0` |
 
 - **Dock and charging bytes (`@27`, `@32`) were mapped on a Nano and are not portable.** A Pocket 4
