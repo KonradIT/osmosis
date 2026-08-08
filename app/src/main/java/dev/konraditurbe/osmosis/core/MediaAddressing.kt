@@ -34,7 +34,18 @@ interface MediaAddressing {
     fun previewChain(f: CameraFile): List<String>
 
     companion object {
-        fun of(f: CameraFile): MediaAddressing = if (f.isIndexed) DcfAddressing else PathAddressing
+        /**
+         * A DCF-indexed device is not automatically a `/v1` device.
+         *
+         * Most DJI aircraft index media by DCF number *and* serve it by physical path over `/v2` —
+         * the same surface as an Osmo camera. Only three current aircraft install the `/v1` packed-index
+         * download, the Mavic 3 among them, which is why `/v1` looked like the drone scheme: it is the
+         * scheme of the one aircraft this app was built against.
+         */
+        fun of(f: CameraFile): MediaAddressing = when {
+            f.isIndexed && !f.dcfHttpV2 -> DcfAddressing
+            else -> PathAddressing
+        }
     }
 }
 

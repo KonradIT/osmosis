@@ -47,6 +47,15 @@ class DroneSession(
     /** The most recent `0x51/0x04` push, latched by [watch51Frames] as frames go by. */
     @Volatile private var deviceOsd: Wlm.DeviceOsd? = null
 
+    /**
+     * Serve file bytes by path over `/v2` rather than by packed index over `/v1`.
+     *
+     * `/v1` is the *Mavic 3's* surface, not the drone surface — most current aircraft install the `/v2`
+     * path download instead ([DroneProducts]). An unknown aircraft stays on `/v1`, the one we have made
+     * work end to end.
+     */
+    private val httpV2 = DroneProducts.usesHttpV2(modelId)
+
     private var droneCursor = 0L
     private val droneSeen = HashSet<Long>()
     private var querySeq = 0x0C
@@ -229,8 +238,10 @@ class DroneSession(
             log("datalink: ${catalogue.size}B of catalogue decoded to no records at stride ${stride}B")
             dumpCatalogue(catalogue)
         }
-        return files
-    }
+        // Stamp the HTTP surface here, where the aircraft's model is known: a record itself says
+        // nothing about whether its firmware installs the /v1 packed-index download or the /v2
+        // path one, and the addressing seam only ever sees the record.
+        return files.map { it.copy(dcfHttpV2 = httpV2) }    }
 
     /**
      * Dump an undecodable catalogue in the format `tools/hexdump_to_bin.py` turns back into a fixture.
@@ -498,9 +509,12 @@ class DroneSession(
      * waiting for a frame that was never coming.
      */
     private fun enterQuickTransfer() {
+        val product = DroneProducts.of(modelId)
+        log("datalink: aircraft ${product?.name ?: "unknown"}" +
+            (modelId?.let { " (0x%04x)".format(it) } ?: "") +
+            " — media over ${if (httpV2) "/v2 by path" else "/v1 by packed index"}")
         if (modelId == MAVIC_3_MODEL_ID) { droneSessionOpen(); return }
-        log("datalink: entering QuickTransfer via the WLM handler" +
-            (modelId?.let { " (model 0x%04x)".format(it) } ?: " (unknown model)"))
+        log("datalink: entering QuickTransfer via the WLM handler")
         if (!wifiFastEnter()) {
             // Not a fallback to the Mavic dance: that would send a challenge-open to an aircraft that
             // has just told us it speaks the other protocol. Carry on and let the media query be the
