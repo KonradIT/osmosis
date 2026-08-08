@@ -43,6 +43,9 @@ class CameraSession(
      */
     private var dumpBudgetBytes = 80_000
 
+    /** Ceiling on a single dump, budgeted or not — the head carries the layout, the tail is noise. */
+    private val DUMP_MAX_BYTES = 64_000
+
     /**
      * The status keys to subscribe to (`0x00/0x99`). Eight, deliberately — NOT Mimo's 54.
      *
@@ -1233,12 +1236,21 @@ class CameraSession(
             }
             dumpBudgetBytes -= bytes.size
         }
-        // MANIFEST-HEX is the marker tools/hexdump_to_bin.py looks for; keep both fences in step
-        // with it if this format ever changes.
-        log("datalink: --- MANIFEST-HEX BEGIN (${bytes.size}B), report this to crack the layout ---")
+        // Hard cap even on the unbudgeted failure path. "A decode failure is rare, so dump it all"
+        // was wrong: when reassembly finds no chunks, manifestBytes hands back the whole RAW blob —
+        // every datagram the collect loop hoovered up, telemetry included. A Pocket 3 log did this
+        // twice in 90 s, 541 KB and 878 KB, and 21000 of that log's 44578 lines were the two dumps.
+        // The head is where the layout lives; past that it is a transcript of the camera talking to
+        // itself, and a log too big to send is a log we do not get.
+        val shown = minOf(bytes.size, DUMP_MAX_BYTES)
+        // The declared size must be what is actually dumped: tools/hexdump_to_bin.py verifies the
+        // recovered length against it and drops the block on a mismatch. Total goes after it.
+        log("datalink: --- MANIFEST-HEX BEGIN (${shown}B" +
+            (if (shown < bytes.size) " of ${bytes.size}B" else "") +
+            "), report this to crack the layout ---")
         var off = 0
-        while (off < bytes.size) {
-            val end = minOf(off + 32, bytes.size)
+        while (off < shown) {
+            val end = minOf(off + 32, shown)
             val hex = StringBuilder(); val asc = StringBuilder()
             for (i in off until end) {
                 val b = bytes[i].toInt() and 0xFF
