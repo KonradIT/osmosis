@@ -100,6 +100,25 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private var apJoiner: ApJoiner? = null
     private var connecting = false
 
+    /**
+     * Generation stamp for the datalink worker, bumped on every start and every teardown.
+     *
+     * [startDatalink] does its work on a thread, and the slow part — `fetchFileList`, 10-20 s — runs
+     * before the session is ever assigned to [datalink]. So a reconnect during that window could not
+     * see the session in flight, could not close it, and simply started a second one: two
+     * `CameraSession`s on udp/9004 against a camera that has exactly one session. Caught on a Pocket 3
+     * where connect #4 began 0.4 s *before* connect #3 reported its result, and the two failed
+     * attempts got zero `0x00/0x27` frames while the camera pushed 1000+ of everything else — the
+     * query was reaching a camera whose session we had already replaced underneath it.
+     *
+     * A worker compares this on completion and drops its result if it has been superseded. Atomic
+     * because it is touched from the main thread and the ConnectivityManager callback.
+     */
+    private val datalinkGen = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** The session a worker is building. Published *before* the fetch so teardown can close it. */
+    @Volatile private var pendingSession: dev.konraditurbe.osmosis.core.MediaSession? = null
+
     private val http = HttpClient("192.168.2.1") { s -> logLine(s) }
     private var imageLoader: ImageLoader? = null
     private var metaLoader: MetaLoader? = null
@@ -531,6 +550,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun teardownOffload() {
         stopKeepalive()
         dev.konraditurbe.osmosis.net.PreviewNav.clear()
+        // Supersede any datalink worker still running, and close the session it is mid-fetch on.
+        // Bumping the generation alone is not enough — that only stops it *publishing* its result,
+        // while its socket would keep holding udp/9004 against a camera the next connect is about to
+        // handshake with. Closing it here is what actually frees the port.
+        datalinkGen.incrementAndGet()
+        runCatching { pendingSession?.close() }; pendingSession = null
         datalink?.close(); datalink = null
         apJoiner?.release(); apJoiner = null
         gattClient?.disconnect(); gattClient?.close(); gattClient = null
@@ -877,6 +902,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /** Open the datalink and fetch the media list. Split out of the join callback so the `nojoin`
      *  debug path can run it against whatever network is already current. */
     private fun startDatalink() {
+                val gen = datalinkGen.incrementAndGet()
                 Thread {
                     // Datalink port + poke come from the model AND brand: 10004/no-poke was only ever
                     // confirmed on the Xtra rebrand (own OUI EC:9E:EA), so a genuine DJI unit gets the
@@ -892,13 +918,25 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                             else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
+                        // Publish before the fetch, not after: fetchFileList owns the next 10-20 s and
+                        // teardown has to be able to close this socket during it.
+                        pendingSession = c
                         val f = runCatching { c.fetchFileList("192.168.2.1") }
                             .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
                         return c to f
                     }
 
+                    /** Abandon this worker's session if a newer connect has replaced it. */
+                    fun superseded(dl: dev.konraditurbe.osmosis.core.MediaSession): Boolean {
+                        if (gen == datalinkGen.get()) return false
+                        logLine("datalink: this connect was superseded by a newer one — dropping its session")
+                        runCatching { dl.close() }
+                        return true
+                    }
+
                     datalink?.close()
                     var (dl, files) = open(currentModel)
+                    if (superseded(dl)) return@Thread
                     if (!dl.handshakeOk) {
                         val alt = currentModel.alternate()
                         logLine("datalink: nothing answered on udp/${currentModel.datalinkPort} — trying udp/${alt.datalinkPort}")
@@ -910,6 +948,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                                 "(poke=${alt.tcpPoke}) — please report so the model table can be fixed ***"
                         )
                     }
+                    if (superseded(dl)) return@Thread
+                    pendingSession = null
                     datalink = dl
                     // Always: it holds the AP up, polls status for the pill, and holds playback (#12).
                     // Gating on files.isNotEmpty() left an empty camera (e.g. an Action 6 with no media)
