@@ -79,11 +79,18 @@ class OsmoScanner(
                 for (i in 0 until msd.size()) {
                     val cid = msd.keyAt(i)
                     val data = msd.valueAt(i) ?: continue
-                    if (cid == BleConstants.DJI_COMPANY_ID || cid == BleConstants.DJI_COMPANY_ID_ALT) {
+                    if (BleConstants.isDjiCompanyId(cid)) {
                         mfrHex = "cid=%04x %s".format(cid, data.joinToString("") { "%02x".format(it) })
-                        if (data.size >= 2) {
-                            modelId = (data[0].toInt() and 0xFF) or ((data[1].toInt() and 0xFF) shl 8)
-                            modelGuess = BleConstants.MODEL_NAMES[modelId] ?: "unknown(0x%04x)".format(modelId)
+                        val d = BleAdvert.decode(data)
+                        modelId = d.modelId
+                        modelGuess = when {
+                            d.modelId != null ->
+                                BleConstants.MODEL_NAMES[d.modelId] ?: "unknown(0x%04x)".format(d.modelId)
+                            // New format, product type we haven't mapped. Say the number: it is the one
+                            // thing that identifies the camera, and a tester's log then names it for us.
+                            d.newFormat && d.rawProductType != null ->
+                                "unknown(productType=%d)".format(d.rawProductType)
+                            else -> null
                         }
                     }
                 }
