@@ -1,9 +1,11 @@
 # Osmosis — Media & camera DUML commands
 
-Every DUML command we use / know for browsing, fetching, and controlling media on DJI Osmo cameras
-(WiFi UDP datalink + BLE control).
+An implementation reference for browsing, fetching and controlling media on DJI Osmo cameras (WiFi UDP
+datalink + BLE control) — enough to write a client from scratch, in any language. Everything here was
+reverse-engineered and verified against real hardware or a capture; where something is inferred rather
+than measured, it says so.
 
-Transports: **BLE** = write GATT `fff5`, notify `fff4` (the `[6:8]` msg-id round-trips either way — we encode/decode it **little-endian** and the camera echoes the bytes back, so its true endianness is moot for request/response matching).
+Transports: **BLE** = write GATT `fff5`, notify `fff4` (the `[6:8]` msg-id round-trips either way — encode/decode it **little-endian** and the camera echoes the bytes back, so its true endianness is moot for request/response matching).
 
 > ⚠️ **A bare-metal BLE client needs the GATT setup below before the camera will act on anything.** Get it wrong and the camera ATT-acks every write, silently ignores it, and answers nothing — which reads exactly like an unsupported command, so you will hunt the wrong layer for days. Required:
 > - **Subscribe the CCCDs of BOTH `fff4` and `fff5`** (0xFFF5's is easy to miss if service discovery is range-limited to the write characteristic).
@@ -11,10 +13,10 @@ Transports: **BLE** = write GATT `fff5`, notify `fff4` (the `[6:8]` msg-id round
 > - **`fff5` is WRITE_NO_RSP only** (`props=0x36`) — a Write Request on it is a spec violation.
 > - **Every app→camera frame needs `cmd_type` `0x40`**, never `0x00`.
 > - **MTU 500.** Negotiating 517 makes the camera stop answering *every* request (its NimBLE buffers are sized for 500) — raise the buffer config too or leave it alone.
-> - **Wait for the `0x07/0x45` pairing reply before sending the wake.** Ours arrives at ~+232 ms, far later than the ~+21 ms a Mimo capture suggests.
+> - **Wait for the `0x07/0x45` pairing reply before sending the wake.** It can take ~+232 ms, far later than the ~+21 ms a Mimo capture suggests.
 >
 > **LE encryption/bonding is NOT required**
-**Datalink** = UDP (DJI-standard `9004` + TCP-7001 poke first — Nano, Action 5/6, Pocket 3; the **Xtra Edge Pro**
+**Datalink** = UDP (DJI-standard `9004` + TCP-7001 poke first — Nano, Action 5/6, Pocket 3, Pocket 4, Pocket 4 Pro; the **Xtra Edge Pro**
 rebrand alone speaks `10004` with no poke), DUML wrapped
 in `[8B udp hdr][12B routing hdr][frame]`. Addressing byte `(id<<5)|type`: App `0x02`, Camera `0x01`,
 Gimbal `0x03`, Battery `0x05`, WiFi `0x07`, DM368 `0x08`, plus two session endpoints that are **not** the
@@ -30,7 +32,19 @@ camera by mistake and it answers `e0` (reject) and stays asleep; nothing else hi
 - Cmd ID: `0x26`  (response `0x00/0x27`)
 - Dir / transport: App → Camera(`0x01`), datalink
 - Payload (page 1): `4a002a10 01000000 0000 01000000 2d00 0d0100 ffffffffffffffff 0001000000000000 000000`
-- Response: chunked `0x00/0x27` frames, each payload = `[10B sub-header 4A 01 xx xx <seq:u16LE@6> 00 00][chunk]`. **Strip the sub-header, concat chunks in arrival order** → the manifest.
+- Response: chunked `0x00/0x27` frames, each payload = `[10B sub-header][chunk]`. **Strip the sub-header, concat chunks in arrival order** → the manifest.
+
+| sub-header | field |
+|---|---|
+| `+0` | `0x4A` |
+| `+1` | subtype: `0x04` stream start · **`0x01` data chunk** · `0x03` stream end. Only `0x01` carries manifest bytes; the other two are 10 bytes of sub-header and nothing else. |
+| `+4` | **the request counter, echoed from byte 4 of the `0x00/0x26` that asked for this chunk** — see [per-store split](#two-stores-answered-separately-and-labelled-for-free) |
+| `+6` | `u16-LE` seq (restarts per page, so concatenate in arrival order, never seq-sorted) |
+
+⚠️ **Select chunks by the DUML command (`0x00/0x27`), not by the `4A 01` payload prefix.** The 11-byte
+frame header is `[55][len:2][crc8][target:2][id:2][type][set][cmd]`, so the command is available without
+inspecting the body. `4A 01` alone also matches parameter-subscription pushes ([§8](#8-subscribe-param--the-settings-surface-over-ble)),
+which will corrupt the manifest of any client subscribed to more than a handful of parameters.
 - DUML example: <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000010000002d000d0100ffffffffffffffff0001000000000000000000000000008185>
 
 #### Paginate the full library
@@ -41,7 +55,7 @@ One `0x00/0x26` returns only the **newest ~45 files** (the `2d` = 45 count at pa
    - Cmd Set / ID: `0x02` / `0x0c`  ·  App → Camera(`0x01`), datalink
    - Payload: `01 01 00 01` = enter playback · `01 01 00 00` = leave
    - DUML example (enter): <https://b3yond.d3vl.com/duml/#55110492020100a040020c01010001b63b>
-2. **Per page send three frames** — `query(cursor=1)` → `trigger` → `query(cursor=pageCursor)`. The **second query's cursor selects the page**; the first (`cursor = 0x00000001`) and the trigger (`4a040e10`) prime the stream.
+2. **Per page send three frames** — `query(cursor=1)` → `trigger` → `query(cursor=pageCursor)`. The **second query's cursor selects the page**; the first (`cursor = 0x00000001`) and the trigger (`4a040e10`) prime the stream. Give the two queries **different counters at byte 4** (e.g. 1 and 2) — that is what lets the single reply stream be split back into per-store answers.
 
 | page | cursor @ bytes 10-13 (u32-LE) | returns |
 |------|-------------------------------|---------|
@@ -51,6 +65,10 @@ One `0x00/0x26` returns only the **newest ~45 files** (the `2d` = 45 count at pa
 
 - Only handles **`≥ 0x40000000`** (video records) advance the cursor — a stray low-namespace handle (a `0x0010xxxx` photo) is skipped so it can't jerk the cursor to the bottom and stall paging.
 - Consecutive pages overlap by exactly the one boundary file, so **dedup by media path** (≈ 44 new per page).
+- **End of the library = a short page.** Ask for 45 (`0x2d` at byte 14) and count the records that come
+  back: fewer than 45 means there are no older files. Mimo instead reads a per-record `isPageLastFile`
+  flag, but that flag sits at **no fixed marker-relative offset** — comparing a known-final page against a
+  known-continuing one separates them at no position — so the record count is the reliable test.
 - Two ways to sequence the pages: **a fresh registered session per page** (simplest, always works), or **inline on one long-lived session** with a correct sliding-window `ackSeq` (see *Datalink transport / sequencing*). Both return the same pages.
 
 DUML examples:
@@ -129,18 +147,52 @@ Each record carries a **marker** the header fields hang off: **videos `03 ff 19 
 | resolution *(video)* | `u8 @ marker − 1` | video-format index → pixel size (table below) |
 | **duration *(video)*** | **`u16-LE @ marker − 4`** (= `head + 4`) | whole **seconds**; = `floor(moov ms / 1000)`. |
 | **width, height *(photo)*** | **`u32-LE`, `+58` / `+62` from the `19 06` pair** | photo pixel dimensions (videos have none here — they use the resolution enum) |
-| ⭐ starTag | `u8 @ [ff\|fe] 19 06 + 9` | favourite flag; the one field also present on photo records |
+| ⭐ starTag | `u8 @ [ff\|fe] 19 06 + 9` | favourite flag — **Nano only**; test `== 1`, never `!= 0` (see below) |
 
-- **Two stores = two lists.** With a card in, the reassembled manifest is **two per-storage lists back to back** — **SD first, then internal** — each opening with its own `[u32-LE count][u32-LE size][u32-LE ts]…` header. The leading count covers only the *first* list; the rest belong to the second. Proven by dumping the same camera with and without a card: the no-card manifest is **byte-identical to the mixed manifest's second list**. The split is taken from the count, which every model writes.
-- **The `/v2?storage=N` HTTP mount = the record handle's `0x40000000` bit**: set → internal → `storage=1`; clear → SD → `storage=0`. Confirm with one HEAD. It is **not** the manifest list ordinal — a single-store camera's one list is group 0 yet can mount at `storage=1`.
+##### Two stores answered separately and labelled for free
 
-| camera | store | handle base | `storage=` |
-|--------|-------|-------------|-----------|
-| Xtra Edge Pro / Action 5 Pro | SD | `0x0004xxxx` | `0` |
-| Xtra Edge Pro / Action 5 Pro | internal | `0x4004xxxx` | `1` |
-| Osmo Nano | internal | `0x4010xxxx` | `1` |
-| Action 6 | internal | `0x4010xxxx` | `1` |
-| Pocket 3 | microSD (only store) | `0x0004xxxx` | `0` |
+**The cursor's top bit is the store selector, and the response counter hands the answer back labelled.**
+Cursor `0x00000001` enumerates the SD card, `0x40000001` the internal store — DJI's own `FileLocation`
+(`SD_CARD=0`, `INTERNAL_STORAGE=1`), which is the *same integer* `/v2?storage=` wants. Send the two
+queries under **different counters at byte 4**, and every `0x00/0x27` chunk echoes that counter at
+sub-header byte 4, so one collected blob splits cleanly into the two stores it contains:
+
+```
+-> 0x00/0x26  byte4=1  cursor=0x00000001     "list the SD card"
+-> 0x00/0x26  byte4=2  cursor=0x40000001     "list internal"
+<- 0x00/0x27  sub-header byte4=1  …          these chunks are the SD answer
+<- 0x00/0x27  sub-header byte4=2  …          these chunks are the internal answer
+```
+
+This costs no extra round trip and no HTTP `HEAD`. Measured: Nano + dock SD → `SD 1, internal 38`;
+Edge Pro → `SD 31, internal 45`.
+
+Fall back to the handle rule below in the two cases where the split cannot be trusted: a camera that
+**doesn't echo the counter**, and one that answers **both queries with the same list** (a single-store
+body, where there is nothing to attribute). An empty slice is normal — it means that store held nothing.
+
+**Fallback — the handle's `0x40000000` bit:** set → internal → `storage=1`; clear → SD → `storage=0`.
+It is **not** the manifest list ordinal; a single-store camera's one list is group 0 yet can mount at
+`storage=1`. Handle bases also drive the burst-expand and favourite queries, so fit `base + seq × step`
+per store from the manifest's own handles rather than hardcoding a body's numbers:
+
+| camera | store | handle base / step | `storage=` | source |
+|--------|-------|--------------------|-----------|--------|
+| Osmo Nano | internal | `0x40100000` / `0x40` | `1` | `nano_45.bin` |
+| Osmo Pocket 4 | internal | `0x40100000` / `0x40` | `1` | tester log, 2026-08-08 |
+| Action 6 | internal | `0x4010xxxx` | `1` | |
+| Xtra Edge Pro / Action 5 Pro | SD | `0x00040000` / `0x10` | `0` | |
+| Xtra Edge Pro / Action 5 Pro | internal | `0x40040000` / `0x10` | `1` | `xtra_13.bin` |
+| Pocket 3 | microSD (only store) | `0x00040000` / `0x10` | `0` | `op3_15.bin` (`0x00040010`–`0x000400f0`) |
+
+The Pocket 3 is the one that looks like an outlier and isn't: the rule was never "single store → 1", it
+is *which physical store*. Its one store is a microSD → `SD_CARD` → 0, while the Nano's and Action 6's
+single store is internal → 1. Shipping `storage = list ordinal` instead blanked every Nano thumbnail.
+
+**Two stores in one blob = two lists back to back** — **SD first, then internal** (query order), each
+opening with its own `[u32-LE count][u32-LE size][u32-LE ts]…` header. The leading count covers only the
+*first* list. Proven by dumping the same camera with and without a card: the no-card manifest is
+byte-identical to the mixed manifest's second list.
 - **Naming is irrelevant to the parse.** Because the path/name are read by length, the camera's *Naming Management* custom **Folder** and **File** prefixes decode exactly like stock — `DCIM/DJI_001/DJI_…_D.MP4` (stock), `DCIM/DJI_001/DJI_…_D_OP3.MP4` (Pocket 3), `DCIM/DJI_001_OA5/DJI_…_D_DOA5.MP4` (Action 5, custom folder + file suffix), `…_D_A01.MP4` (a user-typed `A01`) — all the same.
 
 **Read it in Python** (`struct` for the little-endian ints; the buffer is the reassembled `0x00/0x27` payload):
@@ -203,11 +255,11 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 
 | field | type | notes |
 |-------|------|-------|
-| `fileName` | String | e.g. `DJI_…_D.MP4` — our `0d` field |
+| `fileName` | String | e.g. `DJI_…_D.MP4` — the `0d` field |
 | `fileType` | enum `MediaFileType` | photo/video/… → the extension category |
 | `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE @ marker − 12` |
 | `duration` | **Long** | video length (ms) |
-| `frameRate` | enum `VideoFrameRate` | **mapped**: `u8 @ marker − 2`; our fps rational is the same value |
+| `frameRate` | enum `VideoFrameRate` | **mapped**: `u8 @ marker − 2`; the fps rational carries the same value |
 | `resolution` | enum `VideoResolution` | **mapped**: `u8 @ marker − 1` (table below) |
 | `date` | `DateTime` | capture time |
 | `starTag` | enum | favourite / marked flag — **mapped**: `u8 @ [ff\|fe] 19 06 + 9` |
@@ -219,7 +271,21 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 ##### Enum value tables (mined from the DJI app dex — for decoding the record's int fields)
 
 
-**Start/Heart/Favorite** — the byte at `[ff|fe] 19 06` + 9 is DJI's `MediaFileStarTag`: `0 = NONE`, `1 = TAGGED` (starred). Cameras where it works: **Osmo Nano**.
+**Star / Heart / Favorite** — the byte at `[ff|fe] 19 06` + 9 is DJI's `MediaFileStarTag`: `0 = NONE`,
+`1 = TAGGED`. **Read it strictly as `== 1`.** On the Nano it is a real flag — `nano_delete.bin` splits
+**19 unstarred / 26 starred** — but on the Action family that byte is a *length* and never 0 or 1:
+
+| fixture | camera | byte @ +9 |
+|---|---|---|
+| `nano_delete.bin` | Nano | `0` ×19, `1` ×26 — the flag |
+| `nano_45.bin` | Nano | `0` ×45 (captured before anything was favourited) |
+| `xtra_13.bin` | Xtra Edge Pro | `44` ×13 |
+| `xtra_delete.bin` | Xtra Edge Pro | `44` ×41, `48` ×4 |
+| `op3_15.bin` | Pocket 3 | `48` ×15 |
+
+A `!= 0` test therefore marks **every** file on an Action-family body as starred. Writing a favourite
+works on those bodies ([§3](#3-favorite--star-media)); only the read-back offset is unmapped there, so a
+client should show the star on the Nano and treat it as unknown elsewhere rather than trust `+9`.
 
 **frameRate** (`marker−2`) — `VideoFrameRate`:
 
@@ -304,7 +370,8 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 - Payload: `[count:u8][handle:u32-LE × count][count:u32-LE] 00 [count:u32-LE] 01 01 00 00`  — delete 1 file `h`: `01 <h> 01000000 00 01000000 01010000`
 - `handle` = per-file object id from the manifest record head (below); the trailing `00 … 01 01 00 00` is a storage selector, verbatim from the capture.
 - Response: `0x00/0x28` → `0000` = OK  ·  `00d6` = no such handle
-- **Handle** — u32-LE at the record head, located by anchoring on the constant record marker `03 ff 19 06` (at head + 8, so `handle = u32 @ marker − 8`). Nano (361 B records) handles start `0x40104000` step `0x40`; the Action family — Xtra Edge Pro, Action 5/6, Pocket 3 (272 B records) — starts `0x40040000` step `0x10`. (Naming doesn't track the family: only the Xtra rebrand writes `CAM_…`, while genuine Action/Pocket units use `DJI_…`.) Photo records lack the marker → non-deletable (fail-safe).
+- **Handle** — u32-LE at the record head, located by anchoring on the constant record marker `03 ff 19 06` (at head + 8, so `handle = u32 @ marker − 8`). Nano (361 B records) `0x40100000 + seq × 0x40`; the Action family — Xtra Edge Pro, Action 5/6, Pocket 3 (272 B records) — `base + seq × 0x10`, base `0x40040000` internal / `0x00040000` SD. **Fit base and step from the handles the manifest already exposes** rather than hardcoding either: both are per camera *and* per store. Anchoring on the marker is also what makes this safe — searching for a `0x40`-aligned dword finds the right value on a Nano and the wrong one on an Xtra, which the camera rejects with `0xd6`. (Naming doesn't track the family: only the Xtra rebrand writes `CAM_…`, while genuine Action/Pocket units use `DJI_…`.) Photo records lack the marker → non-deletable (fail-safe).
+- ⚠️ **Reject duplicate handles.** A fitted base/step can collide when a manifest mixes stores or a record decodes short. Since the delete is irreversible, treat a handle held by more than one file as non-deletable for *all* of them rather than choosing between them.
 - **Session** — a *write*: it lands inline on the live browse session when the `ackSeq` is correct (see *Datalink transport / sequencing*), else send it in a freshly-registered session (handshake → register → subscribe). Reads answer either way; only writes drop on a wrong `ackSeq`.
 - DUML example (delete handle `0x40104480`): <https://b3yond.d3vl.com/duml/#551f044e020100a0400028018044104001000000000100000001010000a0d1>
 
@@ -329,11 +396,42 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 
 ### Holding playback mode for a whole browse session
 
-Playback (`0x02/0x0c` = `01 01 00 01`) is a **camera-wide mode**, not a per-command flag, and holding it
-is what keeps a camera out of capture — on a Pocket 3 the gimbal parks, which is what a user offloading a
-session wants. Two things have to be right, both learned the hard way on a Nano:
+Playback is a **camera-wide mode**, not a per-command flag. Pagination requires it, some commands
+require it, and while it is held a gimballed body stops filming. The camera **drops the mode about a
+second after it is set unless the app keeps beating**, so entering it is not enough — it has to be held.
 
-**1. Enter once and confirm; never leave mid-session.** From `mimo_nano_delete.pcap`:
+| | frame | when |
+|---|---|---|
+| enter | `0x02/0x0c` payload `01 01 00 01` | once, after registration |
+| beat | `0x00/0x88` sub-cmd `0x17` (14 B, ASCII `APP` at bytes 5-7) | every ~1 s, all session |
+| re-assert | `0x02/0x0c` payload `01 01 00 01` | every ~10 s (optional, idempotent) |
+| leave | `0x02/0x0c` payload `01 01 00 00` | teardown only |
+
+```
+1. handshake + register                              §4–§7
+2. send 0x02/0x0c 01 01 00 01
+3. wait up to ~900 ms for the 0x02/0x0c reply
+      no reply -> resend, up to 3 attempts
+4. loop, ~1 Hz, until teardown:  0x00/0x88 sub-cmd 0x17
+5. every ~10 s:                  0x02/0x0c 01 01 00 01
+6. teardown only:                0x02/0x0c 01 01 00 00
+```
+
+**Wait for the reply at step 3.** The camera does not always answer the first enter — a Pocket 4 took
+two attempts. Mimo also sends the enter twice, 0.6 s apart, on re-entry. Nothing else distinguishes
+"held" from "still recording", so treat an unanswered enter as *not held*.
+
+**The beat is mandatory.** Without a ~1 Hz frame the mode is dropped about a second after it is set; with
+one it holds indefinitely. The distinctive symptom of a missing beat is playback appearing, lasting ~1 s,
+vanishing, and reappearing on the next re-assert.
+
+⚠️ **Do not poll `0x02/0x8E` while holding playback.** It looks like a heartbeat — Mimo sends it ~15 Hz
+over BLE — but it is a keyed parameter GET ([§14](#14-camera-parameters)), and on the datalink it takes
+the camera **out of** playback about a second later. Mimo sends it zero times in a 49 s datalink session.
+
+**Hold the mode; do not toggle it.** Leaving after each operation makes the mode flap and races anything
+that assumes it is held. Mimo enters once and holds for 128 s, leaving only when the user closes the
+album:
 
 ```
  1.10s  APP->CAM  02/0c  01010001      enter
@@ -341,26 +439,21 @@ session wants. Two things have to be right, both learned the hard way on a Nano:
         ... 48 s of browsing, thumbnails and a DELETE — no further 0x02/0x0c at all ...
 ```
 
-and in a longer capture it held 128 s, left only when the user backed out of the album, and on re-entry
-sent the enter **twice 0.6 s apart** — Mimo retries until the camera answers. So: send it, wait for the
-`0x02/0x0c` reply, retry if it doesn't come, and send the leave (`01 01 00 00`) only on teardown. Sending
-leave after each operation makes the mode flap and races anything that assumes it is held.
+**The ~10 s re-assert is optional.** The mode stays on its own; the re-assert only covers being knocked
+out of it by something outside the protocol, such as a button press on the body.
 
-**2. Beat `0x00/0x88` at ~1 Hz, and do NOT send `0x02/0x8E`.**
+**What playback does *not* gate:** status pushes (`0x02/0x80`, `0x02/0x82`) arrive unprompted once
+registered — 493 and 480 times in that 49 s session — so battery and storage need no polling either way.
+Neither does the **first** page of the media list: only pagination needs playback, so a client that shows
+just the newest 45 files can skip this section entirely.
 
-| frame | Mimo, 49 s Nano session | effect |
-|---|---|---|
-| `0x02/0x8E` payload `00011400` | **never sent** | we sent it ~3x/s; it drags the camera OUT of playback about a second after entering |
-| `0x00/0x88` sub-cmd `0x17`, ASCII `APP` @5-7 | announce, twice (t=0.115 s, 0.595 s) | app presence |
-| `0x00/0x88` sub-cmd `0x1a` (`1a 00 00 00 01`, 5 B) | ~1 Hz, all session | the actual keepalive |
+**Confirming the gimbal actually parked:** `0x04/0x05` is position telemetry, pushed continuously while
+the motors run ([§20a](#20a-gimbal-position-telemetry--the-is-it-still-filming-signal)). Frames arriving
+means the gimbal is live; silence means parked.
 
-The camera needs *some* ~1 Hz beat or it drops playback a second after it is set. We send the `0x17`
-announce at 1 Hz, which works and holds the mode for the whole session; Mimo's own beat is the `0x1a`
-sub-command, which is the more faithful thing and is untried. Sending nothing at all is what produces
-"playback appears, 1 s, disappears".
-
-Status does **not** depend on any of this: the camera pushes `0x02/0x80` and `0x02/0x82` on its own once
-registered (493 and 480 times in that 49 s capture), so battery and storage keep updating with no polling.
+**Alternative beat:** Mimo sends the `0x17` announce only twice (t=0.115 s, 0.595 s) and then beats
+`0x00/0x88` sub-cmd **`0x1a`** (`1a 00 00 00 01`, 5 B) at ~1 Hz instead. Untested here; `0x17` at 1 Hz
+holds the mode on every camera tried.
 
 ### Datalink transport / sequencing — the one that makes commands land inline
 
@@ -375,8 +468,8 @@ pagination, highlights) run on **one long-lived session** instead of a fresh reg
 
 For a **command** packet, `ownSeq` (= the udp-hdr seq)
 is the app's **own monotonic `+8` counter**, started at `camera_channel + 8` at registration; it wraps at
-`0xFFFF` and is *independent* of the camera. `ackSeq` is the **last of our own seqs the camera echoed back**
-— it lags `ownSeq` by 8–150, and **stays in our own seq space**. Separately, an ACK packet (`0x04`, seq 0)
+`0xFFFF` and is *independent* of the camera. `ackSeq` is the **last of the app's own seqs the camera echoed
+back** — it lags `ownSeq` by 8–150, and **stays in the app's seq space**. Separately, an ACK packet (`0x04`, seq 0)
 carries `[camSeq][camSeq]` to acknowledge the camera's telemetry stream.
 
 **Do not** put the camera's telemetry seq in a command's `ackSeq`: the camera floods telemetry ~10×
@@ -384,11 +477,26 @@ faster than the app's commands and its seq wraps to a different phase, so an `ac
 from `ownSeq` and the receiver window **silently drops writes** (reads stay lenient). Correct value:
 **`ackSeq = ownSeq − 8`** (the previous command seq).
 
-**Inline commands:** the keep-alive thread owns the socket, so a command that needs a reply needs to be **queued**
-for that thread, see exampke in `DatalinkClient.runCommand`
-/ `runManifestQuery`. Skip the empty-payload transport ACK the camera sends *before* the real reply.
-Playback mode (`0x02/0x0c 01 01 00 01`) is held for the whole browse session (some inline reads/writes need
-it), not entered per-fetch.
+**Inline commands:** the keep-alive thread owns the socket, so a command that needs a reply must be
+**queued** for that thread — see `CameraSession.runCommand` / `runManifestQuery`. Skip the empty-payload
+transport ACK the camera sends *before* the real reply. Playback mode is held for the whole browse
+session (some inline reads/writes need it), not entered per-fetch.
+
+⚠️ **A registered session stops accepting inline WRITES after ~40–70 s, and the two cameras disagree:**
+
+```
+Nano       ok at 45 s, 57 s, 66 s   ·  no reply at 74 s, 94 s, 124 s, 142 s
+Edge Pro   no reply at 51.6 s
+```
+
+**Reads are unaffected** on both — a pagination query at 82 s in the Nano session returned normally. So a
+long browse keeps listing happily and then silently drops the next delete or favourite, with no error.
+The workaround is to track the session's age and **re-register before a write** once it exceeds a
+threshold below the shortest observed failure (40 s covers both cameras above). The underlying cause is
+unidentified, so treat the threshold as empirical.
+
+Note this contradicts [§27](#27-session-open-0x51--required-before-anything-else-mavic-3), where the
+sequence window is *not* enforced — that measurement is from an aircraft. Cameras enforce something here.
 
 ### 4. Handshake  *(not DUML — routing payload)*
 - UDP packet type `0x00`, payload `b88764006400c005140000640000019001c005140000640014006400c00514000064000101040102`
@@ -551,8 +659,8 @@ A GET for a pid that isn't valid in the current state answers a **single error b
 | `13..`  | IANA tz id, ASCII | `45 75 72 6f 70 65 2f 4d 61 64 72 69 64` |
 
 - Response `55 … C0 00 6A 00 01 00 …` — first payload byte `0x00` = **OK**.
-- The camera clock snaps to the sent value and recorded file timestamps follow. Osmosis sends it right
-  after registration on every connect.
+- The camera clock snaps to the sent value and recorded file timestamps follow. Send it right after
+  registration on every connect — a camera that has been off for a while will otherwise stamp files wrong.
 - DUML example (set `Europe/Madrid`): <https://b3yond.d3vl.com/duml/#55270415022828f740006a0100ce2a666a0000000078000d4575726f70652f4d61647269640c0e>
 
 ---
@@ -592,21 +700,33 @@ Note `@17` and `@13` are **mutually exclusive** — each reads 0 in the modes wh
 
 ### 19. SD / storage  *(both stores in one frame)*
 - Cmd Set / ID: `0x02` / `0xDC`  ·  App ← Camera, datalink
-- **Byte 2 = store count.** Two-store bodies are 32 B (**card @6/@10**, **built-in @24/@28**); a
-  single-store body (Pocket 3 = microSD only) is 22 B with just the first block. Decode gate is
-  `size >= 22`, not `>= 32` — the wider gate dropped the Pocket 3 frame and it never reported storage.
+- **Byte 2 = store count**, and byte 5 mirrors it. One `[total][free]` block per store. Measured
+  payload lengths: **22 B single-store**, **40 B two-store** — so gate the decode on `size >= 22` for
+  the first block and `>= 32` for the second, never on an exact length. (A `>= 32` gate on the whole
+  frame dropped the Pocket 3's 22 B body and it never reported storage at all.)
 
 | offset | type | field |
 |--------|------|-------|
-| `@6`  | `u32-LE` | SD **total** MiB (`0` = no card) |
-| `@10` | `u32-LE` | SD **free** MiB |
-| `@24` | `u32-LE` | internal **total** MiB (absent on a 22 B frame → report `0`) |
-| `@28` | `u32-LE` | internal **free** MiB |
+| `@2`  | `u8` | store count (`1` or `2`) |
+| `@6`  | `u32-LE` | first store **total** MiB (`0` = no card) |
+| `@10` | `u32-LE` | first store **free** MiB |
+| `@24` | `u32-LE` | built-in **total** MiB (absent on a 22 B frame → report `0`) |
+| `@28` | `u32-LE` | built-in **free** MiB |
+| `@32`–`@39` | | present on a 40 B body, **unmapped** (one Xtra reads `34216`, `0`) |
 
-- **Card present = SD total > 0**, not a flag byte. Byte 0 is *not* an "SD inserted" bit — it reads
-  `0x11` on a camera with **no** card and `0x00` on cameras **with** one (i.e. backwards).
+- **Card present = first-store total > 0**, not a flag byte. Byte 0 is *not* an "SD inserted" bit: it
+  reads `0x11` on a card-less Xtra and `0x00` on a card-less Nano, so it tracks something else entirely.
+- Verbatim fixtures:
+  ```
+  Nano  22 B  00 12 01 00 00 01 | e7ed0000 09e10000 | …      count=1, 60903/57609 MiB
+  Xtra  40 B  11 12 02 00 00 02 | 00000000 00000000 | … 0101 | 54bf0000 16bf0000 | a8850000 00000000
+                                   ^ no card                    ^ 48980/48918 MiB built-in
+  ```
 - Examples: an Action 6 reads `@6/@10` = 121785/109748 MiB (= its on-screen 118.9/107.2 GB); an Action 5
-  Pro and its Xtra rebadge both report 48980 MiB built-in; a card-less Xtra reads `@6 = 0`.
+  Pro and its Xtra rebadge both report 48980 MiB built-in; a Pocket 4 reports real capacity too.
+- ⚠️ **A Nano can report `0/0`** with a card in and files on internal, in an otherwise well-formed 22 B
+  body — the same shape carries real numbers in other captures. Don't read a zeroed frame as "no
+  storage"; keep the last non-zero values until a later push supersedes them.
 
 ### 20. Battery / power *(also the only place the dock reports in)*
 - Cmd Set / ID: `0x0D` / `0x02`  (34 B, ~1 Hz push)  ·  sender Battery(`0x05`), id `0`
@@ -626,6 +746,14 @@ Note `@17` and `@13` are **mutually exclusive** — each reads 0 in the modes wh
   and only −175 mA — physically docked but not yet drawing charge.
 - **Not reported anywhere:** the dock's *own* charge level, and the dock's SD-card capacity — `0x02/0x80`
   (#18) covers the **active** store only.
+
+### 20a. Gimbal position telemetry — the "is it still filming" signal
+- Cmd Set / ID: `0x04` / `0x05`  ·  App ← Camera, continuous push (~20 Hz) **while the motors run**
+
+The payload layout is unmapped, and for this purpose it doesn't matter: the useful signal is the
+**arrival rate**. A gimballed body streams these while the motors run and stops when the gimbal parks,
+so counting frames tells a client whether the camera is still filming — otherwise only observable by
+looking at it. Use it to verify [playback hold](#holding-playback-mode-for-a-whole-browse-session).
 
 ---
 
@@ -697,7 +825,7 @@ Two consequences:
 ### 25. GetWifiPassword
 - Cmd Set / ID: `0x07` / `0x0e`  ·  App → WiFi(`0x07`), BLE, empty payload
 - Response: `[status:1][PackString passphrase]`
-- Quirks: **give it a beat after GetWifiSsid** (`fff5` is write-without-response; Mimo actually spaces these only a few tens of ms — see [§20](#20-battery--power-also-the-only-place-the-dock-reports-in) — so ~500 ms is just a safe margin). The Nano may not surface a password here — fall back to its saved credentials.
+- Quirks: **give it a beat after GetWifiSsid** (`fff5` is write-without-response; Mimo actually spaces these only a few tens of ms — see [Waking a sleeping camera](#waking-a-sleeping-camera) — so ~500 ms is just a safe margin). The Nano may not surface a password here — fall back to its saved credentials.
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020700a040070eb5ef>
 
 ### 26. GetWifiMac
@@ -779,7 +907,7 @@ serial reads out of its beacon correctly once the tag assumption above is droppe
 ```
 datalink: handshake OK on udp/9003
 datalink: session=0xcefb base=0x56f0 channel=0x56f0
-datalink: drone serial 1581FA6QC25BS01CHVJQ (20 chars, tag 0x24)
+datalink: drone serial 1581FA6Q…………CHVJQ (20 chars, tag 0x24)
 datalink: 51/02 open sent, len=40
 datalink: 51-channel replies: 51/13×3            <- beacons only; a Mavic answers 51/08, 51/06, 51/80, 51/82 …
 datalink: drone session-open sent — drone frames/s now 5      <- a Mavic reaches ~268 here
@@ -801,7 +929,7 @@ Other differences worth recording, none of them yet shown to matter:
 - **The handshake reply is 15 bytes, not 9.** Same structure and the same `01` ACK byte, then six extra:
   `01 0f 00 05 05 40 1f`. **Byte-identical across sessions with different session ids**, so it is a fixed
   property of the aircraft or firmware — a version or capability descriptor, not a nonce or a challenge.
-  Meaning unknown; we ignore it and the link still comes up.
+  Meaning unknown; it can be ignored and the link still comes up.
 - **The AP drops ~16 s after joining**, twice, both times just before the list query went out. Plausibly
   downstream of the session never opening, but that is a guess.
 
