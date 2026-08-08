@@ -28,7 +28,13 @@ abstract class DumlSession(
 
     protected val tx = DumlTransport(log, port, bindLocalPort = isDrone, droneRouting = isDrone)
 
+    /** Kept because the stale-session retry must not run on a drone — see [sequenceSpaceMismatched]. */
+    private val isDroneLink = isDrone
+
     @Volatile protected var keepAliveOn = false
+
+    @Volatile final override var staleSession = false
+        private set
 
     /**
      * When the current session last completed its handshake+registration, or 0 if never.
@@ -109,42 +115,78 @@ abstract class DumlSession(
      */
     protected fun openDatalink(ip: String, onFirstPackets: ((List<ByteArray>) -> Unit)? = null): Boolean {
         handshakeOk = false
-        tx.open(ip)
+        var attempt = 0
+        while (true) {
+            tx.open(ip)
 
-        if (tcpPoke) {
-            runCatching {
-                Socket().use { s ->
-                    s.connect(InetSocketAddress(tx.peerAddress, 7001), 1200)
-                    s.getOutputStream().write(OsmoCommands.setPairingPin("osmo"))
-                    s.getOutputStream().flush()
-                    Thread.sleep(400)
+            if (tcpPoke) {
+                runCatching {
+                    Socket().use { s ->
+                        s.connect(InetSocketAddress(tx.peerAddress, 7001), 1200)
+                        s.getOutputStream().write(OsmoCommands.setPairingPin("osmo"))
+                        s.getOutputStream().flush()
+                        Thread.sleep(400)
+                    }
                 }
             }
+
+            val reply = tx.handshake(handshakeFrame())
+            if (reply == null) { log("datalink: handshake FAILED on udp/$port"); tx.close(); return false }
+            onHandshakeReply(reply)
+            handshakeOk = true
+            log("datalink: handshake OK on udp/$port")
+            onFetchProgress?.invoke(8)
+
+            // Drain heartbeats, learn the peer's channel, set our seq start.
+            repeat(5) { batch ->
+                val got = recvAll(400)
+                if (batch == 0) onFirstPackets?.invoke(got)
+                sendAck()
+            }
+            tx.syncSeqToPeerChannel()
+            onFetchProgress?.invoke(16)
+            // baseSeq is logged alongside the channel because the peer echoes it: seeing them equal is
+            // expected, and seeing the channel differ from a base we now randomise is the first real
+            // evidence that the peer has a sequence space of its own.
+            log("datalink: session=0x%04x base=0x%04x channel=0x%04x"
+                .format(tx.sessionId, tx.baseSeq, tx.cameraChannel))
+
+            if (!sequenceSpaceMismatched() || attempt >= MAX_STALE_RETRIES) break
+            attempt++
+            log("datalink: peer is on its own sequence channel — discarding this session and " +
+                "re-handshaking (attempt ${attempt + 1} of ${MAX_STALE_RETRIES + 1})")
+            handshakeOk = false
+            tx.close()
         }
 
-        val reply = tx.handshake(handshakeFrame())
-        if (reply == null) { log("datalink: handshake FAILED on udp/$port"); tx.close(); return false }
-        onHandshakeReply(reply)
-        handshakeOk = true
-        log("datalink: handshake OK on udp/$port")
-        onFetchProgress?.invoke(8)
-
-        // Drain heartbeats, learn the peer's channel, set our seq start.
-        repeat(5) { batch ->
-            val got = recvAll(400)
-            if (batch == 0) onFirstPackets?.invoke(got)
-            sendAck()
+        staleSession = sequenceSpaceMismatched()
+        if (staleSession) {
+            log("datalink: peer never accepted a fresh sequence base after ${MAX_STALE_RETRIES + 1} " +
+                "handshakes — it is probably holding a session from a previous connection, and " +
+                "commands may go unanswered. Power-cycling the camera clears it.")
         }
-        tx.syncSeqToPeerChannel()
-        onFetchProgress?.invoke(16)
-        // baseSeq is logged alongside the channel because the peer echoes it: seeing them equal is
-        // expected, and seeing the channel differ from a base we now randomise is the first real
-        // evidence that the peer has a sequence space of its own.
-        log("datalink: session=0x%04x base=0x%04x channel=0x%04x"
-            .format(tx.sessionId, tx.baseSeq, tx.cameraChannel))
         registeredAtMs = System.currentTimeMillis()
         return true
     }
+
+    /**
+     * Has the peer declined the sequence base we proposed?
+     *
+     * Every packet carries the sender's sequence position at bytes 8-9, and [DumlTransport.open] seeds
+     * `camChannel` with our own freshly-randomised base — so after draining, the two are equal exactly
+     * when the peer echoed our proposal, and differ when it is counting from somewhere of its own.
+     *
+     * A peer counting from its own space has not really joined this session, and every command we send
+     * then lands outside the window it is willing to accept: telemetry floods in at full rate and not
+     * one reply comes back. Observed on an Osmo Pocket 4 and an Osmo Pocket 3, both of which returned
+     * an empty media list; every session where the two matched listed normally.
+     *
+     * **Drones are exempt.** They bind a fixed local port (9003, symmetric), so closing and reopening
+     * the socket risks losing it to TIME_WAIT and silently falling back to a random one, which breaks
+     * the link far more reliably than a stale session does. They also echo the base in every capture
+     * we hold, so there is nothing here to fix for them.
+     */
+    private fun sequenceSpaceMismatched(): Boolean = !isDroneLink && tx.cameraChannel != tx.baseSeq
 
     /** Hook for a subclass to inspect the handshake reply (the drone logs it). */
     protected open fun onHandshakeReply(reply: ByteArray) = Unit
@@ -309,5 +351,16 @@ abstract class DumlSession(
     internal fun applyStatusFrameForTest(set: Int, id: Int, payload: ByteArray): CameraStatus {
         applyStatusFrame(set, id, payload)
         return status
+    }
+
+    companion object {
+        /**
+         * Extra handshakes to spend trying to get a peer onto a fresh sequence base.
+         *
+         * Each costs about two seconds. The alternative is a session that answers nothing, where the
+         * media query is given eleven seconds to time out before the grid comes up empty — so three
+         * retries are cheaper than one failure, and the path falls through either way.
+         */
+        private const val MAX_STALE_RETRIES = 3
     }
 }
