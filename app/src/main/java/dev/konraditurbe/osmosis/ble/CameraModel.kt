@@ -1,5 +1,7 @@
 package dev.konraditurbe.osmosis.ble
 
+import dev.konraditurbe.osmosis.drone.DroneProducts
+
 /**
  * Per-model camera capabilities, keyed on the BLE manufacturer model id (payload bytes [0:1], LE).
  *
@@ -83,15 +85,9 @@ data class CameraModel(
             // this flag governs really is confirmed, even though no download has yet finished.
             // It advertises the new format (product type 218 / HG224), not a classic model byte.
             0x0022 to CameraModel("Osmo Pocket 4 Pro", verified = true),
-            // Drones (MEDIA_PROTOCOL.md §27). The datalink is the SAME handshake as a camera but on
-            // **udp/9003** with NO tcp-7001 poke — plus a `0x51/0x02` session-open the cameras don't
-            // need, before which the aircraft answers nothing at all.
-            //
-            // The Mavic 3 is verified end-to-end on hardware: pair, creds, AP, the full paged library
-            // with thumbnails, preview and download. The Neo 2 is a tester scan only — never offloaded,
-            // port unconfirmed, sharing the drone default until someone tests one.
-            ID_MAVIC_3 to CameraModel("Mavic 3", datalinkPort = 9003, tcpPoke = false, isDrone = true, verified = true),
-            ID_NEO_2 to CameraModel("DJI Neo 2", datalinkPort = 9003, tcpPoke = false, isDrone = true),
+            // Aircraft are NOT listed here. Their whole roster lives in [DroneProducts] — one table,
+            // read out of the current DJI Fly build, so a new airframe gets its real name and transport
+            // without a second list to keep in step. See [byIdOrName] and MEDIA_PROTOCOL.md §27.
         )
 
         /**
@@ -130,23 +126,33 @@ data class CameraModel(
         }
 
         /**
-         * Model ids at or above this are treated as aircraft when we don't recognise them.
+         * Model ids at or above this are treated as aircraft when [DroneProducts] doesn't name them.
          *
-         * A **guess**, and flagged as one: every camera we have ever seen sits in `0x10`–`0x21`, and
-         * both drones we have seen sit at `0x70` and `0x7e`. It exists because the fallback has to pick
-         * *something*, and picking "camera" for an aircraft fails at the very first step — a drone
-         * releases its WiFi credentials only for the `DJI FLY` pairing token, so an unknown drone
-         * treated as a camera never even gets on its network, and the log says nothing more useful than
-         * "no credentials". Guessing "drone" for an unknown id in this range at least gets far enough
-         * to be diagnosable.
+         * Still a guess, but now only a last resort: every aircraft the current DJI Fly build knows is
+         * enumerated in [DroneProducts], so this only catches something newer than that build. Every
+         * camera we have seen sits in `0x10`–`0x22` and every known aircraft at `0x70` or above.
+         *
+         * It exists because the fallback has to pick *something*, and picking "camera" for an aircraft
+         * fails at the very first step — a drone releases its WiFi credentials only for the `DJI FLY`
+         * pairing token, so an unknown drone treated as a camera never gets on its network and the log
+         * says nothing more useful than "no credentials".
          *
          * The scan logs the raw manufacturer bytes for every hit, so an unrecognised model can be
-         * pinned properly from a single log line and added to [BY_ID].
+         * pinned properly from a single log line.
          */
         private const val DRONE_ID_FLOOR = 0x0040
 
         private fun byIdOrName(modelId: Int?, name: String?): CameraModel {
             BY_ID[modelId]?.let { return it }
+            // A named aircraft: the full roster the current DJI Fly build ships, so an aircraft we have
+            // never flown still resolves to its real name and the right transport instead of a guess.
+            DroneProducts.of(modelId)?.let { p ->
+                return CameraModel(
+                    name = p.name, datalinkPort = 9003, tcpPoke = false, isDrone = true,
+                    // Only the Mavic 3 has been offloaded end to end; the rest are read out of the app.
+                    verified = modelId == ID_MAVIC_3,
+                )
+            }
             // An unknown id in the aircraft range: take the drone defaults rather than the camera ones.
             if (modelId != null && modelId >= DRONE_ID_FLOOR) {
                 return CameraModel(
