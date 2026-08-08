@@ -972,6 +972,17 @@ class CameraSession(
                 ?: emptyList()
         val sd = sliceOf(SD_QUERY_CTR)
         val internal = sliceOf(INTERNAL_QUERY_CTR)
+        // A store that answers with nothing and a store that was never answered look identical once the
+        // slice is empty, and they need opposite fixes: an unreadable card vs a query the camera dropped.
+        // The census separates them by counting the reply frames the camera actually sent under each
+        // request counter. Measured on a Nano whose card was unreachable:
+        //
+        //     ctr1={start=1}  ctr2={data=17,end=12}
+        //
+        // i.e. the camera OPENED the SD transfer and then streamed no data and no end frame — it answered
+        // "nothing there". A missing ctr1 entirely would mean the query never got served, which is ours
+        // to fix; `start` with no `data` is the camera's answer and is not a bug.
+        if (sd.isEmpty()) log("datalink: SD slice empty — reply frames by request counter: ${chunkCensus(raw)}")
         val ambiguous = sd.isNotEmpty() && internal.isNotEmpty() &&
             sd.map { it.path }.toSet() == internal.map { it.path }.toSet()
         if ((sd.isEmpty() && internal.isEmpty()) || ambiguous) {
@@ -985,6 +996,38 @@ class CameraSession(
         // kept copy is the one more likely to be right.
         return (internal.map { it.copy(storage = 1, storageKnown = true) } +
             sd.map { it.copy(storage = 0, storageKnown = true) }).distinctBy { it.path }
+    }
+
+    /**
+     * Tally the `0x00/0x27` reply frames in a collected blob by sub-header byte 4 (the request counter
+     * the camera echoes) and by `4A` subtype, e.g. `ctr1={start=1,data=0,end=1} ctr2={…}`.
+     *
+     * Diagnostic only. It answers the one question the per-store split cannot: whether a store that
+     * decoded to zero files was *answered* with zero, or never answered at all. See [collectStores] for
+     * how to read the output.
+     */
+    private fun chunkCensus(raw: ByteArray): String {
+        val tally = sortedMapOf<Int, MutableMap<Int, Int>>()
+        var i = 0
+        while (i + 13 <= raw.size) {
+            if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
+            val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+            if (len < 13 || i + len > raw.size) { i++; continue }
+            val plStart = i + 11
+            if ((raw[i + 9].toInt() and 0xFF) == 0x00 && (raw[i + 10].toInt() and 0xFF) == 0x27 &&
+                len - 13 >= 10 && (raw[plStart].toInt() and 0xFF) == 0x4A
+            ) {
+                val ctr = raw[plStart + 4].toInt() and 0xFF
+                val sub = raw[plStart + 1].toInt() and 0xFF
+                tally.getOrPut(ctr) { sortedMapOf() }.merge(sub, 1, Int::plus)
+            }
+            i += len
+        }
+        if (tally.isEmpty()) return "none"
+        fun name(sub: Int) = when (sub) { 0x04 -> "start"; 0x01 -> "data"; 0x03 -> "end"; else -> "sub$sub" }
+        return tally.entries.joinToString(" ") { (ctr, subs) ->
+            "ctr$ctr={" + subs.entries.joinToString(",") { (s, n) -> "${name(s)}=$n" } + "}"
+        }
     }
 
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
