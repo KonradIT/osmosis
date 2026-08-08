@@ -1025,14 +1025,18 @@ class CameraSession(
      * Silent when healthy. Small lists are dumped in full: on a controlled 4-file card the handles are
      * the whole point, and the volume is trivial.
      */
-    private fun warnOnHandleCollisions(files: List<CameraFile>) {
+    private fun flagHandleCollisions(files: List<CameraFile>): List<CameraFile> {
         val dupes = files.filter { it.handle != 0L }.groupBy { it.handle }.filter { it.value.size > 1 }
         for ((h, group) in dupes) {
-            log("datalink: ⚠ HANDLE COLLISION 0x%08x shared by %s".format(h, group.joinToString { it.name }))
+            log("datalink: ⚠ HANDLE COLLISION 0x%08x shared by %s — delete disabled for these"
+                .format(h, group.joinToString { it.name }))
         }
         if (files.size <= 12) {
             for (f in files) log("datalink:   %-44s handle=0x%08x".format(f.name.take(44), f.handle))
         }
+        if (dupes.isEmpty()) return files
+        val shared = dupes.keys
+        return files.map { if (it.handle in shared) it.copy(handleShared = true) else it }
     }
 
     private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
@@ -1041,9 +1045,8 @@ class CameraSession(
             log("datalink: decoded ${comp.size} CompositePack records " +
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
-            warnOnHandleCollisions(comp)
             dumpManifest(bytes)
-            return comp
+            return flagHandleCollisions(comp)
         }
         log("datalink: no CompositePack records — dumping manifest, falling back to flat scrape")
         // Unbudgeted: a decode failure is rare, and it is the one case where the bytes are the
