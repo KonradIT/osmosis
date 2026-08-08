@@ -68,7 +68,11 @@ data class CameraModel(
             // naming decodes in full (path + ext + delete handle). Note: rejects 0x53/0x10 (e0) but its
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
             0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
-            0x0021 to CameraModel("Osmo Pocket 4"),
+            // Tester-confirmed 2026-08-08 on Android 10 (our minSdk): connect, a 45-file internal
+            // manifest, playback held, and downloads the tester rated "same or maybe faster than
+            // Mimo". Its `0x02/0xdc` reports real capacity, unlike the Nano's. Note it advertises
+            // the CLASSIC format while the Pro sibling below uses the newer one — see BleAdvert.
+            0x0021 to CameraModel("Osmo Pocket 4", verified = true),
             // Tester-confirmed 2026-08-07 on 9004 + poke: pair, creds, AP, datalink handshake, a
             // 46-file manifest across two stores, playback held, and 43 MB of a clip transferred over
             // /v2. The transfer then died with the AP, not with the protocol — so the datalink config
