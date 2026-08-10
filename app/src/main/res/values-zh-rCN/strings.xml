@@ -83,7 +83,6 @@
     <string name="connected_wifi">已连接 · Wi-Fi</string>
     <string name="loading_burst">正在加载连拍…</string>
     <string name="not_connected">未连接</string>
-    <string name="stale_session_hint">%1$s 未返回媒体列表。请将相机关机后重新开机，然后重新连接。</string>
 
     <!-- Date headers -->
     <string name="today">今天</string>
