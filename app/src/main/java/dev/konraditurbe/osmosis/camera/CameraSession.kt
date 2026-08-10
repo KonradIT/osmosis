@@ -504,16 +504,29 @@ class CameraSession(
             while (System.nanoTime() < deadline) {
                 val dg = recvAll(100)
                 parseStatus(dg)                       // keep the status pill fed while we wait
-                if (findReply(dg, 0x02, 0x0C) != null) {
-                    playbackHeld = true
-                    log("datalink: playback mode held" + if (n > 0) " (confirmed on attempt ${n + 1})" else "")
-                    return true
+                val reply = findReply(dg, 0x02, 0x0C)
+                if (reply != null) {
+                    // Read the status byte. Treating "a reply arrived" as success was wrong: a camera
+                    // that REFUSES the mode change still answers, so a refusal would be logged as
+                    // "playback mode held" and the browse would carry on believing it. No body is known
+                    // to do that yet — this is here so the next report of "it isn't in playback" is
+                    // answerable from the log instead of from someone watching the camera.
+                    val status = reply[0].toInt() and 0xFF
+                    if (status == 0x00) {
+                        playbackHeld = true
+                        log("datalink: playback mode held" +
+                            if (n > 0) " (confirmed on attempt ${n + 1})" else "")
+                        return true
+                    }
+                    log("datalink: playback REFUSED 0x%02x on attempt %d [%s]".format(
+                        status, n + 1, reply.joinToString("") { "%02x".format(it) }))
+                    break                             // don't wait out the window — re-send instead
                 }
                 sendAck()
             }
         }
-        // Not fatal — the browse still works, but the camera stays in capture (a Pocket 3 keeps its
-        // gimbal live and can still be recording), so say so rather than pretend we hold it.
+        // Not fatal — the browse still works, but the camera stays in capture (gimbal unfolded, and it
+        // can still be recording), so say so rather than pretend we hold it.
         log("datalink: playback mode NOT confirmed after $attempts attempts — camera may still be in capture")
         return false
     }
@@ -641,10 +654,6 @@ class CameraSession(
                     // pushes 0x02/0x80 and 0x02/0x82 unprompted once registered — so they were two
                     // writes a second buying nothing, on a link whose write budget is the very thing
                     // that runs out. Mimo sends neither.
-                    //
-                    // Says once, on change, whether the gimbal is still turning — the Pocket 3
-                    // question nobody could answer from a log before. Rate-limited internally.
-                    reportGimbalActivity()
                     // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode
                     // should simply stay, but the camera can also be knocked out of it by something we
                     // don't control — a button press on the body, a mode change, a firmware quirk — and

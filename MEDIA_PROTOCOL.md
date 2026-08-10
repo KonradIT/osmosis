@@ -85,12 +85,14 @@ Where a body behaves differently from the rest of the line:
 | Osmo Nano | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1**, dock SD → **0** | `.LRF` | ✅ real flag, `0`/`1` |
 | Osmo Pocket 4 | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1** | none listed | all `0` (nothing favourited) |
 | Osmo Pocket 4 Pro | `DCIM/DJI_001/DJI_…` | `0x00100000` / `0x40` ⚠️ | ⚠️ 45 → **0**, 1 → **1** | `(unconfirmed)` | `(unconfirmed)` |
-| Action 5 Pro / Xtra Edge Pro | `DCIM/CAM_001/CAM_…_D` (Xtra)<br>`DCIM/DJI_001_OA5/DJI_…_DOA5` (DJI) | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.XRF` | ❌ `44`/`48` — a length |
+| Osmo Action 5 Pro | `DCIM/DJI_001/DJI_…_D` | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.LRF` | `(unconfirmed)` |
+| Xtra Edge Pro | `DCIM/CAM_001/CAM_…_D` | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.XRF` | ❌ `44`/`48` — a length |
 | Osmo Action 6 | `DCIM/DJI_001/DJI_…` | `0x4010xxxx` | internal (only store) → **1** | `(unconfirmed)` | `(unconfirmed)` |
 | Osmo Pocket 3 | `DCIM/DJI_001/DJI_…_D_OP3` | `0x00040000` / `0x10` | microSD (only store) → **0** | `(unconfirmed)` | ❌ `48` — a length |
-| Osmo Action (1) | *(no paths on the wire)* | *(index-based, no handles)* | n/a (uses `/v1`) | n/a | n/a |
-| Mavic 3 | *(synthesised from the index)* | *(no handle)* | packed in `file_index` | subtype `18` | n/a |
 
+- **Path-addressed bodies only.** Index-addressed devices have no paths, handles or stores to tabulate:
+  the Osmo Action 1 is in [§1](#1-get-media-list) ("Parsed — index-based") and the drones in
+  [§28](#28-get-media-list-drone).
 - **Fit `base + seq × step` from the manifest's own handles**, per store, rather than hardcoding a row
   above. Geometry is per body *and* per store, and the Pocket 4 shows why the model name is no guide:
   it uses the **Nano's** `0x40` step, not the Pocket 3's `0x10`.

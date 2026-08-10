@@ -64,34 +64,6 @@ abstract class DumlSession(
     private var lastBattSig = ""      // dock-relevant bytes of 0x0d/02; log only on change (#5)
     private var lastStorageSig = ""   // the 0x02/0xdc body; log only when the numbers move
 
-    /** 0x04/0x05 gimbal-telemetry frames seen this session — see applyStatusFrame. */
-    @Volatile protected var gimbalFrames = 0L
-    private var lastGimbalReport = 0L
-    private var lastGimbalFrames = 0L
-
-    /**
-     * Report whether the gimbal is still running, at most once every [everyMs].
-     *
-     * Exists for one question we could never answer from a log: a Pocket 3 tester reports the gimbal
-     * stays powered during a transfer, and the only evidence either way was someone watching the
-     * camera. The telemetry rate settles it — motors running means frames arriving.
-     */
-    protected fun reportGimbalActivity(everyMs: Long = 5000) {
-        val now = System.currentTimeMillis()
-        if (lastGimbalReport == 0L) { lastGimbalReport = now; lastGimbalFrames = gimbalFrames; return }
-        val dt = now - lastGimbalReport
-        if (dt < everyMs) return
-        val rate = (gimbalFrames - lastGimbalFrames) * 1000.0 / dt
-        lastGimbalReport = now; lastGimbalFrames = gimbalFrames
-        // Only worth a line when the answer changes: streaming vs stopped.
-        val nowMoving = rate >= 1.0
-        if (nowMoving != gimbalWasMoving) {
-            gimbalWasMoving = nowMoving
-            log("gimbal: %s (0x04/0x05 at %.1f/s)".format(if (nowMoving) "RUNNING" else "quiet", rate))
-        }
-    }
-    private var gimbalWasMoving = false
-
     /**
      * The handshake (SYN) payload: our proposed **base sequence** followed by the window/MTU parameters
      * the official app offers — window 100, MTU 1472 (`c0 05`), and the rest replayed verbatim.
@@ -223,7 +195,6 @@ abstract class DumlSession(
         lastSig = ""
         lastBattSig = ""
         lastStorageSig = ""
-        gimbalFrames = 0; lastGimbalReport = 0; lastGimbalFrames = 0; gimbalWasMoving = false
     }
 
     /** Fire [onStatus] if anything the UI displays has actually changed. */
@@ -289,12 +260,14 @@ abstract class DumlSession(
                     internalFreeMb = if (!hasInternal) 0 else if (sane(inFree)) inFree else status.internalFreeMb,
                 ); return true
             }
-            // Gimbal position telemetry. A live gimbal pushes this continuously (~20 Hz per the
-            // reverse-engineered Pocket 3 BLE library in reference/lib-osmo-ble, which names cmdSet
-            // 0x04 / cmd 0x05 "push position telemetry"), so its presence is a direct read on whether
-            // the motors are still running — the thing a Pocket 3 tester can otherwise only judge by
-            // looking at the camera. Counted here, reported by the session's keep-alive.
-            set == 0x04 && id == 0x05 -> { gimbalFrames++; return true }
+            // Gimbal position telemetry — swallowed, not measured.
+            //
+            // Its ARRIVAL RATE is not a read on whether the motors are turning: an Osmo Pocket 4 that
+            // had physically folded its gimbal on entering playback (tester-observed, 2026-08-08) went
+            // on pushing this at 9.3/s, and a camera that had refused playback pushed it at 10.0/s.
+            // The frame is a fixed-rate heartbeat, so a "gimbal is running" probe built on it reported
+            // RUNNING in every state and sent an OP3 investigation down the wrong path entirely.
+            set == 0x04 && id == 0x05 -> return true
             set == 0x00 && id == 0x00 && p.size >= 6 -> {
                 // GetVersion reply: NUL-separated ASCII (sdk\0name\0firmware); grab the version string.
                 val text = String(p, Charsets.US_ASCII)
