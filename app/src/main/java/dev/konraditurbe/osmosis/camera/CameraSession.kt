@@ -183,30 +183,17 @@ class CameraSession(
         runCatching { syncTime() }   // set the camera clock + timezone to the phone's, on every connect
         onFetchProgress?.invoke(50)
 
-        var files = queryNewestPage()
-
-        // A camera that answers the query with nothing is usually holding a session from a previous
-        // connection: it completes the handshake, streams status, and serves no media. One fresh
-        // registration clears it — which is what a user does by hand when they back out and reconnect.
+        // No retry on an empty answer, deliberately. There WAS one, added for a log where a camera
+        // handshook, streamed status and served no media across several connects — but the cause was
+        // ours: the tester tapped connect three times, each tap opened a datalink while the last was
+        // still live, and the camera was holding OUR previous session. Concurrent sessions are stopped
+        // at the source now, and no log since has contained an empty manifest.
         //
-        // Retrying on the EMPTY RESULT rather than on a signature is deliberate. The obvious signature
-        // is the peer answering on a sequence channel other than the base we proposed, and that does
-        // predict the failure where it appears — but it is not the only cause: across the logs held,
-        // three sessions returned nothing and only two of them had the mismatch. The third recovered on
-        // the user's own reconnect, with base and channel equal throughout. Keying on "no files" covers
-        // every case seen, needs no theory about why, and can be exercised on demand.
-        if (files.isEmpty()) {
-            log("datalink: no media on the first pass" +
-                (if (sequenceSpaceMismatched()) " (peer is on its own sequence channel)" else "") +
-                " — re-registering and asking once more")
-            close()
-            if (openAndRegister(ip)) {
-                files = queryNewestPage()
-                if (files.isEmpty()) staleSession = true
-            } else {
-                staleSession = true
-            }
-        }
+        // The retry could not tell "answered nothing" from "answered, and the card is empty", so its
+        // one live effect was to make an empty camera pay a re-registration and then be told to power
+        // itself off and on. If a camera ever does wedge for some other reason, a log saying so beats a
+        // retry that hides it — the sequence-channel mismatch is still reported by [openDatalink].
+        val files = queryNewestPage()
 
         // Seed lazy-pagination state: dedup set + cursor = oldest video handle on this page.
         seenPaths.clear(); seenPaths.addAll(files.map { it.path })

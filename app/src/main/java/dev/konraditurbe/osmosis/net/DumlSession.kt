@@ -28,13 +28,10 @@ abstract class DumlSession(
 
     protected val tx = DumlTransport(log, port, bindLocalPort = isDrone, droneRouting = isDrone)
 
-    /** Kept because the stale-session retry must not run on a drone — see [sequenceSpaceMismatched]. */
+    /** Kept because [sequenceSpaceMismatched] has never been checked on a drone. */
     private val isDroneLink = isDrone
 
     @Volatile protected var keepAliveOn = false
-
-    @Volatile final override var staleSession = false
-        protected set
 
     /**
      * When the current session last completed its handshake+registration, or 0 if never.
