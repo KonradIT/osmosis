@@ -209,8 +209,39 @@ class DroneSession(
         // aircraft's answer is why a Mini 3 decoded to nothing at all.
         val stride = DroneManifest.strideOf(chunks.values.toList()) ?: DroneManifest.RECORD_STRIDE
         if (stride != DroneManifest.RECORD_STRIDE) log("datalink: record stride ${stride}B (declared)")
-        return DroneManifest.decode(catalogue, stride)
+        val files = DroneManifest.decode(catalogue, stride)
+
+        // The record layout is hardware-verified on two aircraft, and the stride comes from the reply
+        // itself — but an airframe that frames its catalogue some other way entirely would still land
+        // here with bytes we cannot read. That case is the whole question, so keep the bytes: it is how
+        // a second format gets identified rather than guessed at.
+        if (files.isEmpty() && catalogue.isNotEmpty()) {
+            log("datalink: ${catalogue.size}B of catalogue decoded to no records at stride ${stride}B")
+            dumpCatalogue(catalogue)
+        }
+        return files
     }
+
+    /**
+     * Dump an undecodable catalogue in the format `tools/hexdump_to_bin.py` turns back into a fixture.
+     *
+     * File-only and gated on "Save logs", like the camera's: a dump in logcat evicts the session that
+     * explains it. Capped, because the tail of an unparsed blob is a transcript of the aircraft talking
+     * to itself, and a log too big to send is a log nobody sends.
+     */
+    private fun dumpCatalogue(blob: ByteArray) {
+        if (!dev.konraditurbe.osmosis.core.FileLog.isOn()) {
+            log("datalink: turn on \"Save logs\" and reconnect to capture the layout")
+            return
+        }
+        dev.konraditurbe.osmosis.core.ManifestHex.dump(log, blob, CATALOGUE_DUMP_MAX_BYTES, "CATALOGUE")
+    }
+
+    /**
+     * Cap on an undecodable-catalogue dump. A page is ~45 records; at any plausible record size 64 kB
+     * carries the whole thing, and the layout is legible from the first few in any case.
+     */
+    private val CATALOGUE_DUMP_MAX_BYTES = 64_000
 
     /** True if [pl] is a `0x4a` state frame of [subtype] carrying [seq] — the drone's transfer signal. */
     private fun isState(pl: ByteArray, subtype: Int, seq: Int): Boolean =
