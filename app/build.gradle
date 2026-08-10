@@ -22,10 +22,9 @@ android {
         minSdk 29
         targetSdk 34
         // Must exceed every code already in a tester's hands: 20 went out as
-        // 1.3.3-action1-playback and 22 as 1.3.1-rc1, so the 1.3.1 release takes 23. Same
-        // versionName as the rc on purpose — it is the same release, promoted.
-        versionCode 23
-        versionName "1.3.1"
+        // 1.3.3-action1-playback, 22 as 1.3.1-rc1, and 23 was tagged v1.3.1 but never published.
+        versionCode 24
+        versionName "1.3.2"
     }
 
     signingConfigs {
