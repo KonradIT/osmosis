@@ -48,8 +48,34 @@ data class DcfRecord(
  */
 object DcfRecords {
 
-    /** Drone (Mavic 3 family) record stride. */
+    /**
+     * The Mavic 3's record size, and the fallback when a reply does not declare its own.
+     *
+     * **Not "the drone stride".** A Mini 3 uses **67**, with byte-for-byte the same fields in the same
+     * places — only the trailing unmapped bytes differ in length. Prefer [strideFrom]; this is what to
+     * use when a reply arrives with no count/total to derive it from.
+     */
     const val DRONE_STRIDE = 94
+
+    /** Bytes of `[u32 count][u32 totalBytes]` that a list reply's `total` counts but records do not. */
+    private const val LIST_HEADER = 8
+
+    /**
+     * The record size this reply actually uses, from the count and total it declares in chunk 0.
+     *
+     * `total = 8 + stride * count`, exact on every capture held: a Mavic 3 at 45/4238 gives 94, a
+     * Mini 3 at 21/1415 and 1/75 both give 67. The aircraft has been telling us its record size all
+     * along and we hardcoded one aircraft's answer, which is why a Mini 3 decoded to nothing.
+     *
+     * Null when the reply declares nothing usable, or when the arithmetic does not come out whole —
+     * a non-integer stride means the assumption is wrong, and guessing would invent files.
+     */
+    fun strideFrom(count: Int, totalBytes: Int): Int? {
+        if (count <= 0 || totalBytes <= LIST_HEADER) return null
+        val body = totalBytes - LIST_HEADER
+        if (body % count != 0) return null
+        return (body / count).takeIf { it in 16..1024 }
+    }
 
     /**
      * Osmo Action 1 record stride — its list is `[u32 count][u32 totalBytes]` then fixed 65-byte records
@@ -75,9 +101,10 @@ object DcfRecords {
      * a missing middle chunk shifts the stream out of phase, and returning the records we can trust
      * beats emitting plausible-looking garbage.
      */
-    fun decodeDrone(blob: ByteArray): List<DcfRecord> {
+    fun decodeDrone(blob: ByteArray, stride: Int = DRONE_STRIDE): List<DcfRecord> {
         val out = ArrayList<DcfRecord>()
-        for (off in 0..blob.size - DRONE_STRIDE step DRONE_STRIDE) {
+        if (stride < 16) return out
+        for (off in 0..blob.size - stride step stride) {
             val mtime = u32(blob, off)
             val size = u32(blob, off + 4)
             val index = u32(blob, off + 8)
