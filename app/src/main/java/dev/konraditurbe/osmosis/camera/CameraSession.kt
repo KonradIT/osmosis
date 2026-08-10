@@ -491,13 +491,21 @@ class CameraSession(
             while (System.nanoTime() < deadline) {
                 val dg = recvAll(100)
                 parseStatus(dg)                       // keep the status pill fed while we wait
+                // Say what actually came back, verbatim, before deciding anything about it.
+                //
+                // A Pocket 3 sat on its live-preview screen — tester-observed — through a session this
+                // method had logged as "playback mode held" on the first attempt. So the frame we
+                // accept as the reply is not doing what we think. The candidates are a refusal status
+                // we were not reading, an accepted command the body ignores, or a frame that is not the
+                // reply at all: [findReply] matches on cmdSet/cmdId only and never looks at the flags
+                // byte, so an unsolicited push of the same pair satisfies it. One line of ground truth
+                // separates those; three rounds of inference did not.
+                for (f in modeReplyFrames(dg)) log("datalink: 0x02/0x0C <- $f")
                 val reply = findReply(dg, 0x02, 0x0C)
                 if (reply != null) {
-                    // Read the status byte. Treating "a reply arrived" as success was wrong: a camera
-                    // that REFUSES the mode change still answers, so a refusal would be logged as
-                    // "playback mode held" and the browse would carry on believing it. No body is known
-                    // to do that yet — this is here so the next report of "it isn't in playback" is
-                    // answerable from the log instead of from someone watching the camera.
+                    // Accept on status 0 only. Behaviour is otherwise unchanged: the Nano, Xtra and
+                    // Pocket 4 all confirm playback correctly today, and tightening the match on a
+                    // guess would risk them to fix a body we cannot yet explain.
                     val status = reply[0].toInt() and 0xFF
                     if (status == 0x00) {
                         playbackHeld = true
@@ -516,6 +524,38 @@ class CameraSession(
         // can still be recording), so say so rather than pretend we hold it.
         log("datalink: playback mode NOT confirmed after $attempts attempts — camera may still be in capture")
         return false
+    }
+
+    /**
+     * Every `0x02/0x0C` frame in [dg] as `flags=0x.. payload=…`, for the playback log.
+     *
+     * The flags byte at `+8` is the point: it is what tells a response apart from an unsolicited push,
+     * and both [DumlTransport.scanFrames] and [findReply] drop it. Same frame validation as the former
+     * — CRC8 on the header, CRC16 on the body — so a byte pattern that merely looks like a frame is
+     * not reported as one.
+     */
+    private fun modeReplyFrames(dg: List<ByteArray>): List<String> {
+        val out = ArrayList<String>()
+        for (raw in dg) {
+            var i = 0
+            while (i + 13 <= raw.size) {
+                if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
+                val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+                if (len < 13 || i + len > raw.size) { i++; continue }
+                if (DjiCrc.computeCrc8(raw.copyOfRange(i, i + 3)) != (raw[i + 3].toInt() and 0xFF)) { i++; continue }
+                val body = raw.copyOfRange(i, i + len - 2)
+                val want = (raw[i + len - 2].toInt() and 0xFF) or ((raw[i + len - 1].toInt() and 0xFF) shl 8)
+                if (DjiCrc.computeCrc16(body) != want) { i++; continue }
+                if ((raw[i + 9].toInt() and 0xFF) == 0x02 && (raw[i + 10].toInt() and 0xFF) == 0x0C) {
+                    val pl = raw.copyOfRange(i + 11, i + len - 2)
+                    out.add("flags=0x%02x payload=%s".format(
+                        raw[i + 8].toInt() and 0xFF,
+                        if (pl.isEmpty()) "(empty)" else pl.joinToString("") { "%02x".format(it) }))
+                }
+                i++
+            }
+        }
+        return out
     }
 
     /**
