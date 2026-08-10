@@ -28,7 +28,13 @@ abstract class DumlSession(
 
     protected val tx = DumlTransport(log, port, bindLocalPort = isDrone, droneRouting = isDrone)
 
+    /** Kept because the stale-session retry must not run on a drone — see [sequenceSpaceMismatched]. */
+    private val isDroneLink = isDrone
+
     @Volatile protected var keepAliveOn = false
+
+    @Volatile final override var staleSession = false
+        protected set
 
     /**
      * When the current session last completed its handshake+registration, or 0 if never.
@@ -142,9 +148,31 @@ abstract class DumlSession(
         // evidence that the peer has a sequence space of its own.
         log("datalink: session=0x%04x base=0x%04x channel=0x%04x"
             .format(tx.sessionId, tx.baseSeq, tx.cameraChannel))
+        if (sequenceSpaceMismatched()) {
+            log("datalink: peer answered on its own sequence channel, not the base we proposed — " +
+                "it may be holding a session from a previous connection")
+        }
         registeredAtMs = System.currentTimeMillis()
         return true
     }
+
+    /**
+     * Has the peer declined the sequence base we proposed?
+     *
+     * Every packet carries the sender's sequence position at bytes 8-9, and [DumlTransport.open] seeds
+     * `camChannel` with our own freshly-randomised base — so after draining, the two are equal exactly
+     * when the peer echoed our proposal, and differ when it is counting from somewhere of its own.
+     *
+     * **Reported, not acted on.** A peer counting from its own space has answered nothing in both
+     * sessions where it appeared, so this is real evidence and worth logging — but it is not the whole
+     * story: of three sessions across our logs that returned no media, only two had the mismatch, and
+     * the third recovered on a plain reconnect with base and channel equal throughout. Recovery
+     * therefore keys on the empty result itself (see `CameraSession.fetchFileList`), which covers every
+     * case observed rather than the two this signature explains.
+     *
+     * Drones are excluded: they bind a fixed local port and the comparison has never been checked there.
+     */
+    protected fun sequenceSpaceMismatched(): Boolean = !isDroneLink && tx.cameraChannel != tx.baseSeq
 
     /** Hook for a subclass to inspect the handshake reply (the drone logs it). */
     protected open fun onHandshakeReply(reply: ByteArray) = Unit
@@ -310,4 +338,5 @@ abstract class DumlSession(
         applyStatusFrame(set, id, payload)
         return status
     }
+
 }

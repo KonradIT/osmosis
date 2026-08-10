@@ -30,6 +30,15 @@ interface MediaSession {
     /** Another, older page is likely to exist — drives the grid's infinite scroll. */
     val moreAvailable: Boolean
 
+    /**
+     * The handshake landed but the device never joined our session, so it is likely to answer nothing.
+     *
+     * Distinguishes a camera that is genuinely empty from one holding a session left over from a
+     * previous connection — both produce an empty grid, and only the second is fixed by power-cycling.
+     * Always false for devices where this cannot be detected.
+     */
+    val staleSession: Boolean get() = false
+
     /** Connect and return the newest page. Empty on failure. Blocking. */
     fun fetchFileList(ip: String): List<CameraFile>
 

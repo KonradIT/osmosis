@@ -14,6 +14,10 @@ The log format, from CameraSession.dumpManifest:
       ...
     datalink: --- MANIFEST-HEX END ---
 
+A capped dump announces both figures — `BEGIN (64000B of 74612B)` — and the first is what the log
+actually carries. A truncated fixture is still worth having: a manifest that failed to decode is
+usually diagnosable from its opening records alone.
+
 Offsets are verified as it goes: a log line dropped by a rotating log file or a truncated share
 would otherwise produce a fixture that is quietly missing 32 bytes in the middle, which is far worse
 than no fixture at all.
@@ -24,7 +28,10 @@ import os
 import re
 import sys
 
-BEGIN = re.compile(r"MANIFEST-HEX BEGIN \((\d+)B\)")
+# Group 1 is the byte count actually dumped; the optional group 2 is the full manifest size, present
+# only when the dump was capped. Matching just `(\d+)B\)` misses every capped dump, which is exactly
+# the failure case the dump exists to capture.
+BEGIN = re.compile(r"MANIFEST-HEX BEGIN \((\d+)B(?: of (\d+)B)?\)")
 END = re.compile(r"MANIFEST-HEX END")
 # "[14:30:57.906]   0000  aabbcc.. ..ddeeff   ascii"
 #

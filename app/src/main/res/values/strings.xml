@@ -83,6 +83,7 @@
     <string name="connected_wifi">Connected · WiFi</string>
     <string name="loading_burst">Loading burst…</string>
     <string name="not_connected">Not connected</string>
+    <string name="stale_session_hint">%1$s didn\'t hand over its media list. Turn the camera off and on again, then reconnect.</string>
 
     <!-- Date headers -->
     <string name="today">TODAY</string>

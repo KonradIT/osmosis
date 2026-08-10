@@ -183,9 +183,45 @@ class CameraSession(
         runCatching { syncTime() }   // set the camera clock + timezone to the phone's, on every connect
         onFetchProgress?.invoke(50)
 
-        // Fast initial load: osmo-download's proven 3-command sequence → the newest ~45 files (no
-        // playback mode needed, quick, zero issues). OLDER pages are lazy — the grid's infinite scroll
-        // calls fetchNextPage(), which enters playback and pages by the 4-byte handle cursor.
+        var files = queryNewestPage()
+
+        // A camera that answers the query with nothing is usually holding a session from a previous
+        // connection: it completes the handshake, streams status, and serves no media. One fresh
+        // registration clears it — which is what a user does by hand when they back out and reconnect.
+        //
+        // Retrying on the EMPTY RESULT rather than on a signature is deliberate. The obvious signature
+        // is the peer answering on a sequence channel other than the base we proposed, and that does
+        // predict the failure where it appears — but it is not the only cause: across the logs held,
+        // three sessions returned nothing and only two of them had the mismatch. The third recovered on
+        // the user's own reconnect, with base and channel equal throughout. Keying on "no files" covers
+        // every case seen, needs no theory about why, and can be exercised on demand.
+        if (files.isEmpty()) {
+            log("datalink: no media on the first pass" +
+                (if (sequenceSpaceMismatched()) " (peer is on its own sequence channel)" else "") +
+                " — re-registering and asking once more")
+            close()
+            if (openAndRegister(ip)) {
+                files = queryNewestPage()
+                if (files.isEmpty()) staleSession = true
+            } else {
+                staleSession = true
+            }
+        }
+
+        // Seed lazy-pagination state: dedup set + cursor = oldest video handle on this page.
+        seenPaths.clear(); seenPaths.addAll(files.map { it.path })
+        pageCursor = files.map { it.handle }.filter { it >= VIDEO_HANDLE_BASE }.minOrNull() ?: 0L
+        moreAvailable = hasOlderPage(files.size, pageCursor)
+        log("datalink: parsed ${files.size} media files (newest page; more=$moreAvailable)")
+        onFetchProgress?.invoke(100)
+        return files
+    }
+
+    /**
+     * The fast initial load: the proven 3-command sequence for the newest ~45 files, no playback mode
+     * needed. Older pages are lazy — the grid's infinite scroll calls [fetchNextPage].
+     */
+    private fun queryNewestPage(): List<CameraFile> {
         sendDuml(0x00, 0x26, hex(
             "4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000"
         ), receiverType = 0x01, receiverId = 0)
@@ -205,14 +241,7 @@ class CameraSession(
             if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = count
         }
-        val files = collectStores(blob.toByteArray())
-        // Seed lazy-pagination state: dedup set + cursor = oldest video handle on this page.
-        seenPaths.clear(); seenPaths.addAll(files.map { it.path })
-        pageCursor = files.map { it.handle }.filter { it >= VIDEO_HANDLE_BASE }.minOrNull() ?: 0L
-        moreAvailable = hasOlderPage(files.size, pageCursor)
-        log("datalink: parsed ${files.size} media files (newest page; more=$moreAvailable)")
-        onFetchProgress?.invoke(100)
-        return files
+        return collectStores(blob.toByteArray())
     }
 
     private fun listCmd(ctr: Int, cursor: Long): ByteArray =
@@ -1563,7 +1592,7 @@ class CameraSession(
         // subscribes to). Mimo addresses SetTime here; the file/media receiver (0x01) silently drops it.
         sendDuml(0x00, 0x6a, b.toByteArray(), receiverType = 0x08, receiverId = 1)
         recvAll(300); sendAck()
-        log("datalink: time synced → ${tz.id} (${offMin}min), unix $nowSec")
+        log("datalink: time synced (UTC offset ${offMin}min), unix $nowSec")
     }
 
     /**

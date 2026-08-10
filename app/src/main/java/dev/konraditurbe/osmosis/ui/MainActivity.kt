@@ -1072,7 +1072,16 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         applyOrientationChrome()   // hide the pill if we're (re)entering the grid in landscape
         if (!preserveFilters) resetGalleryChips()      // a fresh camera list starts unfiltered
         if (files.isEmpty()) {
-            logLine("No media found on camera.")
+            // An empty grid has two very different causes and the user can only act on one of them.
+            // A camera that never joined our session answers nothing, which looks identical to a camera
+            // with nothing on it — so when the datalink says the session was stale, say so on screen
+            // rather than leave "no media" as the only explanation for a card full of files.
+            if (datalink?.staleSession == true) {
+                logLine("No media returned — the camera was holding a stale session.")
+                toast(getString(R.string.stale_session_hint, pillName()))
+            } else {
+                logLine("No media found on camera.")
+            }
             return
         }
         imageLoader?.shutdown()

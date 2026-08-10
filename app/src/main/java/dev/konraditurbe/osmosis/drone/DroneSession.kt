@@ -355,15 +355,21 @@ class DroneSession(
     /** The serial-shaped run in a beacon payload — see [DroneSerial] for why it's found by shape. */
     internal fun parseDroneSerial(payload: ByteArray): Pair<ByteArray, Int>? = DroneSerial.inPayload(payload)
 
-    /** Watch received frames for the beacon and latch the serial. */
-    private fun latchDroneSerial(raw: ByteArray) {
-        if (droneSerial != null) return
+    /** Keep the `0x51` census, and latch the serial out of the beacon or challenge if we lack one.
+     *
+     *  The census must be kept unconditionally. Gating it on a missing serial made it permanently
+     *  empty whenever BLE had already supplied one — which is every ordinary run — and the
+     *  session-open loop reads it to decide whether a variant was answered. With it stuck at zero
+     *  that loop always timed out and sent the *next* airframe's open to an aircraft that had
+     *  already replied. */
+    private fun watch51Frames(raw: ByteArray) {
         for ((set, cmd, pl) in scanFrames(raw)) {
             if (set != 0x51 || cmd != 0x01 || pl.size < 13 || (pl[0].toInt() and 0xFF) != 0x55) continue
             val ln = (pl[1].toInt() and 0xFF) or ((pl[2].toInt() and 0x03) shl 8)
             if (ln > pl.size) continue
             val inner = pl[10].toInt() and 0xFF
             seen51[inner] = (seen51[inner] ?: 0) + 1
+            if (droneSerial != null) continue
             // 0x13 is the unprompted identity beacon; 0x08 is the session-open challenge, which names
             // the serial too — and unlike the beacon, it arrives on *every* airframe that answers the
             // open at all, whatever shape its beacon takes.
@@ -417,6 +423,9 @@ class DroneSession(
      * session. Trying is cheap and self-evidencing: the aircraft answers a `0x51/0x08` challenge to
      * the open it understands, and ignores the other. DJI Fly sends its own open twice regardless.
      */
+    /** Per-variant wait for a `0x51/0x08` challenge. Sized for the Mavic 3, the slowest observed. */
+    private val OPEN_CHALLENGE_WAIT_MS = 2000L
+
     private val openRequests = listOf(
         "0501040100",   // Mavic 3 (hardware-verified end to end)
         "05ff040200",   // Mini 3 (PCAPdroid capture, 2026-08-09)
@@ -472,18 +481,31 @@ class DroneSession(
         // no serial meant no open, and no open meant no challenge to learn the serial from. Every
         // airframe whose beacon we can't parse died on that loop without us ever asking it anything.
         for ((n, body) in openRequests.withIndex()) {
+            // Count challenges that arrive *after* this open, not in total: an aircraft that already
+            // challenged for some other reason would otherwise satisfy the first variant for free.
+            val challengesBefore = seen51[0x08] ?: 0
             sendDumlRaw(0xE93B, 0x51, 0x01, frame51(0x02, 0x40, 0x007C, hex(body)))
             log("datalink: 51/02 open sent, variant ${n + 1}/${openRequests.size} ($body)" + when {
                 droneSerial == null -> " — listening for the challenge to name a serial"
                 bleSerial != null -> " (serial from BLE)"
                 else -> " (serial from the datalink beacon)"
             })
-            // The aircraft challenges within ~10 ms of an open it understands (measured on a Mini 3:
-            // open at t=3.76, 0x51/0x08 at t=3.77), so a short wait separates "wrong variant" from
-            // "slow". Stop at the first one answered; the rest are for a different airframe.
-            val until = System.currentTimeMillis() + 700
-            while ((seen51[0x08] ?: 0) == 0 && System.currentTimeMillis() < until) dronePump(100, sink)
-            if ((seen51[0x08] ?: 0) > 0) break
+            // How long to let a variant prove itself before trying the next.
+            //
+            // A Mini 3 challenges within ~10 ms (capture: open t=3.76, 0x51/0x08 t=3.77), which invites
+            // a short window — but a **Mavic 3 is slow**, and 700 ms was not enough: it answered its own
+            // correct variant only after we had already sent the other aircraft's. Harmless in that run,
+            // but it means sending an airframe a command meant for a different one on nothing better
+            // than a timing guess. Two seconds is the value already tuned elsewhere in this method for
+            // the Mavic's challenge; the cost is that a Mini 3 waits that long before its correct open,
+            // which is cheap next to getting the first one wrong.
+            val until = System.currentTimeMillis() + OPEN_CHALLENGE_WAIT_MS
+            while ((seen51[0x08] ?: 0) == challengesBefore && System.currentTimeMillis() < until)
+                dronePump(100, sink)
+            if ((seen51[0x08] ?: 0) > challengesBefore) {
+                log("datalink: variant ${n + 1} answered (0x51/08) — not trying the rest")
+                break
+            }
         }
         // Give the challenge real time when it's our only remaining source. Measured on a Mavic 3, no
         // 0x51/0x08 arrived within 400 ms of the open — the old window was simply too short to tell a
@@ -687,8 +709,10 @@ class DroneSession(
                 val pktType = if (dg.size > 6) dg[6].toInt() and 0xFF else -1
                 if (dg.size > 8 && pktType == 0x01) parseDroneStatus(dg)
                 // The beacon has only ever been *seen* on pktType 0x01 — but "only ever" is one
-                // airframe, so look on every packet type until a serial latches.
-                if (dg.size > 8 && droneSerial == null) latchDroneSerial(dg)
+                // airframe, so look on every packet type. Run this even once a serial is known: it
+                // also keeps the 0x51 census, which the session-open loop reads to tell an answered
+                // variant from an ignored one.
+                if (dg.size > 8) watch51Frames(dg)
                 if (sink == null) continue
                 if (!manifestStream) sink.write(dg)
                 else if (dg.size > 20 && (dg[6].toInt() and 0xFF) == 0x03) sink.write(dg, 20, dg.size - 20)

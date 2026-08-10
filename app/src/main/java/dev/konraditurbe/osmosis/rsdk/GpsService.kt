@@ -192,15 +192,15 @@ class GpsService : Service(), RsdkController.Listener {
     /**
      * The camera stores `hour_minute_second` as a **bare local wall-clock** — the protocol carries no
      * timezone field at all (DJI's own reference demo hardcodes `hour + 8` for UTC+8). So we stamp the
-     * phone's local time and the recorded time is only as right as the phone's timezone; log which
-     * zone we used once, so a mismatch is diagnosable (an offset is not position data).
+     * phone's local time and the recorded time is only as right as the phone's timezone; log the
+     * offset once, so a mismatch is diagnosable.
      */
     private fun logTimeZoneOnce() {
         if (tzLogged) return
         tzLogged = true
         val tz = java.util.TimeZone.getDefault()
         val offMin = tz.getOffset(System.currentTimeMillis()) / 60000
-        log("GPS: stamping local wall-clock from tz=${tz.id} (UTC%+03d:%02d); protocol has no timezone field"
+        log("GPS: stamping local wall-clock at UTC%+03d:%02d; protocol has no timezone field"
             .format(offMin / 60, kotlin.math.abs(offMin % 60)))
     }
     private var tzLogged = false
