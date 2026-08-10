@@ -561,6 +561,15 @@ class CameraSession(
     // Java monitors are reentrant, so deleteFiles -> refreshSessionForWrite nests without deadlocking.
     @Synchronized
     private fun refreshSessionForWrite(what: String): Boolean {
+        // DEBUG (`--ez nowriterefresh true`): let the write go out on however old a session it finds.
+        // The mitigation below hides the very thing it mitigates — with it on, no write ever reaches the
+        // camera on a session old enough to have drifted, so whether the drift is still there cannot be
+        // observed. Turning it off is how a control-window change gets tested rather than assumed.
+        if (debugNoWriteRefresh) {
+            if (keepAliveOn && sessionAgeMs() > WRITE_WINDOW_MS)
+                log("datalink: nowriterefresh — attempting $what on a ${sessionAgeMs() / 1000}s session")
+            return false
+        }
         if (!keepAliveOn || sessionAgeMs() <= WRITE_WINDOW_MS) return false
         val ip = tx.peerIp ?: return false
         log("datalink: session is ${sessionAgeMs() / 1000}s old — re-registering before $what " +
@@ -1612,4 +1621,16 @@ class CameraSession(
             nameBytes + byteArrayOf(0, 0, 0, 0)
     }
 
+    companion object {
+        /**
+         * `--ez nowriterefresh true` — DEBUG ONLY, off in every ordinary run.
+         *
+         * Suppresses [refreshSessionForWrite] so an inline command goes out on whatever session exists,
+         * however old. The point is to make the write cliff observable again: the refresh is a
+         * mitigation that fires before any write can reach a drifted session, so with it in place a
+         * session-sequence change cannot be told from no change at all.
+         */
+        @Volatile
+        var debugNoWriteRefresh = false
+    }
 }

@@ -322,6 +322,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         if (intent?.getBooleanExtra("nojoin", false) == true) {
             noJoin = true; logLine("nojoin: will use the current default network, no WiFi join")
         }
+        // `--ez nowriterefresh true`: don't re-register before a write, so writes land on a session old
+        // enough to have drifted. Needed to see whether the control window still loses them.
+        if (intent?.getBooleanExtra("nowriterefresh", false) == true) {
+            dev.konraditurbe.osmosis.camera.CameraSession.debugNoWriteRefresh = true
+            logLine("nowriterefresh: writes will go out on old sessions, no re-registration")
+        }
         if (intent?.getBooleanExtra("autoscan", false) == true) {
             main.postDelayed({ startCameraScan(select = true) }, 500)
         }
