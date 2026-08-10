@@ -34,6 +34,14 @@ abstract class DumlSession(
     @Volatile protected var keepAliveOn = false
 
     /**
+     * What the camera itself says about playback mode, from bit 30 of the `0x02/0x80` flags word.
+     * Null until it has pushed one. Independent of whether our own mode-change was answered.
+     */
+    @Volatile
+    var playbackReported: Boolean? = null
+        private set
+
+    /**
      * When the current session last completed its handshake+registration, or 0 if never.
      *
      * Measured on a Nano: inline command **writes** stop being answered roughly 70 s after this, while
@@ -192,6 +200,9 @@ abstract class DumlSession(
         lastSig = ""
         lastBattSig = ""
         lastStorageSig = ""
+        // A fresh session must re-learn this from the camera, not inherit the last one's answer —
+        // the whole value of the bit is that it is the camera's word and not ours.
+        playbackReported = null
     }
 
     /** Fire [onStatus] if anything the UI displays has actually changed. */
@@ -214,6 +225,17 @@ abstract class DumlSession(
     protected fun applyStatusFrame(set: Int, id: Int, p: ByteArray): Boolean {
         when {
             set == 0x02 && id == 0x80 && p.size >= 13 -> {
+                // Byte 0-3 is a flags word, and bit 30 is the camera's OWN answer to "am I in
+                // playback". Worth more than it looks: entering playback is a command we send and
+                // never verify, so a body that answers the mode change and then stays in capture is
+                // indistinguishable from one that complied — which is exactly the open Pocket 3
+                // report. This frame arrives unprompted on every session, so the answer was already
+                // on the wire. Logged on change only.
+                val inPlayback = (u32le(p, 0).toInt() and 0x40000000) != 0
+                if (playbackReported != inPlayback) {
+                    playbackReported = inPlayback
+                    log("camera reports playback mode: ${if (inPlayback) "YES" else "no"}")
+                }
                 // Storage of the active store: total = u32-LE MiB @ byte 5, free = u32-LE MiB @ byte 9.
                 val total = u32le(p, 5).toInt()
                 val free = u32le(p, 9).toInt()
