@@ -417,6 +417,9 @@ class DroneSession(
      * session. Trying is cheap and self-evidencing: the aircraft answers a `0x51/0x08` challenge to
      * the open it understands, and ignores the other. DJI Fly sends its own open twice regardless.
      */
+    /** Per-variant wait for a `0x51/0x08` challenge. Sized for the Mavic 3, the slowest observed. */
+    private val OPEN_CHALLENGE_WAIT_MS = 2000L
+
     private val openRequests = listOf(
         "0501040100",   // Mavic 3 (hardware-verified end to end)
         "05ff040200",   // Mini 3 (PCAPdroid capture, 2026-08-09)
@@ -478,10 +481,16 @@ class DroneSession(
                 bleSerial != null -> " (serial from BLE)"
                 else -> " (serial from the datalink beacon)"
             })
-            // The aircraft challenges within ~10 ms of an open it understands (measured on a Mini 3:
-            // open at t=3.76, 0x51/0x08 at t=3.77), so a short wait separates "wrong variant" from
-            // "slow". Stop at the first one answered; the rest are for a different airframe.
-            val until = System.currentTimeMillis() + 700
+            // How long to let a variant prove itself before trying the next.
+            //
+            // A Mini 3 challenges within ~10 ms (capture: open t=3.76, 0x51/0x08 t=3.77), which invites
+            // a short window — but a **Mavic 3 is slow**, and 700 ms was not enough: it answered its own
+            // correct variant only after we had already sent the other aircraft's. Harmless in that run,
+            // but it means sending an airframe a command meant for a different one on nothing better
+            // than a timing guess. Two seconds is the value already tuned elsewhere in this method for
+            // the Mavic's challenge; the cost is that a Mini 3 waits that long before its correct open,
+            // which is cheap next to getting the first one wrong.
+            val until = System.currentTimeMillis() + OPEN_CHALLENGE_WAIT_MS
             while ((seen51[0x08] ?: 0) == 0 && System.currentTimeMillis() < until) dronePump(100, sink)
             if ((seen51[0x08] ?: 0) > 0) break
         }
