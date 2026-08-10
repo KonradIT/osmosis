@@ -1129,6 +1129,15 @@ class CameraSession(
     /** Test seam: decode an already-reassembled CompositePack manifest (post frame-reassembly). */
     internal fun decodeCompositeForTest(manifest: ByteArray): List<CameraFile> = decodeComposite(manifest)
 
+    /**
+     * Test seam: an assembled manifest through the FULL decode, collision guard included.
+     *
+     * Not the same as [decodeCompositeForTest], which stops before [flagHandleCollisions] and so
+     * reports every record as deletable — including the ones sharing a handle, which is the exact
+     * condition the guard exists to refuse.
+     */
+    internal fun decodeManifestForTest(manifest: ByteArray): List<CameraFile> = decodeManifest(manifest)
+
     /** Test seam: build a file-list request for a given counter + 4-byte handle cursor. */
     internal fun buildListCmdForTest(ctr: Int, cursor: Long): ByteArray = listCmd(ctr, cursor)
 
