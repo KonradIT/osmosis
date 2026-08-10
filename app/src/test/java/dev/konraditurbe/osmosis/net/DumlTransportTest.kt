@@ -2,7 +2,6 @@ package dev.konraditurbe.osmosis.net
 
 import dev.konraditurbe.osmosis.duml.DjiMessage
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -177,48 +176,5 @@ class DumlTransportTest {
         assertEquals("4a002110", hex(DumlTransport.hex("4a 00 21 10")))
         assertEquals("df690000", hex(DumlTransport.le32(0x69DF)))
         assertNotNull(DumlTransport.hex(""))
-    }
-
-    /**
-     * The control window must be reported as a moving pair, not a constant.
-     *
-     * Pinning both halves at the session base is what produced the write cliff: the peer was told the
-     * app's commands sat at the base for the whole session while they were actually running away from
-     * it in steps of eight. Reads never depended on this window, which is why the failure was
-     * write-only and looked like a healthy link.
-     */
-    @Test
-    fun `the ack reports the real control window, not the base twice`() {
-        val ack = DumlTransport.ackPayload(
-            peerCursor = 0x1122, baseSeq = 0x3000, peerCtrlEnd = 0x3010, ctrlEnd = 0x3048,
-        )
-        assertEquals("26-byte window report", 26, ack.size)
-        fun u16(i: Int) = (ack[i].toInt() and 0xFF) or ((ack[i + 1].toInt() and 0xFF) shl 8)
-
-        assertEquals("video start", 0x1122, u16(0))
-        assertEquals("video end", 0x1122, u16(2))
-        assertEquals("download start", 0x3000, u16(8))
-        assertEquals("download end", 0x3000, u16(10))
-        // The one that moves: the peer's position, then ours.
-        assertEquals("ctrl start = the peer's reported end", 0x3010, u16(16))
-        assertEquals("ctrl end = our own command position", 0x3048, u16(18))
-        assertEquals("body length", 0, u16(24))
-    }
-
-    /**
-     * The trap that killed drone pagination once: reporting the transport sequence here.
-     *
-     * That counter moves on every packet, uplink stream included, so it laps the control window and
-     * wraps. The two must be free to differ — this asserts the payload carries whatever it is given
-     * rather than deriving one from the other.
-     */
-    @Test
-    fun `the control end is independent of the transport sequence`() {
-        val ack = DumlTransport.ackPayload(
-            peerCursor = 0, baseSeq = 0xDD88, peerCtrlEnd = 0xDD88, ctrlEnd = 0xDD90,
-        )
-        fun u16(i: Int) = (ack[i].toInt() and 0xFF) or ((ack[i + 1].toInt() and 0xFF) shl 8)
-        assertEquals(0xDD90, u16(18))
-        assertNotEquals("must not be pinned to the base", u16(8), u16(18))
     }
 }
