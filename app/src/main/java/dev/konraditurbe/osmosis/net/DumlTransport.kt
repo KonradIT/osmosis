@@ -66,6 +66,21 @@ class DumlTransport(
      * Echoed back in [sendAck]; the peer holds off streaming until its window is being acknowledged.
      */
     private var peerCursor = 0
+
+    /**
+     * Our end of the **control** window: how far we have got sending commands, and nothing else.
+     *
+     * Deliberately not [udpSeq]. That counter advances on *every* packet we put on the wire — ACKs and
+     * the ~860/s drone uplink included — whereas this one advances only when a command frame goes out,
+     * which is what the peer is tracking. Reporting `udpSeq` here is a thing that has already been
+     * tried: it wrapped past `0xFFFF` inside a minute of drone uplink and stalled the peer's window
+     * dead (see [sendAck]). Same field, different quantity.
+     */
+    private var ctrlEnd = 0
+
+    /** The peer's own control-window end, mirrored back to it. See [sendAck]. */
+    private var peerCtrlEnd = 0
+
     private var msgId51 = 0
     private var seq51 = 0
 
@@ -106,6 +121,8 @@ class DumlTransport(
         baseSeq = Random.nextInt(0x1000, 0xF000) and 0xFFF8
         camChannel = baseSeq
         peerCursor = 0
+        ctrlEnd = baseSeq
+        peerCtrlEnd = baseSeq
     }
 
     /**
@@ -127,6 +144,11 @@ class DumlTransport(
      */
     fun syncSeqToPeerChannel() {
         udpSeq = (camChannel + 8) and 0xFFFF
+        // Keep the control window in the same space. It starts at our proposed base, which is only the
+        // right place when the peer accepted that base; if it answered on a channel of its own, the two
+        // would report positions from different sequence spaces.
+        ctrlEnd = camChannel
+        peerCtrlEnd = camChannel
     }
 
     fun close() {
@@ -155,23 +177,23 @@ class DumlTransport(
      * All three used to be [camChannel] — right for the middle one only by accident, since camChannel
      * *was* the constant base, while the first never reflected what the peer had actually sent us.
      *
-     * **The third stays at the base, deliberately.** The reference implementation puts its current send
-     * seq there, and copying that broke drone pagination outright: page 1 fine, page 2 dead with the
-     * drone streaming status and no data. The two quantities are not the same. That implementation
-     * advances its sequence in exactly one place — per data frame — whereas ours advances on *every*
-     * packet, including the ~860/s drone uplink, so within a minute it had raced ahead and wrapped past
-     * `0xFFFF` (`0xdd88` → `0x8e70` between the two pages) and the peer's window stalled. Sending our
-     * seq here would only be equivalent if our sequence meant what theirs does.
+     * **The third is the control window, and it moves.** It used to be pinned at [baseSeq] for the whole
+     * session — we told the peer "my commands are at base" while actually sending them at base+8, +16,
+     * +24… That is the shape of the write cliff: reads keep working, because they do not depend on this
+     * window, and writes stop being answered once the drift is large enough. Measured at roughly 40 s on
+     * an Edge Pro and 70 s on a Nano.
+     *
+     * ⚠️ Pinning it was itself a correction, and the trap is still live: an earlier attempt reported
+     * [udpSeq] here and killed drone pagination — page 1 fine, page 2 dead with the aircraft streaming
+     * status and no data — because `udpSeq` counts *every* packet including the ~860/s uplink, wrapped
+     * past `0xFFFF` inside a minute (`0xdd88` → `0x8e70` across two pages) and stalled the peer. So this
+     * reports [ctrlEnd], which advances only when a command actually goes out, paired with the peer's
+     * own reported control end rather than a value derived from ourselves.
      *
      * Sent with seq 0, like every other type-`0x04`.
      */
     fun sendAck() {
-        fun grp(v: Int) = byteArrayOf(
-            (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
-            (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
-            0, 0, 0, 0,
-        )
-        val payload = grp(peerCursor) + grp(baseSeq) + grp(baseSeq) + byteArrayOf(0, 0)
+        val payload = ackPayload(peerCursor, baseSeq, peerCtrlEnd, ctrlEnd)
         val old = udpSeq; udpSeq = 0
         val hdr = udpHeader(0x04, payload.size)
         udpSeq = old
@@ -189,7 +211,9 @@ class DumlTransport(
         val duml = DjiMessage(target, dumlSeq, type, payload).encode()
         dumlSeq = (dumlSeq + 1) and 0xFFFF
         val pkt = udpHeader(0x05, rt.size + duml.size) + rt + duml
-        if (sendPacket(pkt)) advance()
+        // Only here. [sendDumlRaw] carries the drone's ~860/s uplink stream, and counting that in the
+        // control window is precisely what wrapped it past 0xFFFF and stalled paging once before.
+        if (sendPacket(pkt)) { advance(); advanceCtrl() }
     }
 
     /**
@@ -241,6 +265,9 @@ class DumlTransport(
                 // [sendAck] echoes it back, and the peer will not open its downlink until we do.
                 if (data.size == 34 && (data[6].toInt() and 0xFF) == 0x01) {
                     peerCursor = (data[10].toInt() and 0xFF) or ((data[11].toInt() and 0xFF) shl 8)
+                    // Same 26-byte window report, third group: [ctrl_start][ctrl_end] at [24:28].
+                    // Its end is what we echo back as our control-window start.
+                    peerCtrlEnd = (data[26].toInt() and 0xFF) or ((data[27].toInt() and 0xFF) shl 8)
                 }
             } catch (_: java.net.SocketTimeoutException) {
                 // keep polling until the deadline
@@ -279,6 +306,9 @@ class DumlTransport(
 
     private fun advance() { udpSeq = (udpSeq + 8) and 0xFFFF }
 
+    /** Advance the control window — only ever from a command frame. See [ctrlEnd]. */
+    private fun advanceCtrl() { ctrlEnd = (ctrlEnd + 8) and 0xFFFF }
+
     // ---- frame scanning (pure) ---------------------------------------------------------------------
 
     companion object {
@@ -308,6 +338,21 @@ class DumlTransport(
          * instance [routingHeader] were wrong values in these twelve bytes, and neither was catchable by
          * a test while this was tangled up with the socket.
          */
+        /**
+         * The 26-byte window report: three `[start][end][u32 zero]` groups — video, download, control —
+         * then a `u16` body length. Pure, so the control window this app reports is assertable without a
+         * socket; both regressions in [routingHeader] were wrong numbers in bytes nobody could test.
+         */
+        fun ackPayload(peerCursor: Int, baseSeq: Int, peerCtrlEnd: Int, ctrlEnd: Int): ByteArray {
+            fun grp(lo: Int, hi: Int) = byteArrayOf(
+                (lo and 0xFF).toByte(), ((lo shr 8) and 0xFF).toByte(),
+                (hi and 0xFF).toByte(), ((hi shr 8) and 0xFF).toByte(),
+                0, 0, 0, 0,
+            )
+            return grp(peerCursor, peerCursor) + grp(baseSeq, baseSeq) +
+                grp(peerCtrlEnd, ctrlEnd) + byteArrayOf(0, 0)
+        }
+
         fun routingHeader(seq: Int, cmdCounter: Int, drone: Boolean): ByteArray {
             val ack = (seq - 8) and 0xFFFF
             return byteArrayOf(
