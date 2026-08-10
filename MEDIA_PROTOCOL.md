@@ -25,6 +25,112 @@ camera by mistake and it answers `e0` (reject) and stays asleep; nothing else hi
 
 ---
 
+## Per-model reference
+
+Almost everything in this document is model-agnostic: the DUML frame and its CRCs, pairing, the
+`0x00/0x26` → `0x00/0x27` list exchange and its decode, `/v2` HTTP, and the status pushes. What varies
+is small but will stop a client dead if assumed: **the UDP port, the handle geometry, which store maps
+to which `/v2?storage=` index, and the proxy extension.**
+
+Confidence is marked throughout: ✅ exercised on hardware, ⚠️ partial or single-observation, ❌ known
+not to work, `(unconfirmed)` no data.
+
+### Identification and transport
+
+The model id is a `u16-LE` in the BLE manufacturer data under DJI's company id `0x08AA`
+([§1 of the protocol map](docs/01-protocol-map.md#1-device-identification-ble-advertisement)). Resolve
+by id first: cameras are frequently renamed, and a renamed body has no usable name to match on.
+
+| Camera | model id | BLE local name | Datalink | TCP-7001 poke | WiFi |
+|---|---|---|---|---|---|
+| Osmo Action (1) | `0x0006` ⚠️ | `OsmoAction` | 9004 | yes | WPA2 |
+| Osmo Action 2 | `0x0010` | `OsmoAction2` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 `(unconfirmed)` |
+| Osmo Action 3 | `0x0012` | `OsmoAction3` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 `(unconfirmed)` |
+| Osmo Action 4 | `0x0014` | `OsmoAction4` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 |
+| Osmo Action 5 Pro | `0x0015` | `OsmoAction5Pro` | 9004 | yes | WPA2 |
+| **Xtra Edge Pro** | `0x0015` | `XtraEdgePro` | **10004** | **no** | WPA2 |
+| Osmo 360 | `0x0017` | `Osmo360` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | **WPA3** |
+| Osmo Action 6 | `0x0018` | `OsmoAction6` | 9004 | yes | WPA2 |
+| Osmo Nano | `0x0019` | `OsmoNano` | 9004 | yes | WPA2 |
+| Osmo Pocket 3 | `0x0020` | `OsmoPocket3` | 9004 | yes | WPA2 |
+| Osmo Pocket 4 | `0x0021` | `OsmoPocket4` | 9004 | yes | WPA2 |
+| Osmo Pocket 4 Pro | `0x0022` | `OsmoPocket4P` | 9004 | yes | WPA2 |
+| Mavic 3 | `0x0070` | *(varies)* | **9003** | **no** | WPA2 |
+| DJI Neo 2 | `0x007e` | *(varies)* | **9003** | **no** | WPA2 |
+
+Where a body behaves differently from the rest of the line:
+
+- **Osmo Action (1)** speaks the older [index-based list](#1-get-media-list) and addresses media by
+  numeric index, not by path.
+- **Osmo Action 4** and the **Osmo 360** pair and hand over credentials, but their AP never appears, so
+  neither reaches the datalink. The 360 is the only body advertising an extra `fff7` characteristic.
+- **Mavic 3** and **Neo 2** are aircraft: `udp/9003`, no poke, and a `0x51` session-open before anything
+  ([§27](#27-session-open-0x51--required-before-anything-else-mavic-3),
+  [§27a](#27a-neo-2--the-same-transport-a-different-unlock)).
+
+- **The Xtra rebrand shares the DJI model id.** An Xtra Edge Pro is an Action 5 Pro and advertises
+  `0x0015`, but its firmware moves the datalink to **10004 with no poke**. Distinguish it by its own OUI
+  `EC:9E:EA`, not by id or name. It also **answers nothing on camera-control cmdset `0x02`**
+  ([§10–17](#camera-control)) while still pairing, waking and streaming status normally.
+- **Two advert formats are in use.** The Pocket 4 carries a classic model byte; the Pocket 4 **Pro**
+  uses the newer form where a flag bit at payload byte 5 marks a 16-bit product type at bytes 10–11
+  (`218` = Pocket 4 Pro). A client reading only the classic field sees `0x0000` for the Pro.
+- Ports marked `(unconfirmed)` are the fallback for an unrecognised body (9004 + poke + WPA2), not a measurement.
+  Retrying the alternate config (`9004`+poke ⇄ `10004`/no-poke) covers a wrong guess.
+
+### Media layout
+
+| Camera | Path shape | Handle base / step | Store → `/v2?storage=` | Proxy ext | Star byte `@+9` |
+|---|---|---|---|---|---|
+| Osmo Nano | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1**, dock SD → **0** | `.LRF` | ✅ real flag, `0`/`1` |
+| Osmo Pocket 4 | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1** | none listed | all `0` (nothing favourited) |
+| Osmo Pocket 4 Pro | `DCIM/DJI_001/DJI_…` | `0x00100000` / `0x40` ⚠️ | ⚠️ 45 → **0**, 1 → **1** | `(unconfirmed)` | `(unconfirmed)` |
+| Action 5 Pro / Xtra Edge Pro | `DCIM/CAM_001/CAM_…_D` (Xtra)<br>`DCIM/DJI_001_OA5/DJI_…_DOA5` (DJI) | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.XRF` | ❌ `44`/`48` — a length |
+| Osmo Action 6 | `DCIM/DJI_001/DJI_…` | `0x4010xxxx` | internal (only store) → **1** | `(unconfirmed)` | `(unconfirmed)` |
+| Osmo Pocket 3 | `DCIM/DJI_001/DJI_…_D_OP3` | `0x00040000` / `0x10` | microSD (only store) → **0** | `(unconfirmed)` | ❌ `48` — a length |
+| Osmo Action (1) | *(no paths on the wire)* | *(index-based, no handles)* | n/a (uses `/v1`) | n/a | n/a |
+| Mavic 3 | *(synthesised from the index)* | *(no handle)* | packed in `file_index` | subtype `18` | n/a |
+
+- **Fit `base + seq × step` from the manifest's own handles**, per store, rather than hardcoding a row
+  above. Geometry is per body *and* per store, and the Pocket 4 shows why the model name is no guide:
+  it uses the **Nano's** `0x40` step, not the Pocket 3's `0x10`.
+- **The proxy is never listed in the manifest.** Every body above decodes with zero proxy paths; the
+  preview URL is built by swapping the extension on the media path (`.LRF`, or `.XRF` on the Xtra).
+  A proxy *size* is available at `marker + 30`.
+- **Naming does not identify the family.** Only the Xtra rebrand writes `CAM_…`; genuine Action and
+  Pocket bodies all write `DJI_…`. Custom Folder/File prefixes decode identically
+  ([§1](#1-get-media-list)), so never parse a name to decide anything.
+- The **manifest count header reads `0` on the Action 5 and 6** — count records instead. Nano, Xtra,
+  Pocket 3 and Pocket 4 all write a true count.
+
+### Storage frame and power, per body
+
+| Camera | `0x02/0xdc` shape | Notes |
+|---|---|---|
+| Osmo Nano | 22 B, `stores=1` | ⚠️ can report `0/0` with a card in and files on internal |
+| Osmo Pocket 3 | 22 B, `stores=1` | the 22 B body is why the decode gate is `>= 22`, not `>= 32` |
+| Xtra Edge Pro / A5P | **40 B**, `stores=2` | e.g. `60776/58151` SD + `48980/44807` built-in |
+| Osmo Action 6 | `(unconfirmed)` | `@6/@10` = `121785/109748` MiB, matching its own screen |
+| Osmo Pocket 4 | **40 B**, `stores=2` | two-store body **even with no card** — first block reads `0/0` |
+
+- **Dock and charging bytes (`@27`, `@32`) were mapped on a Nano and are not portable.** A Pocket 4
+  reports `docked` set while discharging and not charging, so treat those two fields as Nano-specific
+  until confirmed elsewhere. Voltage, current and percent are consistent across bodies.
+
+### Behavioural quirks worth knowing before debugging
+
+| Camera | Quirk |
+|---|---|
+| Osmo Nano | Dock SD reads cut a long HTTP transfer around **757–774 MB**; resume and continue ([§29](#29-http-media-api-v1--dcf-indexed) applies the same way to `/v2`). Internal streams >1.4 GB uncut. |
+| Osmo Nano | Reads the dock SD **only when seated lens-away from the dock screen**; the other way round it answers the SD query with a `start` frame and no data. |
+| Osmo Pocket 3 | Answers `e0` to the `0x53/0x10` wake, yet its AP still comes up via the `0x00/0x2b` session — the wake is belt-and-braces here. |
+| Osmo Pocket 4 | Gimbal telemetry (`0x04/0x05`) keeps streaming **while playback mode is held**, so holding playback does not park it. |
+| Osmo Pocket 4 | May need **two `0x02/0x0c` attempts** before it confirms playback. |
+| Osmo Pocket 4 / 3 | Seen holding a session from a previous connection: the handshake succeeds, the peer answers on its own sequence channel, and the media query is never answered. Re-handshake, or power-cycle. |
+| Action-family bodies | HTTP `404` and `500` are **transient** during a long transfer and do not mean the file is missing. |
+
+---
+
 ## Media
 
 ### 1. Get media list
