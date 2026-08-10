@@ -103,8 +103,19 @@ object DroneManifest {
      * Decode reassembled record bytes into files. The record layout, the packed index, the FAT
      * timestamp and the name synthesis are all DCF concerns — see [DcfRecords.decodeDrone].
      */
-    fun decode(blob: ByteArray): List<CameraFile> =
-        DcfRecords.decodeDrone(blob).map { it.toCameraFile() }
+    fun decode(blob: ByteArray, stride: Int = DcfRecords.DRONE_STRIDE): List<CameraFile> =
+        DcfRecords.decodeDrone(blob, stride).map { it.toCameraFile() }
+
+    /**
+     * The record size this reply declares, or null if it declared nothing usable.
+     *
+     * Chunk 0 carries the file count and the total record bytes, and `total = 8 + stride * count` —
+     * so the aircraft states its own record size and there is no need to know the model. See
+     * [DcfRecords.strideFrom].
+     */
+    fun strideOf(chunks: List<Chunk>): Int? = chunks
+        .firstOrNull { it.index == 0 && it.count >= 0 && it.totalBytes >= 0 }
+        ?.let { DcfRecords.strideFrom(it.count, it.totalBytes) }
 
     private fun u8(b: ByteArray, i: Int) = b[i].toInt() and 0xFF
     private fun u16(b: ByteArray, i: Int) = u8(b, i) or (u8(b, i + 1) shl 8)

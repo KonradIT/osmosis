@@ -203,7 +203,13 @@ class DroneSession(
         // [DroneManifest.decode] drops whatever no longer parses as a real (folder, number).
         if (!chunksComplete(chunks))
             log("datalink: drone list INCOMPLETE (chunks ${chunks.keys.sorted()}) — decoding what landed")
-        return DroneManifest.decode(DroneManifest.assemble(chunks.values.toList()))
+        val catalogue = DroneManifest.assemble(chunks.values.toList())
+        // The aircraft declares its own record size in chunk 0 (total = 8 + stride * count): a Mavic 3
+        // says 94 and a Mini 3 says 67, with the same fields at the same offsets. Hardcoding one
+        // aircraft's answer is why a Mini 3 decoded to nothing at all.
+        val stride = DroneManifest.strideOf(chunks.values.toList()) ?: DroneManifest.RECORD_STRIDE
+        if (stride != DroneManifest.RECORD_STRIDE) log("datalink: record stride ${stride}B (declared)")
+        return DroneManifest.decode(catalogue, stride)
     }
 
     /** True if [pl] is a `0x4a` state frame of [subtype] carrying [seq] — the drone's transfer signal. */
@@ -397,8 +403,24 @@ class DroneSession(
     private fun serialBody(serial: ByteArray) =
         byteArrayOf(0, 0, serialTag.toByte()) + serial + byteArrayOf(0)
 
-    /** Step 1. **Carries no serial** — which is what makes it safe to send before we know one. */
-    private fun droneOpenRequest() = frame51(0x02, 0x40, 0x007C, hex("0501040100"))
+    /**
+     * Step 1 payloads, in the order they are tried. **None carries a serial** — which is what makes
+     * them safe to send before we know one.
+     *
+     * The five-byte body differs per aircraft: a Mavic 3 opens with `05 01 04 01 00` and a Mini 3 with
+     * `05 ff 04 02 00`. Both are captured traces; two bytes differ and there is no third capture to
+     * say how that generalises.
+     *
+     * They are **tried in turn rather than selected by model**, because the captures are of the
+     * datalink only and never show the aircraft's BLE advert — so we have no observed model id to
+     * key on, and taking one from elsewhere would put a guess in the one place a guess costs a whole
+     * session. Trying is cheap and self-evidencing: the aircraft answers a `0x51/0x08` challenge to
+     * the open it understands, and ignores the other. DJI Fly sends its own open twice regardless.
+     */
+    private val openRequests = listOf(
+        "0501040100",   // Mavic 3 (hardware-verified end to end)
+        "05ff040200",   // Mini 3 (PCAPdroid capture, 2026-08-09)
+    )
 
     /** Steps 3–5, all of which do need the serial the drone named in its step-2 challenge. */
     private fun droneOpenResponses(serial: ByteArray) = listOf(
@@ -449,12 +471,20 @@ class DroneSession(
         // reply to it is the step-2 challenge, which *names the serial*. Bailing here was circular:
         // no serial meant no open, and no open meant no challenge to learn the serial from. Every
         // airframe whose beacon we can't parse died on that loop without us ever asking it anything.
-        sendDumlRaw(0xE93B, 0x51, 0x01, droneOpenRequest())
-        log("datalink: 51/02 open sent" + when {
-            droneSerial == null -> " with no serial known — listening for the challenge to name one"
-            bleSerial != null -> " (serial from BLE)"
-            else -> " (serial from the datalink beacon)"
-        })
+        for ((n, body) in openRequests.withIndex()) {
+            sendDumlRaw(0xE93B, 0x51, 0x01, frame51(0x02, 0x40, 0x007C, hex(body)))
+            log("datalink: 51/02 open sent, variant ${n + 1}/${openRequests.size} ($body)" + when {
+                droneSerial == null -> " — listening for the challenge to name a serial"
+                bleSerial != null -> " (serial from BLE)"
+                else -> " (serial from the datalink beacon)"
+            })
+            // The aircraft challenges within ~10 ms of an open it understands (measured on a Mini 3:
+            // open at t=3.76, 0x51/0x08 at t=3.77), so a short wait separates "wrong variant" from
+            // "slow". Stop at the first one answered; the rest are for a different airframe.
+            val until = System.currentTimeMillis() + 700
+            while ((seen51[0x08] ?: 0) == 0 && System.currentTimeMillis() < until) dronePump(100, sink)
+            if ((seen51[0x08] ?: 0) > 0) break
+        }
         // Give the challenge real time when it's our only remaining source. Measured on a Mavic 3, no
         // 0x51/0x08 arrived within 400 ms of the open — the old window was simply too short to tell a
         // slow challenge apart from an aircraft that never sends one, and those need different fixes.
