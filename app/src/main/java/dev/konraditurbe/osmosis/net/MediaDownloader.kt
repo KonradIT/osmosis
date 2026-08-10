@@ -112,12 +112,28 @@ class MediaDownloader(
         //
         // The camera closes a long transfer periodically — measured on a Nano reading its dock SD, a
         // 1.4 GB clip died at 438 MB, then at 921 MB, and finished on the third attempt, roughly every
-        // ~10 s of streaming. Nothing was wrong: each resume Range-requested the remainder and picked up
-        // exactly where it stopped. But every drop surfaced as "1 failed" and needed another tap on
-        // Download, so a single file cost three. Retry here while the transfer is still making progress;
-        // only give up when an attempt moves no bytes at all, which is a real stall rather than a drop.
+        // ~10 s of streaming. Nothing is wrong: each resume Range-requests the remainder and picks up
+        // exactly where it stopped.
+        //
+        // ⚠️ The retry must WAIT. Reconnecting immediately fails instantly — a 774 MB transfer was cut,
+        // the retry 25 ms later moved zero bytes and threw the same "unexpected end of stream", and the
+        // loop then read "moved no bytes" as a dead stall and gave up after one of its eight attempts.
+        // Tapping Download again seconds later resumed and finished the file, which is the tell: the
+        // camera needs a moment to let go of the previous transfer (and the socket it just closed must
+        // not be reused — see HttpClient.download). So back off between attempts, and only treat
+        // no-progress as terminal after [MAX_BARREN] of them in a row.
+        //
+        // ⚠️⚠️ DO NOT "optimise" this by failing fast on an HTTP 404 or 500. On this firmware **those
+        // statuses are transient and mean "busy", not "gone"** — measured pulling one 1.14 GB file off a
+        // Nano's dock SD, all for a URL that had already served the same file in full:
+        //
+        //     500 @0 MB → 404 @0 MB → 757 MB transferred → 404 → 404 → completed, 1143535883 bytes
+        //
+        // Treating either as fatal turns a file that downloads fine into a permanent failure. Only a run
+        // of [MAX_BARREN] consecutive no-progress attempts is allowed to end the job.
         var offset = startOffset
         var attempt = 0
+        var barren = 0                    // consecutive attempts that moved no bytes at all
         while (true) {
             val pfdN = if (attempt == 0) pfd else runCatching { resolver.openFileDescriptor(uri, "rw") }.getOrNull()
                 ?: run { log("reopen failed: ${f.name}"); return Result.FAILED }
@@ -125,21 +141,38 @@ class MediaDownloader(
 
             val fos = FileOutputStream(pfdN.fileDescriptor)
             fos.channel.position(offset)
-            val ok = http.download(f.urlPath(), fos, offset) { total -> tick(total) }
+            val outcome = http.download(f.urlPath(), fos, offset) { total -> tick(total) }
             runCatching { fos.flush(); fos.close() }
-            val after = pfdN.statSize.coerceAtLeast(0L)
+            var after = pfdN.statSize.coerceAtLeast(0L)
+
+            if (outcome == HttpClient.Fetch.RANGE_IGNORED) {
+                // The body we'd have appended starts at byte 0. Truncate and start the file over rather
+                // than write a corrupt one; the next pass runs with offset 0.
+                runCatching { FileOutputStream(pfdN.fileDescriptor).channel.use { it.truncate(0L) } }
+                after = 0L
+                log("camera ignored the resume range — restarting ${f.name} from 0")
+            }
             pfdN.close()
 
-            if (ok) { markComplete(uri); prefs.edit().remove(key).apply(); return Result.SAVED }
+            if (outcome == HttpClient.Fetch.DONE) {
+                markComplete(uri); prefs.edit().remove(key).apply(); return Result.SAVED
+            }
             if (remote > 0 && after >= remote) {
                 markComplete(uri); prefs.edit().remove(key).apply(); return Result.SAVED
             }
-            if (after <= offset || attempt >= MAX_RESUMES) {
+
+            if (after > offset) barren = 0 else barren++
+            if (barren >= MAX_BARREN || attempt >= MAX_RESUMES) {
                 log("paused ${f.name} at ${after / 1_000_000} MB (will resume on next Download)")
                 return Result.FAILED
             }
             attempt++
-            log("link dropped at ${after / 1_000_000} MB — resuming ${f.name} (attempt ${attempt + 1})")
+            val backoff = RESUME_BACKOFF_MS * barren.coerceAtLeast(1)
+            // "dropped" vs "refused" matters when reading a log: a mid-stream cut is the camera pacing a
+            // long read, whereas a refusal is it declining to start one. Both recover the same way.
+            val what = if (outcome == HttpClient.Fetch.INTERRUPTED) "link dropped" else "camera refused"
+            log("$what at ${after / 1_000_000} MB — resuming ${f.name} in $backoff ms (attempt ${attempt + 1})")
+            runCatching { Thread.sleep(backoff) }
         }
     }
 
@@ -242,13 +275,27 @@ class MediaDownloader(
 
     companion object {
         /**
-         * How many times to resume a whole-file transfer the camera dropped mid-stream, per Download tap.
+         * Total attempts allowed per whole-file job, productive or not — a runaway guard, not a budget.
          *
-         * A 1.4 GB clip on a Nano's dock SD needed two resumes; 8 covers roughly 4 GB at the observed
-         * ~450 MB between drops, which is past the largest single clip these cameras record. A drop that
-         * moves zero bytes ends the loop immediately regardless, so this only bounds genuine progress.
+         * Deliberately generous, because [MAX_BARREN] is what actually ends a hopeless transfer and an
+         * attempt costs under a second. Measured: a **1.14 GB file off a Nano's dock SD took six
+         * attempts** — one genuine mid-stream cut plus four refusals around it. Eight would not have
+         * covered a file twice that size.
          */
-        private const val MAX_RESUMES = 8
+        private const val MAX_RESUMES = 20
+
+        /**
+         * Consecutive zero-byte attempts before the transfer is called stalled. This is the real limit:
+         * progress resets it, so only a transfer that has genuinely stopped moving trips it.
+         *
+         * Must be well above 1. The camera routinely refuses two or three reconnects in a row before
+         * serving again — with a limit of 1, a file 66 % downloaded was abandoned outright, and the user
+         * tapping Download again completed it.
+         */
+        private const val MAX_BARREN = 5
+
+        /** Pause before a resume, multiplied by the barren-attempt count (0.75 s, 1.5 s, 2.25 s, …). */
+        private const val RESUME_BACKOFF_MS = 750L
 
         /**
          * True if [file] is already fully saved **in its Osmosis folder**. Matched by display name,
