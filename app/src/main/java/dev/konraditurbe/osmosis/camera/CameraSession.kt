@@ -475,11 +475,14 @@ class CameraSession(
     }
 
     /**
-     * Keep the datalink alive (ACK ~2×/s so the AP doesn't sleep) and, Mimo-style, poll the camera
-     * for status — heartbeat 0x02/0x8E, state query 0x02/0xA0, status poll 0x02/0x61 — decoding the
-     * pushed status frames (battery/storage/firmware) as they arrive. Also holds **playback mode** the
-     * whole browse session (so inline commands needing it — favorite/group-expand/pagination — work) and
-     * services the inline command queue ([runCommand]).
+     * Keep the datalink alive (ACK ~2×/s so the AP doesn't sleep), beat `0x00/0x88` at ~1 Hz to hold
+     * **playback mode** for the whole browse session (so inline commands needing it —
+     * favorite/group-expand/pagination — work), decode the status frames (battery/storage/firmware)
+     * the camera pushes on its own, and service the inline command queue ([runCommand]).
+     *
+     * It polls the camera for **nothing**. Status arrives unprompted once registered, and the three
+     * frames this loop used to send — `0x02/0x8E`, `0x02/0xA0`, `0x02/0x61` — are respectively a
+     * parameter GET that knocks the camera out of playback, Audio Param Get, and Histogram Get.
      */
 
     /**
@@ -623,11 +626,16 @@ class CameraSession(
                     // in for, badly: that one was ours, not Mimo's, and it knocked playback out.
                     if (tick % 3 == 0)
                         sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
-                    if (tick % 3 == 0) sendDuml(0x02, 0xA0, ByteArray(0), receiverType = 0x01, receiverId = 0)
+                    // No 0x02/0xA0 or 0x02/0x61 either. Both were polled here as "state query" and
+                    // "status poll", which is not what they are: DJI's own command catalogue names them
+                    // **Audio Param Get** and **Histogram Get**. Neither feeds the pill — the camera
+                    // pushes 0x02/0x80 and 0x02/0x82 unprompted once registered — so they were two
+                    // writes a second buying nothing, on a link whose write budget is the very thing
+                    // that runs out. Mimo sends neither.
+                    //
                     // Says once, on change, whether the gimbal is still turning — the Pocket 3
                     // question nobody could answer from a log before. Rate-limited internally.
                     reportGimbalActivity()
-                    if (tick % 6 == 0) sendDuml(0x02, 0x61, ByteArray(0), receiverType = 0x01, receiverId = 0)
                     // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode
                     // should simply stay, but the camera can also be knocked out of it by something we
                     // don't control — a button press on the body, a mode change, a firmware quirk — and
@@ -1428,23 +1436,7 @@ class CameraSession(
         val shown = minOf(bytes.size, DUMP_MAX_BYTES)
         // The declared size must be what is actually dumped: tools/hexdump_to_bin.py verifies the
         // recovered length against it and drops the block on a mismatch. Total goes after it.
-        log("datalink: --- MANIFEST-HEX BEGIN (${shown}B" +
-            (if (shown < bytes.size) " of ${bytes.size}B" else "") +
-            "), report this to crack the layout ---")
-        var off = 0
-        while (off < shown) {
-            val end = minOf(off + 32, shown)
-            val hex = StringBuilder(); val asc = StringBuilder()
-            for (i in off until end) {
-                val b = bytes[i].toInt() and 0xFF
-                hex.append("%02x".format(b))
-                if (i - off == 15) hex.append(' ')
-                asc.append(if (b in 0x20..0x7E) b.toChar() else '.')
-            }
-            log("  %04x  %-65s %s".format(off, hex.toString(), asc.toString()))
-            off = end
-        }
-        log("datalink: --- MANIFEST-HEX END ---")
+        dev.konraditurbe.osmosis.core.ManifestHex.dump({ log(it) }, bytes, shown)
     }
 
     /** Fallback scrape: whole-blob regex, joining fields by filename base. No per-record structure or
