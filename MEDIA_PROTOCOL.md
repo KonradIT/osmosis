@@ -126,7 +126,7 @@ Where a body behaves differently from the rest of the line:
 | Osmo Nano | Dock SD reads cut a long HTTP transfer around **757–774 MB**; resume and continue ([§29](#29-http-media-api-v1--dcf-indexed) applies the same way to `/v2`). Internal streams >1.4 GB uncut. |
 | Osmo Nano | Reads the dock SD **only when seated lens-away from the dock screen**; the other way round it answers the SD query with a `start` frame and no data. |
 | Osmo Pocket 3 | Answers `e0` to the `0x53/0x10` wake, yet its AP still comes up via the `0x00/0x2b` session — the wake is belt-and-braces here. |
-| Osmo Pocket 4 | Gimbal telemetry (`0x04/0x05`) keeps streaming **while playback mode is held**, so holding playback does not park it. |
+| Osmo Pocket 4 | Folds its gimbal and shows the album screen when playback is held — yet `0x04/0x05` telemetry keeps streaming at the same rate throughout. The telemetry says nothing about the motors. |
 | Osmo Pocket 4 | May need **two `0x02/0x0c` attempts** before it confirms playback. |
 | Osmo Pocket 4 / 3 | Seen holding a session from a previous connection: the handshake succeeds, the peer answers on its own sequence channel, and the media query is never answered. Re-handshake, or power-cycle. |
 | Action-family bodies | HTTP `404` and `500` are **transient** during a long transfer and do not mean the file is missing. |
@@ -533,9 +533,14 @@ two attempts. Mimo also sends the enter twice, 0.6 s apart, on re-entry. Nothing
 one it holds indefinitely. The distinctive symptom of a missing beat is playback appearing, lasting ~1 s,
 vanishing, and reappearing on the next re-assert.
 
-⚠️ **Do not poll `0x02/0x8E` while holding playback.** It looks like a heartbeat — Mimo sends it ~15 Hz
-over BLE — but it is a keyed parameter GET ([§14](#14-camera-parameters)), and on the datalink it takes
-the camera **out of** playback about a second later. Mimo sends it zero times in a 49 s datalink session.
+⚠️ **Do not poll `0x02/0x8E` while holding playback.** It looks like a heartbeat — the official app sends
+it ~15 Hz over BLE — but it is a keyed parameter GET ([§14](#14-camera-parameters)), and on the datalink
+it takes the camera **out of** playback about a second later.
+
+The restriction is on polling it *during* playback, not on the command. Captures of the official app
+performing the **same** operation show two different strategies, per model: on a Nano it enters playback
+once and sends `0x02/0x8E` zero times in 49 s; on an Xtra Edge Pro it sends 486 of them and never enters
+playback at all. Either is coherent — what breaks the mode is doing both at once.
 
 **Hold the mode; do not toggle it.** Leaving after each operation makes the mode flap and races anything
 that assumes it is held. Mimo enters once and holds for 128 s, leaving only when the user closes the
@@ -555,9 +560,9 @@ registered — 493 and 480 times in that 49 s session — so battery and storage
 Neither does the **first** page of the media list: only pagination needs playback, so a client that shows
 just the newest 45 files can skip this section entirely.
 
-**Confirming the gimbal actually parked:** `0x04/0x05` is position telemetry, pushed continuously while
-the motors run ([§20a](#20a-gimbal-position-telemetry--the-is-it-still-filming-signal)). Frames arriving
-means the gimbal is live; silence means parked.
+**Confirming the camera really entered playback:** read bit 30 of the flags word in `0x02/0x80`
+([§20b](#20b-camera-state-flags-0x020x80)). Do **not** infer it from gimbal telemetry
+([§20a](#20a-gimbal-position-telemetry)) — that rate is constant whatever the mode.
 
 **Alternative beat:** Mimo sends the `0x17` announce only twice (t=0.115 s, 0.595 s) and then beats
 `0x00/0x88` sub-cmd **`0x1a`** (`1a 00 00 00 01`, 5 B) at ~1 Hz instead. Untested here; `0x17` at 1 Hz
@@ -855,13 +860,41 @@ Note `@17` and `@13` are **mutually exclusive** — each reads 0 in the modes wh
 - **Not reported anywhere:** the dock's *own* charge level, and the dock's SD-card capacity — `0x02/0x80`
   (#18) covers the **active** store only.
 
-### 20a. Gimbal position telemetry — the "is it still filming" signal
-- Cmd Set / ID: `0x04` / `0x05`  ·  App ← Camera, continuous push (~20 Hz) **while the motors run**
+### 20a. Gimbal position telemetry
+- Cmd Set / ID: `0x04` / `0x05` (`GIMBAL GetPushParams`)  ·  App ← Camera, continuous push
 
-The payload layout is unmapped, and for this purpose it doesn't matter: the useful signal is the
-**arrival rate**. A gimballed body streams these while the motors run and stops when the gimbal parks,
-so counting frames tells a client whether the camera is still filming — otherwise only observable by
-looking at it. Use it to verify [playback hold](#holding-playback-mode-for-a-whole-browse-session).
+The payload layout is unmapped.
+
+⚠️ **Its arrival rate is not a motion signal, and cannot be used as one.** The rate is a fixed
+heartbeat: a Pocket 4 that had physically folded its gimbal on entering playback went on pushing at
+9.3/s, and a camera that had just *refused* playback pushed at 10.0/s — the same reading in both
+states. Inferring "the motors are running" from it reports motion in every state, and reading playback
+state that way sent one investigation down the wrong path entirely. To know whether the camera is in
+playback, read the flags word instead ([§20b](#20b-camera-state-flags-0x020x80)).
+
+### 20b. Camera state flags (`0x02/0x80`)
+- Cmd Set / ID: `0x02` / `0x80` (`GetPushStateInfo`)  ·  App ← Camera, continuous push, unprompted
+
+The payload opens with a **`u32-LE` flags word at offset 0**. Bits confirmed:
+
+| bit | mask | meaning |
+|---|---|---|
+| 0 | `0x00000001` | connected |
+| 18 | `0x00040000` | photo capture enabled (**0** when enabled) |
+| 28 | `0x10000000` | tracking mode |
+| 29 | `0x20000000` | hyperlapse mode |
+| **30** | **`0x40000000`** | **in playback mode** |
+
+Bits 15–16 carry a firmware-error code and 22–23 an encryption status; both are enums, not flags.
+
+**Bit 30 is the only reliable way to know the camera is in playback.** Entering playback
+([§13](#13-playback-mode)) is a command whose reply says the command was *received*, not that the mode
+changed — a body that answers and then stays in capture is indistinguishable from one that complied.
+This bit is the camera's own answer, and it arrives without being asked. Verified on a Nano: `0`
+before the mode change, `1` two hundred milliseconds after, with the body's screen agreeing.
+
+The same push carries the active store's capacity — `u32-LE` MiB total at byte 5, free at byte 9 —
+so a client that reads this frame needs no status polling at all.
 
 ---
 

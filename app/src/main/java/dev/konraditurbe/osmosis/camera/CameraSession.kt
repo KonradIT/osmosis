@@ -77,8 +77,12 @@ class CameraSession(
      * 5-7. Sent at registration **and every ~1 s for the whole session**.
      *
      * The camera needs a periodic beat to keep serving a browsing client, and playback mode is what it
-     * drops without one. We used to send `0x02/0x8E` ~3x/s, which Mimo never sends and which actively
-     * knocked the camera OUT of playback; removing it left no beat at all, and the mode then fell over
+     * drops without one. We used to send `0x02/0x8E` ~3x/s, which knocked the camera OUT of playback —
+     * not because the command is forbidden, but because it is a keyed parameter GET and polling one
+     * while holding playback is what breaks the mode. (Mimo does send it, just not where we did: a
+     * capture of it deleting on an **Xtra** carries 486 of them and never enters playback at all,
+     * while the same operation on a **Nano** enters playback once and sends zero. Per model, not
+     * universal.) Removing it left no beat at all, and the mode then fell over
      * about a second after being set, coming back only on our own 10 s re-assert — observed on hardware
      * as "appears, 1 s, disappears, 10 s later appears again". With this at 1 Hz, playback holds for the
      * whole session.
@@ -665,14 +669,20 @@ class CameraSession(
                     // seconds of connecting. Later deletes hit a camera no longer in playback, got no
                     // reply, and paid ~28 s for the verify re-list instead.
                     //
-                    // Mimo does not send it. In a 49 s Nano session (reference/captures/wifi/
-                    // mimo_nano_delete.pcap) Mimo sends 0x02/0x8E, 0x02/0xa0 and 0x02/0x61 exactly ZERO
-                    // times, holds playback the whole way, and still gets status — because the camera
-                    // PUSHES 0x02/0x80 (493x) and 0x02/0x82 (480x) on its own once registered. The polls
-                    // were never needed for the pill; parseStatus reads those pushes either way.
+                    // Mimo does not send it WHILE HOLDING PLAYBACK, which is the case that matters
+                    // here. In a 49 s Nano session (reference/captures/wifi/mimo_nano_delete.pcap) it
+                    // enters playback once and sends 0x02/0x8E, 0x02/0xa0 and 0x02/0x61 exactly ZERO
+                    // times, yet still gets status — because the camera PUSHES 0x02/0x80 (493x) and
+                    // 0x02/0x82 (480x) on its own once registered. The polls were never needed for the
+                    // pill; parseStatus reads those pushes either way.
+                    //
+                    // Not a blanket rule about the command: doing the same delete on an Xtra
+                    // (mimo_xtra_delete.pcap) Mimo sends 486 of them and never enters playback at all.
+                    // Two different strategies, per model.
+                    //
                     // ~1 Hz app-presence beat (tick is 300 ms). Without it the camera drops playback a
                     // second after we set it — see APP_PRESENCE. This is the beat 0x02/0x8E was standing
-                    // in for, badly: that one was ours, not Mimo's, and it knocked playback out.
+                    // in for, badly: we polled it *during* playback, which is what knocked the mode out.
                     if (tick % 3 == 0)
                         sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
                     // No 0x02/0xA0 or 0x02/0x61 either. Both were polled here as "state query" and
