@@ -688,9 +688,15 @@ class CameraSession(
                     // No 0x02/0xA0 or 0x02/0x61 either. Both were polled here as "state query" and
                     // "status poll", which is not what they are: DJI's own command catalogue names them
                     // **Audio Param Get** and **Histogram Get**. Neither feeds the pill — the camera
-                    // pushes 0x02/0x80 and 0x02/0x82 unprompted once registered — so they were two
-                    // writes a second buying nothing, on a link whose write budget is the very thing
-                    // that runs out. Mimo sends neither.
+                    // pushes 0x02/0x80 and 0x02/0x82 unprompted once registered — so for us they were
+                    // two writes a second buying nothing, on a link whose write budget is the very
+                    // thing that runs out.
+                    //
+                    // This said "Mimo sends neither", which was read off one Nano capture and is not
+                    // true generally: on a Pocket 3 the official app sends 1044 of 0x02/0xA0 and 210
+                    // of 0x02/0x61 in two minutes. It polls them because it draws an audio meter and a
+                    // histogram; we draw neither. Not sending them is still right for this app — the
+                    // claim about the other app was not.
                     // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode
                     // should simply stay, but the camera can also be knocked out of it by something we
                     // don't control — a button press on the body, a mode change, a firmware quirk — and

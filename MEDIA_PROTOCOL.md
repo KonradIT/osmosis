@@ -510,7 +510,7 @@ second after it is set unless the app keeps beating**, so entering it is not eno
 
 | | frame | when |
 |---|---|---|
-| enter | `0x02/0x0c` payload `01 01 00 01` | once, after registration |
+| enter | `0x02/0x0c` payload `01 01 00 01` | once, after registration — **not on a Pocket 3**, see [§13b](#13b-pocket-3-playback-entry-0x010x01) |
 | beat | `0x00/0x88` sub-cmd `0x17` (14 B, ASCII `APP` at bytes 5-7) | every ~1 s, all session |
 | re-assert | `0x02/0x0c` payload `01 01 00 01` | every ~10 s (optional, idempotent) |
 | leave | `0x02/0x0c` payload `01 01 00 00` | teardown only |
@@ -526,8 +526,12 @@ second after it is set unless the app keeps beating**, so entering it is not eno
 ```
 
 **Wait for the reply at step 3.** The camera does not always answer the first enter — a Pocket 4 took
-two attempts. Mimo also sends the enter twice, 0.6 s apart, on re-entry. Nothing else distinguishes
-"held" from "still recording", so treat an unanswered enter as *not held*.
+two attempts. The official app also sends the enter twice, 0.6 s apart, on re-entry.
+
+⚠️ **An answered enter does not mean the mode changed.** A Pocket 3 replies `status 0` to
+`0x02/0x0c` and stays in capture — the reply says the command was received, nothing more. Confirm
+on bit 30 of `0x02/0x80` ([§20b](#20b-camera-state-flags-0x020x80)), which is the camera's own
+answer, and treat that bit as the definition of "held".
 
 **The beat is mandatory.** Without a ~1 Hz frame the mode is dropped about a second after it is set; with
 one it holds indefinitely. The distinctive symptom of a missing beat is playback appearing, lasting ~1 s,
@@ -668,7 +672,7 @@ sequence window is *not* enforced — that measurement is from an aircraft. Came
 
 ## Camera control
 
-Cmd Set `0x02`, App → Camera (`0x01`). **Every app→camera frame must use `cmd_type` `0x40`** (request; `0xC0` = response) — a `0x00` frame is silently dropped before the dispatcher. The upstream repos' `0x02/0x20`/`0x21` record commands answer `e0` (unsupported) on Osmo firmware; **`0x02/0x02` is the record control** ([§11](#11-start-recording)/[§12](#12-stop-recording)).
+Cmd Set `0x02`, App → Camera (`0x01`). **App→camera frames in this cmdset use `cmd_type` `0x40`** (request; `0xC0` = response), and a `0x00` frame in cmdset `0x02` is silently dropped before the dispatcher. That is **not** a rule about the whole protocol: `0x01/0x01` ([§13b](#13b-pocket-3-playback-entry-0x010x01)) is sent with `cmd_type` `0x00`, expects no reply, and is what puts a Pocket 3 into playback. The upstream repos' `0x02/0x20`/`0x21` record commands answer `e0` (unsupported) on Osmo firmware; **`0x02/0x02` is the record control** ([§11](#11-start-recording)/[§12](#12-stop-recording)).
 
 > [!CAUTION]
 > Works only on the Nano. On an **Xtra Edge Pro** (Action-family rebrand), commands to receiver `0x01` get **no reply at all** — though the same camera answers `0x07/0x45` pairing, the `0x53/0x10` wake, and streams `0x02/0x80` status, so the link is healthy. The camera command set differs between the two families; don't assume these opcodes port across bodies.
@@ -719,9 +723,37 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 | `0x05` | Photo | <https://b3yond.d3vl.com/duml/#550e0466020102044002e1059be4> |
 | `0x0a` | HyperLapse | <https://b3yond.d3vl.com/duml/#550e0466020102044002e10a6c1c> |
 | `0x28` | SuperNight | <https://b3yond.d3vl.com/duml/#550e0466020102044002e1287c1e> |
+| `0x0c` | Panorama | confirmed on an Osmo Pocket 3 (capture, 2026-08-17) |
 
+- **Verified end to end on an Osmo Pocket 3** (capture, 2026-08-17): a labelled run through Photo, Panorama, SuperNight, SlowMo, TimeLapse and HyperLapse set `05 0c 28 00 02 0a` in that order, and every one came back at `@57` within 0.2–0.9 s.
 - **The enum is sparse and unordered — table it, never compute it.** The camera's on-screen carousel order is Video → Photo → TimeLapse → HyperLapse → SuperNight → SlowMo, which is *not* the numeric order.
 - **Readback:** the camera echoes the current mode in its `0x02/0x80` push at **byte `@57`**, same encoding — so mode is both settable and observable, and a remote stays in sync when the user changes it on the camera.
+
+### 13b. Pocket 3 playback entry (`0x01/0x01`)
+- Cmd Set / ID: `0x01` / `0x01` (`SPECIAL Control`) · App → Camera(`0x01`) · **`cmd_type 0x00`** · no reply
+
+⚠️ **`0x02/0x0c` does not put an Osmo Pocket 3 into playback.** It answers `status 0` and changes
+nothing: the screen stays on the live view and the gimbal stays unfolded. A capture of the official app
+on a Pocket 3 (2026-08-17) contains **no `0x02/0x0c` at all**. What it sends instead, in the 1.35 s
+around the transition and nowhere else in a 128 s session:
+
+| payload | count | when |
+|---|---|---|
+| `03 00000000 04000000 07 01` | ×6 | t=126.74–126.99, ~20 Hz |
+| `00 00000000 04000000 04 01` | ×22 | t=127.04–128.09, ~20 Hz |
+
+The camera's playback bit ([§20b](#20b-camera-state-flags-0x020x80)) sets at t=127.40, 358 ms into the
+second payload, and the gimbal folds. Two fields differ between the payloads — byte 0 (`03`→`00`) and
+byte 9 (`07`→`04`) — and which of them carries the mode is **not yet established**; the pair is
+reproduced verbatim because that is what the evidence supports.
+
+Notes that matter for a client:
+- It is **repeated at ~20 Hz while switching**, not sent once, and it is `cmd_type 0x00` with no reply —
+  so there is nothing to wait for. Confirm the transition on the state bit, never on an ack.
+- Nothing else in the capture uses cmdset `0x01`, so this is not a general-purpose channel that happens
+  to carry a mode: on this body it appears only to change into playback.
+- The Nano and Xtra *do* enter playback on `0x02/0x0c` (verified — the bit flips 200 ms later), so this
+  is per model, and a client should verify with the bit rather than assume either route.
 
 ### 14. Camera parameters
 
