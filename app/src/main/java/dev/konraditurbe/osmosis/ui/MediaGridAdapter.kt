@@ -194,10 +194,12 @@ class MediaGridAdapter(
             val queued = selected.containsKey(f.path)
             check.visibility = if (selectMode || queued) View.VISIBLE else View.GONE
             check.isChecked = queued
-            // ❤️ favorited; 🎞️ burst/interval group; else a media-type hint (📷 photo / 📹 video).
+            // ❤️ favorited; 🎞️ burst/interval group; 🌐 in-camera panorama (an ordinary .JPG, so only
+            // the record's type byte tells it apart); else a media-type hint (📷 photo / 📹 video).
             star.text = when {
                 f.starred -> "❤️"
                 f.isBurst -> "🎞️"
+                f.isPanorama -> "🌐"
                 f.isVideo -> "📹"
                 else -> "📷"
             }

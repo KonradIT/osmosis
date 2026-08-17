@@ -187,6 +187,19 @@ class CameraSession(
         runCatching { syncTime() }   // set the camera clock + timezone to the phone's, on every connect
         onFetchProgress?.invoke(50)
 
+        // Enter playback BEFORE asking for the list.
+        //
+        // A Pocket 3 that is still in capture declares the right file count and then serves only part
+        // of the records: `6 files (batch 0)` followed by two decoded, both the oldest, after a 4 s
+        // wait for data that never came. Once it is in playback the same query returns everything. The
+        // official app does it in this order too — playback first, list second.
+        //
+        // Safe on the bodies that do not need it: entering here is the same call the keep-alive would
+        // make a moment later, it is idempotent, and [startKeepAlive] skips it when it already holds.
+        // Runs on this thread, which is the session thread and the only one sending right now, so the
+        // sequence-interleaving rule that puts this on the keep-alive thread still holds.
+        enterPlaybackConfirmed()
+
         // No retry on an empty answer, deliberately. There WAS one, added for a log where a camera
         // handshook, streamed status and served no media across several connects — but the cause was
         // ours: the tester tapped connect three times, each tap opened a datalink while the last was
@@ -489,41 +502,44 @@ class CameraSession(
      * sequence numbers and get subsequent commands rejected as out-of-window.
      */
     private fun enterPlaybackConfirmed(attempts: Int = 3): Boolean {
+        // Ask the camera before telling it anything. Playback is camera-wide and outlives our session,
+        // so after a re-registration it is usually still in it — and on a body that refuses 0x02/0x0c
+        // this saves three pointless refusals. Costs one drain when the mode really is off.
+        parseStatus(recvAll(120))
+        if (playbackReported == true) {
+            playbackHeld = true
+            log("datalink: playback mode already held (camera says so)")
+            return true
+        }
         repeat(attempts) { n ->
             sendDuml(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0)
             val deadline = System.nanoTime() + 900_000_000L
             while (System.nanoTime() < deadline) {
                 val dg = recvAll(100)
-                parseStatus(dg)                       // keep the status pill fed while we wait
-                // Say what actually came back, verbatim, before deciding anything about it.
-                //
-                // A Pocket 3 sat on its live-preview screen — tester-observed — through a session this
-                // method had logged as "playback mode held" on the first attempt. So the frame we
-                // accept as the reply is not doing what we think. The candidates are a refusal status
-                // we were not reading, an accepted command the body ignores, or a frame that is not the
-                // reply at all: [findReply] matches on cmdSet/cmdId only and never looks at the flags
-                // byte, so an unsolicited push of the same pair satisfies it. One line of ground truth
-                // separates those; three rounds of inference did not.
-                for (f in modeReplyFrames(dg)) log("datalink: 0x02/0x0C <- $f")
+                parseStatus(dg)                       // also updates playbackReported, which decides this
+                // The CAMERA's answer decides it, not the command's. A Pocket 3 replies status 0 to
+                // this and stays in capture — screen on the live view, gimbal unfolded — so an ack
+                // means "received", nothing more. Bit 30 is the only thing that means "in playback".
+                if (playbackReported == true) {
+                    playbackHeld = true
+                    log("datalink: playback mode held" + if (n > 0) " (confirmed on attempt ${n + 1})" else "")
+                    return true
+                }
                 val reply = findReply(dg, 0x02, 0x0C)
                 if (reply != null) {
-                    // Accept on status 0 only. Behaviour is otherwise unchanged: the Nano, Xtra and
-                    // Pocket 4 all confirm playback correctly today, and tightening the match on a
-                    // guess would risk them to fix a body we cannot yet explain.
                     val status = reply[0].toInt() and 0xFF
-                    if (status == 0x00) {
-                        playbackHeld = true
-                        log("datalink: playback mode held" +
-                            if (n > 0) " (confirmed on attempt ${n + 1})" else "")
-                        return true
+                    if (status != 0x00) {
+                        // A refusal is definitive. Re-sending a command the body does not implement
+                        // costs a second an attempt and cannot start working, so switch route now.
+                        log("datalink: playback refused (0x%02x) — trying 0x01/0x01".format(status))
+                        return enterPlaybackViaControl()
                     }
-                    log("datalink: playback REFUSED 0x%02x on attempt %d [%s]".format(
-                        status, n + 1, reply.joinToString("") { "%02x".format(it) }))
-                    break                             // don't wait out the window — re-send instead
                 }
                 sendAck()
             }
         }
+        // 0x02/0x0c did not move the camera. Try the other route before giving up.
+        if (enterPlaybackViaControl()) return true
         // Not fatal — the browse still works, but the camera stays in capture (gimbal unfolded, and it
         // can still be recording), so say so rather than pretend we hold it.
         log("datalink: playback mode NOT confirmed after $attempts attempts — camera may still be in capture")
@@ -531,36 +547,55 @@ class CameraSession(
     }
 
     /**
-     * Every `0x02/0x0C` frame in [dg] as `flags=0x.. payload=…`, for the playback log.
+     * The Pocket 3's playback entry: `0x01/0x01` (`SPECIAL Control`), not `0x02/0x0c`.
      *
-     * The flags byte at `+8` is the point: it is what tells a response apart from an unsolicited push,
-     * and both [DumlTransport.scanFrames] and [findReply] drop it. Same frame validation as the former
-     * — CRC8 on the header, CRC16 on the body — so a byte pattern that merely looks like a frame is
-     * not reported as one.
+     * Replayed from a labelled capture of the official app on a Pocket 3 (2026-08-17), where
+     * `0x02/0x0c` does not appear once in 128 s. Two payloads go out at ~20 Hz across 1.35 s and the
+     * camera's playback bit sets 358 ms into the second; nothing else in that capture uses cmdset
+     * `0x01`. `cmd_type 0x00` and no reply, so there is nothing to wait for — [playbackReported] is
+     * the only signal, which is exactly why this is safe to attempt on any body: a camera that ignores
+     * it leaves the bit alone and we report not-held, the same as before.
+     *
+     * The two payloads differ in byte 0 (`03`→`00`) and byte 9 (`07`→`04`). Which one carries the mode
+     * is unknown, so both are sent verbatim in the captured order rather than reduced to a guess.
+     *
+     * No exit counterpart: the capture never left playback, so there is nothing to replay for it.
+     * Teardown still sends `0x02/0x0c 01010000`, which a Pocket 3 ignores as harmlessly as the enter.
      */
-    private fun modeReplyFrames(dg: List<ByteArray>): List<String> {
-        val out = ArrayList<String>()
-        for (raw in dg) {
-            var i = 0
-            while (i + 13 <= raw.size) {
-                if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
-                val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-                if (len < 13 || i + len > raw.size) { i++; continue }
-                if (DjiCrc.computeCrc8(raw.copyOfRange(i, i + 3)) != (raw[i + 3].toInt() and 0xFF)) { i++; continue }
-                val body = raw.copyOfRange(i, i + len - 2)
-                val want = (raw[i + len - 2].toInt() and 0xFF) or ((raw[i + len - 1].toInt() and 0xFF) shl 8)
-                if (DjiCrc.computeCrc16(body) != want) { i++; continue }
-                if ((raw[i + 9].toInt() and 0xFF) == 0x02 && (raw[i + 10].toInt() and 0xFF) == 0x0C) {
-                    val pl = raw.copyOfRange(i + 11, i + len - 2)
-                    out.add("flags=0x%02x payload=%s".format(
-                        raw[i + 8].toInt() and 0xFF,
-                        if (pl.isEmpty()) "(empty)" else pl.joinToString("") { "%02x".format(it) }))
-                }
-                i++
+    private fun enterPlaybackViaControl(): Boolean {
+        log("datalink: 0x02/0x0C did not move the camera — trying 0x01/0x01 (the Pocket 3 route)")
+        val prelude = hex("0300000000040000000701")
+        val enter = hex("0000000000040000000401")
+        val deadline = System.nanoTime() + 2_500_000_000L
+        var sent = 0
+        var silent = 0
+        while (System.nanoTime() < deadline) {
+            // Six of the first, then the second for the rest — the capture's own proportions.
+            sendDuml(0x01, 0x01, if (sent < 6) prelude else enter,
+                receiverType = 0x01, receiverId = 0, cmdType = 0)
+            sent++
+            val got = recvAll(50)
+            parseStatus(got)
+            if (playbackReported == true) {
+                playbackHeld = true
+                log("datalink: playback mode held via 0x01/0x01 (after $sent frames)")
+                return true
+            }
+            // Stop if the camera has gone quiet. This is cmd_type 0 with no reply, so the state bit is
+            // the only feedback and there is nothing else to notice a departure by — without this the
+            // burst keeps firing into a camera that is powering down (its 5-minute idle timer lands
+            // mid-session readily enough), which is the last thing to be writing an unknown control
+            // command into.
+            silent = if (got.isEmpty()) silent + 1 else 0
+            if (silent >= 8) {
+                log("datalink: 0x01/0x01 — camera stopped answering after $sent frames, aborting")
+                return false
             }
         }
-        return out
+        log("datalink: 0x01/0x01 sent $sent frames, camera still reports capture")
+        return false
     }
+
 
     /**
      * How long a registered session keeps accepting inline command WRITES.
@@ -636,6 +671,11 @@ class CameraSession(
         resetStatus()
         Thread {
             var tick = 0
+            // Unconditional, and cheap when it is a no-op: [enterPlaybackConfirmed] asks the camera
+            // first and returns straight away if it is already in playback. Gating this on our own
+            // playbackHeld instead was wrong — that flag survives a re-registration, so a refreshed
+            // session (the delete flow) would have skipped entry on a body that drops the mode when
+            // the old session goes away, and written outside playback believing it held.
             enterPlaybackConfirmed()
             while (keepAliveOn) {
                 runCatching {
@@ -688,9 +728,15 @@ class CameraSession(
                     // No 0x02/0xA0 or 0x02/0x61 either. Both were polled here as "state query" and
                     // "status poll", which is not what they are: DJI's own command catalogue names them
                     // **Audio Param Get** and **Histogram Get**. Neither feeds the pill — the camera
-                    // pushes 0x02/0x80 and 0x02/0x82 unprompted once registered — so they were two
-                    // writes a second buying nothing, on a link whose write budget is the very thing
-                    // that runs out. Mimo sends neither.
+                    // pushes 0x02/0x80 and 0x02/0x82 unprompted once registered — so for us they were
+                    // two writes a second buying nothing, on a link whose write budget is the very
+                    // thing that runs out.
+                    //
+                    // This said "Mimo sends neither", which was read off one Nano capture and is not
+                    // true generally: on a Pocket 3 the official app sends 1044 of 0x02/0xA0 and 210
+                    // of 0x02/0x61 in two minutes. It polls them because it draws an audio meter and a
+                    // histogram; we draw neither. Not sending them is still right for this app — the
+                    // claim about the other app was not.
                     // Re-assert playback every ~10 s. Belt and braces: with 0x02/0x8E gone the mode
                     // should simply stay, but the camera can also be knocked out of it by something we
                     // don't control — a button press on the body, a mode change, a firmware quirk — and
@@ -1188,6 +1234,7 @@ class CameraSession(
         if (comp.isNotEmpty()) {
             log("datalink: decoded ${comp.size} CompositePack records " +
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
+                "${comp.count { it.starred }} starred, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
             dumpManifest(bytes)
             return flagHandleCollisions(comp)
@@ -1258,7 +1305,7 @@ class CameraSession(
             val lo = if (k > 0) medias[k - 1].end else 0
             val hi = if (k + 1 < medias.size) medias[k + 1].pos else bytes.size
             val group = if (boundary > 0 && k >= boundary) 1 else 0
-            byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi).copy(group = group))
+            byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi, m.pos).copy(group = group))
         }
         return withCmdHandles(byPath.values.toList())
     }
@@ -1319,7 +1366,7 @@ class CameraSession(
      * and matching *this* base — field order varies across the line (name before path on the Nano,
      * after it on the Xtra), so association is by trailing base, not position.
      */
-    private fun resolveRecord(bytes: ByteArray, mediaDir: String, lo: Int, hi: Int): CameraFile {
+    private fun resolveRecord(bytes: ByteArray, mediaDir: String, lo: Int, hi: Int, selfPos: Int = -1): CameraFile {
         val base = mediaDir.substringAfterLast('/')      // e.g. DJI_20260721121344_0015_D_OP3
 
         // Thumbnail path: the 1a…02 field whose value ends with this base.
@@ -1361,7 +1408,17 @@ class CameraSession(
         // against Mimo manifests from a real Nano and Xtra — see PhotoHandleTest.
         var head = -1
         var m = lo
-        while (m < hi - 4) {
+        // Stop at this record's OWN media path, not at the next record's.
+        //
+        // The marker precedes the path it belongs to, and [hi] deliberately reaches into the next
+        // record so the other fields can be found. For a body whose photo records carry no marker at
+        // all — a Pocket 3 — scanning that far forward walks past the photo's path and matches the
+        // NEXT record's marker, handing the photo a video's handle. That looked like the camera
+        // reusing handles; it was us reading across a record boundary. It also cost the video: the
+        // collision guard then refuses to delete BOTH files, so a real video became undeletable
+        // because a photo borrowed its handle.
+        val markerEnd = if (selfPos in (lo + 1)..hi) selfPos else hi
+        while (m < markerEnd - 4) {
             val kind = bytes[m].toInt() and 0xFF
             val star = bytes[m + 1].toInt() and 0xFF
             if ((kind == 0x03 || kind == 0x00) && (star == 0xFF || star == 0xFE) &&
@@ -1377,8 +1434,25 @@ class CameraSession(
         // against ground truth (moov/HTTP/JPEG bounds) over a controlled clip+photo set.
         var photoSize = 0L; var photoRes: String? = null
         if (!isVideo) {
+            // The `19 06` pair sits at a FIXED position — seven bytes before the record's own path
+            // field — so read it there rather than scanning for it. Scanning needs a byte to match on,
+            // and the only candidate is the one before the tag, which is `ff`/`fe` on some bodies but
+            // `f6` (still) or `c7` (panorama) on a Pocket 3. Failing to match ran the scan into the
+            // NEXT record and read its size: a photo followed by a video reported the video's byte
+            // count exactly, and a photo followed by another photo reported nothing. Same overrun as
+            // the delete handle had.
+            val fixed = selfPos - 7
+            if (selfPos >= 21 && fixed + 1 < bytes.size &&
+                bytes[fixed] == 0x19.toByte() && bytes[fixed + 1] == 0x06.toByte()
+            ) {
+                photoSize = u32le(bytes, fixed - 14)
+                if (base.startsWith("DJI_") && fixed + 66 <= bytes.size) {
+                    val w = u32le(bytes, fixed + 58).toInt(); val h = u32le(bytes, fixed + 62).toInt()
+                    if (w in 1..60000 && h in 1..60000) photoRes = "${w}x${h}"
+                }
+            }
             var q = lo
-            while (q < hi - 3) {
+            while (photoSize == 0L && q < markerEnd - 3) {
                 if ((bytes[q] == 0xFF.toByte() || bytes[q] == 0xFE.toByte()) &&
                     bytes[q + 1] == 0x19.toByte() && bytes[q + 2] == 0x06.toByte()
                 ) {
@@ -1413,14 +1487,25 @@ class CameraSession(
         // ⭐ starTag and the resolution index, both u8, ground-truth-verified against the SD card.
         // The star byte sits 9 bytes past the record's `[ff|fe] 19 06` marker (videos use `03 ff 19 06`,
         // photos a `fe 19 06` variant); the resolution index is at marker-1 (video header only).
-        val starred = starFlag(bytes, lo, hi)
+        // Prefer the signature read where the record has one: it is the only thing that works on a
+        // body whose stills carry no marker, and it agreed with the marker read everywhere both fired.
+        val starred = starFlagBySignature(bytes, selfPos.takeIf { it >= 0 } ?: lo, hi)
+            ?: starFlag(bytes, lo, hi)
         val resolution = if (isVideo && hasMarker && head + 7 < bytes.size)
             resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else photoRes
+        // Media type: the byte before the constant `19 06` tag, which sits at mediaPath-13. Read only
+        // when that tag is actually there, so a record shaped differently yields -1 rather than
+        // whatever byte happens to precede the path. 0x00 still, 0x03 video, 0x04 panorama.
+        // selfPos is the start of the path FIELD (`1a <len> 00 00 00 <sub>`), so the path text begins six
+        // bytes later and the tag lands at selfPos-7.
+        val mediaType = if (selfPos >= 9 && selfPos <= bytes.size &&
+            bytes[selfPos - 7] == 0x19.toByte() && bytes[selfPos - 6] == 0x06.toByte()
+        ) bytes[selfPos - 9].toInt() and 0xFF else -1
         return CameraFile(
             path = path, thumbPath = thumbPath, storage = 0,
             resLabel = fps?.let { "${it}fps" }, proxyPath = proxyExt?.let { "$mediaDir.$it" },
             handle = handle, sizeBytes = size, starred = starred, resolution = resolution,
-            durationSec = durationSec,
+            durationSec = durationSec, mediaType = mediaType,
         )
     }
 
@@ -1456,6 +1541,36 @@ class CameraSession(
         }
         return false
     }
+
+    /**
+     * The favourite flag as a Pocket 3 writes it: a `00`/`01` byte after a fixed 12-byte signature.
+     *
+     * The marker-relative read above cannot work on this body. It anchors on `[ff|fe] 19 06`, and a
+     * Pocket 3 **still** carries no such marker at all — so a favourited photo could never show a heart,
+     * whatever offset was used. This anchors on [STAR_SIG] instead, which sits *after* the record's own
+     * media path and is present once per record whatever the media type.
+     *
+     * Established by a controlled A/B on one card, camera in hand (2026-08-17): two dumps of the same
+     * nine files, differing in exactly three bytes, and all three were the favourites that had been
+     * changed between them — one video cleared, one video and one **photo** set. Eighteen records
+     * across the two dumps, every one agreeing with the camera's own gallery.
+     */
+    private fun starFlagBySignature(bytes: ByteArray, lo: Int, hi: Int): Boolean? {
+        var q = lo
+        val end = minOf(hi, bytes.size - STAR_SIG.size - 1)
+        while (q <= end) {
+            var k = 0
+            while (k < STAR_SIG.size && bytes[q + k] == STAR_SIG[k]) k++
+            if (k == STAR_SIG.size) return (bytes[q + STAR_SIG.size].toInt() and 0xFF) == 1
+            q++
+        }
+        return null
+    }
+
+    /** See [starFlagBySignature]. Constant across every Pocket 3 record dumped, once per record. */
+    private val STAR_SIG = byteArrayOf(
+        0x1b, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x02, 0x01, 0x14, 0x02, 0x15, 0x03,
+    )
 
     private fun resolutionForIndex(code: Int): String? = when (code) {
         10 -> "1920x1080"  // 1080p 16:9  (Xtra-verified)

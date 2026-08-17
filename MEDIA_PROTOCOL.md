@@ -88,7 +88,7 @@ Where a body behaves differently from the rest of the line:
 | Osmo Action 5 Pro | `DCIM/DJI_001/DJI_…_D` | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.LRF` | `(unconfirmed)` |
 | Xtra Edge Pro | `DCIM/CAM_001/CAM_…_D` | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.XRF` | ❌ `44`/`48` — a length |
 | Osmo Action 6 | `DCIM/DJI_001/DJI_…` | `0x4010xxxx` | internal (only store) → **1** | `(unconfirmed)` | `(unconfirmed)` |
-| Osmo Pocket 3 | `DCIM/DJI_001/DJI_…_D_OP3` | `0x00040000` / `0x10` | microSD (only store) → **0** | `(unconfirmed)` | ❌ `48` — a length |
+| Osmo Pocket 3 | `DCIM/DJI_001/DJI_…_D` | videos `0x00040000` / `0x10`; **stills carry none** | microSD (only store) → **0** | `.LRF` | ❌ not at `@+9` — see the star signature below |
 
 - **Path-addressed bodies only.** Index-addressed devices have no paths, handles or stores to tabulate:
   the Osmo Action 1 is in [§1](#1-get-media-list) ("Parsed — index-based") and the drones in
@@ -126,7 +126,10 @@ Where a body behaves differently from the rest of the line:
 | Osmo Nano | Dock SD reads cut a long HTTP transfer around **757–774 MB**; resume and continue ([§29](#29-http-media-api-v1--dcf-indexed) applies the same way to `/v2`). Internal streams >1.4 GB uncut. |
 | Osmo Nano | Reads the dock SD **only when seated lens-away from the dock screen**; the other way round it answers the SD query with a `start` frame and no data. |
 | Osmo Pocket 3 | Answers `e0` to the `0x53/0x10` wake, yet its AP still comes up via the `0x00/0x2b` session — the wake is belt-and-braces here. |
-| Osmo Pocket 4 | Folds its gimbal and shows the album screen when playback is held — yet `0x04/0x05` telemetry keeps streaming at the same rate throughout. The telemetry says nothing about the motors. |
+| Osmo Pocket 3 | Answers `e0` to `0x02/0x0c` and does not change mode. Playback is entered with `0x01/0x01` ([§13b](#13b-pocket-3-playback-entry-0x010x01)). |
+| Osmo Pocket 3 | Serves an **incomplete first page** if asked for the media list while still in capture — correct count, only the oldest records, then a stall. Enter playback first. |
+| Osmo Pocket 3 | **Stills carry no record marker**, so they have no delete handle and cannot be deleted; only videos can. A photo that appears to share a video's handle is a decoder reading past the record boundary, not the camera reusing one. |
+| Osmo Pocket 4 | Folds its gimbal and shows the album screen while playback is held, yet `0x04/0x05` telemetry keeps streaming at an unchanged rate throughout ([§20a](#20a-gimbal-position-telemetry)). |
 | Osmo Pocket 4 | May need **two `0x02/0x0c` attempts** before it confirms playback. |
 | Osmo Pocket 4 / 3 | Seen holding a session from a previous connection: the handshake succeeds, the peer answers on its own sequence channel, and the media query is never answered. Re-handshake, or power-cycle. |
 | Action-family bodies | HTTP `404` and `500` are **transient** during a long transfer and do not mean the file is missing. |
@@ -364,8 +367,8 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 | field | type | notes |
 |-------|------|-------|
 | `fileName` | String | e.g. `DJI_…_D.MP4` — the `0d` field |
-| `fileType` | enum `MediaFileType` | photo/video/… → the extension category |
-| `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE @ marker − 12` |
+| `fileType` | enum `MediaFileType` | **mapped**: `u8` two bytes before the constant `19 06` tag (`@ mediaPath − 15`) — the same byte the delete-handle marker reads as its "kind", so it is on **every** record, including stills that carry no marker. It is the only thing separating an in-camera panorama (`4`) from an ordinary JPEG (`0`): both are written as `.JPG` |
+| `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE` 14 bytes before the constant `19 06` tag, i.e. `@ marker − 12` on a record that has a marker. Locate the tag at its fixed position (`@ mediaPath − 13`) rather than scanning for the `ff`/`fe` byte in front of it: that byte is `f6` on a Pocket 3 still and `c7` on a panorama, so a scan misses the record and reads the **next** one's size |
 | `duration` | **Long** | video length (ms) |
 | `frameRate` | enum `VideoFrameRate` | **mapped**: `u8 @ marker − 2`; the fps rational carries the same value |
 | `resolution` | enum `VideoResolution` | **mapped**: `u8 @ marker − 1` (table below) |
@@ -389,11 +392,22 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 | `nano_45.bin` | Nano | `0` ×45 (captured before anything was favourited) |
 | `xtra_13.bin` | Xtra Edge Pro | `44` ×13 |
 | `xtra_delete.bin` | Xtra Edge Pro | `44` ×41, `48` ×4 |
-| `op3_15.bin` | Pocket 3 | `48` ×15 |
+| `op3_15.bin` | Pocket 3 | `48` ×15 — a length, not the flag |
 
-A `!= 0` test therefore marks **every** file on an Action-family body as starred. Writing a favourite
-works on those bodies ([§3](#3-favorite--star-media)); only the read-back offset is unmapped there, so a
-client should show the star on the Nano and treat it as unknown elsewhere rather than trust `+9`.
+A `!= 0` test therefore marks **every** file on an Action-family body as starred.
+
+**On a Pocket 3 the flag is not marker-relative at all**, and cannot be: its **stills carry no marker**,
+so a favourited photo is unreachable from `+9` at any offset. It is instead a `00`/`01` byte immediately
+following a fixed 12-byte signature —
+
+```
+1b 0a 00 00 00 02 02 01 14 02 15 03  <00|01>
+```
+
+— which occurs exactly once per record, after that record's own media path, for **every** media type.
+Reading it there tracks the camera's own gallery for stills and videos alike. Prefer this where the
+signature is present and fall back to `+9` otherwise; writing a favourite works on every body
+regardless ([§3](#3-favorite--star-media)).
 
 **frameRate** (`marker−2`) — `VideoFrameRate`:
 
@@ -510,7 +524,7 @@ second after it is set unless the app keeps beating**, so entering it is not eno
 
 | | frame | when |
 |---|---|---|
-| enter | `0x02/0x0c` payload `01 01 00 01` | once, after registration |
+| enter | `0x02/0x0c` payload `01 01 00 01` | once, after registration — **not on a Pocket 3**, see [§13b](#13b-pocket-3-playback-entry-0x010x01) |
 | beat | `0x00/0x88` sub-cmd `0x17` (14 B, ASCII `APP` at bytes 5-7) | every ~1 s, all session |
 | re-assert | `0x02/0x0c` payload `01 01 00 01` | every ~10 s (optional, idempotent) |
 | leave | `0x02/0x0c` payload `01 01 00 00` | teardown only |
@@ -526,8 +540,12 @@ second after it is set unless the app keeps beating**, so entering it is not eno
 ```
 
 **Wait for the reply at step 3.** The camera does not always answer the first enter — a Pocket 4 took
-two attempts. Mimo also sends the enter twice, 0.6 s apart, on re-entry. Nothing else distinguishes
-"held" from "still recording", so treat an unanswered enter as *not held*.
+two attempts. The official app also sends the enter twice, 0.6 s apart, on re-entry.
+
+⚠️ **An answered enter does not mean the mode changed.** A Pocket 3 replies `status 0` to
+`0x02/0x0c` and stays in capture — the reply says the command was received, nothing more. Confirm
+on bit 30 of `0x02/0x80` ([§20b](#20b-camera-state-flags-0x020x80)), which is the camera's own
+answer, and treat that bit as the definition of "held".
 
 **The beat is mandatory.** Without a ~1 Hz frame the mode is dropped about a second after it is set; with
 one it holds indefinitely. The distinctive symptom of a missing beat is playback appearing, lasting ~1 s,
@@ -537,10 +555,10 @@ vanishing, and reappearing on the next re-assert.
 it ~15 Hz over BLE — but it is a keyed parameter GET ([§14](#14-camera-parameters)), and on the datalink
 it takes the camera **out of** playback about a second later.
 
-The restriction is on polling it *during* playback, not on the command. Captures of the official app
-performing the **same** operation show two different strategies, per model: on a Nano it enters playback
-once and sends `0x02/0x8E` zero times in 49 s; on an Xtra Edge Pro it sends 486 of them and never enters
-playback at all. Either is coherent — what breaks the mode is doing both at once.
+The restriction is on polling it *during* playback, not on the command itself. The official app uses one
+strategy or the other depending on the body: on a Nano it enters playback and does not send `0x02/0x8E`
+at all; on an Xtra Edge Pro it polls `0x02/0x8E` continuously and never enters playback. Either works.
+Doing both at once does not.
 
 **Hold the mode; do not toggle it.** Leaving after each operation makes the mode flap and races anything
 that assumes it is held. Mimo enters once and holds for 128 s, leaving only when the user closes the
@@ -557,8 +575,11 @@ out of it by something outside the protocol, such as a button press on the body.
 
 **What playback does *not* gate:** status pushes (`0x02/0x80`, `0x02/0x82`) arrive unprompted once
 registered — 493 and 480 times in that 49 s session — so battery and storage need no polling either way.
-Neither does the **first** page of the media list: only pagination needs playback, so a client that shows
-just the newest 45 files can skip this section entirely.
+⚠️ **Enter playback BEFORE the first list query.** Pagination has always needed it, but so does the
+first page on some bodies: a Pocket 3 still in capture declares the right file count and then serves
+only part of the records — `6 files` announced, two returned, both the oldest, after a 4 s wait for data
+that never arrived. In playback the same query returns all six. The official app also lists only after
+entering playback.
 
 **Confirming the camera really entered playback:** read bit 30 of the flags word in `0x02/0x80`
 ([§20b](#20b-camera-state-flags-0x020x80)). Do **not** infer it from gimbal telemetry
@@ -668,7 +689,7 @@ sequence window is *not* enforced — that measurement is from an aircraft. Came
 
 ## Camera control
 
-Cmd Set `0x02`, App → Camera (`0x01`). **Every app→camera frame must use `cmd_type` `0x40`** (request; `0xC0` = response) — a `0x00` frame is silently dropped before the dispatcher. The upstream repos' `0x02/0x20`/`0x21` record commands answer `e0` (unsupported) on Osmo firmware; **`0x02/0x02` is the record control** ([§11](#11-start-recording)/[§12](#12-stop-recording)).
+Cmd Set `0x02`, App → Camera (`0x01`). **App→camera frames in this cmdset use `cmd_type` `0x40`** (request; `0xC0` = response), and a `0x00` frame in cmdset `0x02` is silently dropped before the dispatcher. That is **not** a rule about the whole protocol: `0x01/0x01` ([§13b](#13b-pocket-3-playback-entry-0x010x01)) is sent with `cmd_type` `0x00`, expects no reply, and is what puts a Pocket 3 into playback. The upstream repos' `0x02/0x20`/`0x21` record commands answer `e0` (unsupported) on Osmo firmware; **`0x02/0x02` is the record control** ([§11](#11-start-recording)/[§12](#12-stop-recording)).
 
 > [!CAUTION]
 > Works only on the Nano. On an **Xtra Edge Pro** (Action-family rebrand), commands to receiver `0x01` get **no reply at all** — though the same camera answers `0x07/0x45` pairing, the `0x53/0x10` wake, and streams `0x02/0x80` status, so the link is healthy. The camera command set differs between the two families; don't assume these opcodes port across bodies.
@@ -693,12 +714,13 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 
 ### 11. Start recording
 - Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[01]`
-- Reply `00`; recording starts ~860 ms later (the `0x02/0x80` recording bit sets — [§18](#18-camera-status)).
+- Reply `00`, then the `0x02/0x80` recording bit sets ([§18](#18-camera-status)). **Timing is per body** — a Nano takes ~860 ms from request to recording, a Pocket 3 ~600 ms (ack in 380–550 ms, bit set ~200 ms after that) — so wait on the bit, never on a fixed delay.
+- On a Pocket 3 the state byte passes through `41` (bit 6) before reaching `81` (bit 7 = recording), so a client testing `== 0x81` sees the start correctly while one testing "any change" fires early on a camera still spinning up.
 - DUML example: <https://b3yond.d3vl.com/duml/#550e046602010204400202014e61>
 
 ### 12. Stop recording
 - Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[00]`
-- Reply `00`; the recording bit clears ~2.4 s later. **Not a toggle** — re-sending `[01]` while recording answers `df`, so drive start/stop off the decoded recording bit ([§18](#18-camera-status)), never by toggling blind.
+- Reply `00`; the recording bit then clears — ~2.4 s on a Nano, ~700 ms on a Pocket 3 (ack in 10–20 ms, state byte `c1` while the file is finalised, then back to `01`). **Not a toggle** — re-sending `[01]` while recording answers `df`, so drive start/stop off the decoded recording bit ([§18](#18-camera-status)), never by toggling blind.
 - DUML example: <https://b3yond.d3vl.com/duml/#550e04660201020440020200c770>
 
 > ⚠️ **Control does not work on Xtra over BLE**
@@ -719,9 +741,37 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 | `0x05` | Photo | <https://b3yond.d3vl.com/duml/#550e0466020102044002e1059be4> |
 | `0x0a` | HyperLapse | <https://b3yond.d3vl.com/duml/#550e0466020102044002e10a6c1c> |
 | `0x28` | SuperNight | <https://b3yond.d3vl.com/duml/#550e0466020102044002e1287c1e> |
+| `0x0c` | Panorama | <https://b3yond.d3vl.com/duml/#550e0466020102044002e10c5a79> |
 
 - **The enum is sparse and unordered — table it, never compute it.** The camera's on-screen carousel order is Video → Photo → TimeLapse → HyperLapse → SuperNight → SlowMo, which is *not* the numeric order.
 - **Readback:** the camera echoes the current mode in its `0x02/0x80` push at **byte `@57`**, same encoding — so mode is both settable and observable, and a remote stays in sync when the user changes it on the camera.
+
+### 13b. Pocket 3 playback entry (`0x01/0x01`)
+- Cmd Set / ID: `0x01` / `0x01` (`SPECIAL Control`) · App → Camera(`0x01`) · **`cmd_type 0x00`** · no reply
+
+A Pocket 3 **rejects `0x02/0x0c` with `e0`** and stays in capture: live view on screen, gimbal
+unfolded. Send this instead, as two payloads in order:
+
+| # | payload | repeat |
+|---|---|---|
+| 1 | `03 00000000 04000000 07 01` | ~6 frames at ~20 Hz |
+| 2 | `00 00000000 04000000 04 01` | continuously at ~20 Hz until the state bit sets |
+
+The playback bit ([§20b](#20b-camera-state-flags-0x020x80)) sets roughly 350 ms into the second payload,
+and the gimbal folds. Byte 0 (`03`→`00`) and byte 9 (`07`→`04`) are what differ; which carries the mode
+is unknown, so send both in this order rather than one derived frame.
+
+- **Repeat it, don't send it once**, and never wait for an ack: `cmd_type 0x00` is not answered. The
+  state bit is the only completion signal.
+- **Nothing else uses cmdset `0x01`** on this body — it is not a general channel that happens to carry a
+  mode.
+- **This is per model.** The Nano and Xtra enter playback on `0x02/0x0c` normally, their bit setting
+  ~200 ms after the reply. Try `0x02/0x0c` first, fall through to this when the bit does not set, and
+  decide on the bit either way rather than on the model.
+- **There is no exit command.** The camera returns to capture on its own a few seconds after the link
+  drops. `0x02/0x0c 01010000` is refused harmlessly on teardown, and replaying payload 1 does **not**
+  leave playback — the state bit stays set through two seconds of it, so that payload is a prelude to
+  the switch rather than the mode being left.
 
 ### 14. Camera parameters
 
@@ -865,12 +915,10 @@ Note `@17` and `@13` are **mutually exclusive** — each reads 0 in the modes wh
 
 The payload layout is unmapped.
 
-⚠️ **Its arrival rate is not a motion signal, and cannot be used as one.** The rate is a fixed
-heartbeat: a Pocket 4 that had physically folded its gimbal on entering playback went on pushing at
-9.3/s, and a camera that had just *refused* playback pushed at 10.0/s — the same reading in both
-states. Inferring "the motors are running" from it reports motion in every state, and reading playback
-state that way sent one investigation down the wrong path entirely. To know whether the camera is in
-playback, read the flags word instead ([§20b](#20b-camera-state-flags-0x020x80)).
+⚠️ **The arrival rate is a fixed heartbeat, not a motion signal.** It runs at ~10/s whatever the camera
+is doing — gimbal folded in playback, gimbal live in capture, and on a body that has just refused a mode
+change. Counting these frames reports "the motors are running" in every state. Read the flags word for
+playback ([§20b](#20b-camera-state-flags-0x020x80)).
 
 ### 20b. Camera state flags (`0x02/0x80`)
 - Cmd Set / ID: `0x02` / `0x80` (`GetPushStateInfo`)  ·  App ← Camera, continuous push, unprompted
@@ -890,8 +938,8 @@ Bits 15–16 carry a firmware-error code and 22–23 an encryption status; both 
 **Bit 30 is the only reliable way to know the camera is in playback.** Entering playback
 ([§13](#13-playback-mode)) is a command whose reply says the command was *received*, not that the mode
 changed — a body that answers and then stays in capture is indistinguishable from one that complied.
-This bit is the camera's own answer, and it arrives without being asked. Verified on a Nano: `0`
-before the mode change, `1` two hundred milliseconds after, with the body's screen agreeing.
+This bit is the camera's own answer and arrives without being asked: `0` in capture, `1` within ~200 ms
+of the mode actually changing.
 
 The same push carries the active store's capacity — `u32-LE` MiB total at byte 5, free at byte 9 —
 so a client that reads this frame needs no status polling at all.
