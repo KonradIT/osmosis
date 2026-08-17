@@ -364,7 +364,7 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 | field | type | notes |
 |-------|------|-------|
 | `fileName` | String | e.g. `DJI_…_D.MP4` — the `0d` field |
-| `fileType` | enum `MediaFileType` | photo/video/… → the extension category |
+| `fileType` | enum `MediaFileType` | **mapped**: `u8` two bytes before the constant `19 06` tag — i.e. `@ mediaPath − 15`, or `@ marker` where a marker exists (it *is* the marker's first byte). Present on **every** record, including the stills that carry no marker at all. Verified on a Pocket 3: `0` JPEG ×6, `3` MP4 ×3, `4` PANORAMA ×2 on one card |
 | `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE @ marker − 12` |
 | `duration` | **Long** | video length (ms) |
 | `frameRate` | enum `VideoFrameRate` | **mapped**: `u8 @ marker − 2`; the fps rational carries the same value |

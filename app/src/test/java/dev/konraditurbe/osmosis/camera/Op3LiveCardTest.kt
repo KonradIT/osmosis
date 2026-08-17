@@ -125,9 +125,9 @@ class Op3LiveCardTest {
         assertTrue("0010 and 0012",
             panos.map { it.name.substringAfter("_0").take(3) }.toSet() == setOf("010", "012"))
 
-        assertEquals("stills", 0x00, files.first { it.name.contains("_0011_D") }.mediaType)
-        assertEquals("videos", 0x03, files.first { it.name.contains("_0001_D") }.mediaType)
+        assertEquals("MediaFileType.JPEG", 0, files.first { it.name.contains("_0011_D") }.mediaType)
+        assertEquals("MediaFileType.MP4", 3, files.first { it.name.contains("_0001_D") }.mediaType)
         assertTrue("no video is ever a panorama", files.none { it.isVideo && it.isPanorama })
-        assertEquals("six ordinary stills", 6, files.count { it.mediaType == 0x00 })
+        assertEquals("six ordinary stills", 6, files.count { it.mediaType == 0 })
     }
 }

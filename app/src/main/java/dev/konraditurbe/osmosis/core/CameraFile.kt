@@ -8,6 +8,22 @@ import dev.konraditurbe.osmosis.dcf.DcfIndex
  * Pure data: how it is actually *fetched* — `/v2` by path or `/v1` by DCF index — lives behind
  * [MediaAddressing], not here.
  */
+
+/**
+ * DJI's `MediaFileType`, the enum a record's type byte carries.
+ *
+ * Only the values the manifest has actually produced are named; the rest are in MEDIA_PROTOCOL.md
+ * (`5` TIFF, `10` AUDIO, `19` LRF, `20` THM, `21` SCR, `44` OSV, `65535` UNKNOWN) and can be added
+ * here when something decodes one.
+ */
+object MediaFileType {
+    const val JPEG = 0
+    const val DNG = 1
+    const val MOV = 2
+    const val MP4 = 3
+    const val PANORAMA = 4
+}
+
 data class CameraFile(
     val path: String,        // e.g. DCIM/DJI_001/DJI_20260329115359_0211_D.MP4
     val thumbPath: String,   // e.g. MISC/THM/DJI_001/DJI_20260329115359_0211_D.scr
@@ -61,13 +77,16 @@ data class CameraFile(
     val handleShared: Boolean = false,
 
     /**
-     * The record's media-type byte, or -1 when the record carries no type tag.
+     * DJI's `MediaFileType` for this record, or -1 where the record carries no type tag.
      *
-     * `0x00` still · `0x03` video · `0x04` panorama. It sits at `mediaPath - 15`, immediately before
-     * the constant `19 06` tag, and is the same byte the delete-handle marker reads as its "kind".
+     * `0` JPEG · `1` DNG · `2` MOV · `3` MP4 · `4` PANORAMA · `5` TIFF · `10` AUDIO · `19` LRF ·
+     * `20` THM · `21` SCR · `44` OSV · `65535` UNKNOWN — see MEDIA_PROTOCOL.md §"What a record means".
+     * Observed so far: JPEG, MP4 and PANORAMA.
      *
-     * Kept as the raw value rather than a set of booleans because only three values have ever been
-     * seen and a fourth would otherwise decode as "not a panorama" silently.
+     * It sits two bytes before the constant `19 06` tag and is the same byte the delete-handle marker
+     * reads as its "kind" — so it is present on every record, including the stills that carry no
+     * marker. Kept raw rather than as a set of booleans: the enum is longer than the values we have
+     * seen, and an unmapped one should stay visible instead of decoding as "not a panorama".
      */
     val mediaType: Int = -1,
 ) {
@@ -121,12 +140,13 @@ data class CameraFile(
     val isVideo: Boolean get() = ext in setOf("MP4", "MOV", "OSV", "INSV", "LRF", "LRV", "XRF")
 
     /**
-     * An in-camera-stitched panorama. Written as an ordinary `.JPG`, so only [mediaType] tells it apart.
+     * An in-camera-stitched panorama — `MediaFileType.PANORAMA`.
      *
-     * Established on an Osmo Pocket 3 with the camera in hand: two panoramas read `0x04` where six
-     * ordinary stills on the same card read `0x00` and three videos read `0x03`.
+     * Written as an ordinary `.JPG`, so nothing in the name or extension tells it apart and only
+     * [mediaType] can. Verified on an Osmo Pocket 3: two panoramas read `4` where six ordinary stills
+     * on the same card read `0` (JPEG) and three videos read `3` (MP4).
      */
-    val isPanorama: Boolean get() = mediaType == 0x04
+    val isPanorama: Boolean get() = mediaType == MediaFileType.PANORAMA
     val isImage: Boolean get() = ext in setOf("JPG", "JPEG", "DNG", "HEIC", "RAW")
 
     companion object {
