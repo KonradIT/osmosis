@@ -1253,6 +1253,7 @@ class CameraSession(
         if (comp.isNotEmpty()) {
             log("datalink: decoded ${comp.size} CompositePack records " +
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
+                "${comp.count { it.starred }} starred, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
             dumpManifest(bytes)
             return flagHandleCollisions(comp)
