@@ -568,16 +568,28 @@ class CameraSession(
         val enter = hex("0000000000040000000401")
         val deadline = System.nanoTime() + 2_500_000_000L
         var sent = 0
+        var silent = 0
         while (System.nanoTime() < deadline) {
             // Six of the first, then the second for the rest — the capture's own proportions.
             sendDuml(0x01, 0x01, if (sent < 6) prelude else enter,
                 receiverType = 0x01, receiverId = 0, cmdType = 0)
             sent++
-            parseStatus(recvAll(50))
+            val got = recvAll(50)
+            parseStatus(got)
             if (playbackReported == true) {
                 playbackHeld = true
                 log("datalink: playback mode held via 0x01/0x01 (after $sent frames)")
                 return true
+            }
+            // Stop if the camera has gone quiet. This is cmd_type 0 with no reply, so the state bit is
+            // the only feedback and there is nothing else to notice a departure by — without this the
+            // burst keeps firing into a camera that is powering down (its 5-minute idle timer lands
+            // mid-session readily enough), which is the last thing to be writing an unknown control
+            // command into.
+            silent = if (got.isEmpty()) silent + 1 else 0
+            if (silent >= 8) {
+                log("datalink: 0x01/0x01 — camera stopped answering after $sent frames, aborting")
+                return false
             }
         }
         log("datalink: 0x01/0x01 sent $sent frames, camera still reports capture")
