@@ -1323,7 +1323,7 @@ class CameraSession(
             val lo = if (k > 0) medias[k - 1].end else 0
             val hi = if (k + 1 < medias.size) medias[k + 1].pos else bytes.size
             val group = if (boundary > 0 && k >= boundary) 1 else 0
-            byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi).copy(group = group))
+            byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi, m.pos).copy(group = group))
         }
         return withCmdHandles(byPath.values.toList())
     }
@@ -1384,7 +1384,7 @@ class CameraSession(
      * and matching *this* base — field order varies across the line (name before path on the Nano,
      * after it on the Xtra), so association is by trailing base, not position.
      */
-    private fun resolveRecord(bytes: ByteArray, mediaDir: String, lo: Int, hi: Int): CameraFile {
+    private fun resolveRecord(bytes: ByteArray, mediaDir: String, lo: Int, hi: Int, selfPos: Int = -1): CameraFile {
         val base = mediaDir.substringAfterLast('/')      // e.g. DJI_20260721121344_0015_D_OP3
 
         // Thumbnail path: the 1a…02 field whose value ends with this base.
@@ -1426,7 +1426,17 @@ class CameraSession(
         // against Mimo manifests from a real Nano and Xtra — see PhotoHandleTest.
         var head = -1
         var m = lo
-        while (m < hi - 4) {
+        // Stop at this record's OWN media path, not at the next record's.
+        //
+        // The marker precedes the path it belongs to, and [hi] deliberately reaches into the next
+        // record so the other fields can be found. For a body whose photo records carry no marker at
+        // all — a Pocket 3 — scanning that far forward walks past the photo's path and matches the
+        // NEXT record's marker, handing the photo a video's handle. That looked like the camera
+        // reusing handles; it was us reading across a record boundary. It also cost the video: the
+        // collision guard then refuses to delete BOTH files, so a real video became undeletable
+        // because a photo borrowed its handle.
+        val markerEnd = if (selfPos in (lo + 1)..hi) selfPos else hi
+        while (m < markerEnd - 4) {
             val kind = bytes[m].toInt() and 0xFF
             val star = bytes[m + 1].toInt() and 0xFF
             if ((kind == 0x03 || kind == 0x00) && (star == 0xFF || star == 0xFE) &&
