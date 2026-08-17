@@ -1465,8 +1465,25 @@ class CameraSession(
         // against ground truth (moov/HTTP/JPEG bounds) over a controlled clip+photo set.
         var photoSize = 0L; var photoRes: String? = null
         if (!isVideo) {
+            // The `19 06` pair sits at a FIXED position — seven bytes before the record's own path
+            // field — so read it there rather than scanning for it. Scanning needs a byte to match on,
+            // and the only candidate is the one before the tag, which is `ff`/`fe` on some bodies but
+            // `f6` (still) or `c7` (panorama) on a Pocket 3. Failing to match ran the scan into the
+            // NEXT record and read its size: a photo followed by a video reported the video's byte
+            // count exactly, and a photo followed by another photo reported nothing. Same overrun as
+            // the delete handle had.
+            val fixed = selfPos - 7
+            if (selfPos >= 21 && fixed + 1 < bytes.size &&
+                bytes[fixed] == 0x19.toByte() && bytes[fixed + 1] == 0x06.toByte()
+            ) {
+                photoSize = u32le(bytes, fixed - 14)
+                if (base.startsWith("DJI_") && fixed + 66 <= bytes.size) {
+                    val w = u32le(bytes, fixed + 58).toInt(); val h = u32le(bytes, fixed + 62).toInt()
+                    if (w in 1..60000 && h in 1..60000) photoRes = "${w}x${h}"
+                }
+            }
             var q = lo
-            while (q < hi - 3) {
+            while (photoSize == 0L && q < markerEnd - 3) {
                 if ((bytes[q] == 0xFF.toByte() || bytes[q] == 0xFE.toByte()) &&
                     bytes[q + 1] == 0x19.toByte() && bytes[q + 2] == 0x06.toByte()
                 ) {

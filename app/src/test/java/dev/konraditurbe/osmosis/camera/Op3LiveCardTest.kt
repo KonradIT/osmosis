@@ -130,4 +130,32 @@ class Op3LiveCardTest {
         assertTrue("no video is ever a panorama", files.none { it.isVideo && it.isPanorama })
         assertEquals("six ordinary stills", 6, files.count { it.mediaType == 0 })
     }
+
+    /**
+     * A still reports its own byte size, not the size of the video next to it.
+     *
+     * `fileSize` hangs off the constant `19 06` tag, and the still path used to *scan* for that tag by
+     * matching the `ff`/`fe` byte in front of it. A Pocket 3 still has `f6` there (`c7` on a panorama),
+     * so the scan missed its own record and ran into the next one: a photo followed by a video reported
+     * the video's byte count exactly, and a photo followed by another photo reported nothing at all.
+     *
+     * The tag is at a fixed position — seven bytes before the record's own path field — so it is read
+     * there now and cannot overrun.
+     */
+    @Test
+    fun `a still reports its own size`() {
+        val files = decode("op3_11_panos.bin")
+        val byName = { n: String -> files.first { it.name.contains(n) } }
+
+        // The two that used to mirror the video shot beside them.
+        assertEquals(53835384L, byName("_0001_D").sizeBytes)   // video
+        assertEquals(3751936L, byName("_0002_D").sizeBytes)    // still, was reporting 53835384
+        assertEquals(69361901L, byName("_0005_D").sizeBytes)   // video
+        assertEquals(4517888L, byName("_0006_D").sizeBytes)    // still, was reporting 69361901
+
+        assertTrue("every file has a size", files.all { it.sizeBytes > 0 })
+        val videoSizes = files.filter { it.isVideo }.map { it.sizeBytes }.toSet()
+        assertTrue("no still may report a video's size",
+            files.filter { !it.isVideo }.none { it.sizeBytes in videoSizes })
+    }
 }

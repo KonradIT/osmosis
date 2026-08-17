@@ -368,7 +368,7 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 |-------|------|-------|
 | `fileName` | String | e.g. `DJI_…_D.MP4` — the `0d` field |
 | `fileType` | enum `MediaFileType` | **mapped**: `u8` two bytes before the constant `19 06` tag (`@ mediaPath − 15`) — the same byte the delete-handle marker reads as its "kind", so it is on **every** record, including stills that carry no marker. It is the only thing separating an in-camera panorama (`4`) from an ordinary JPEG (`0`): both are written as `.JPG` |
-| `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE @ marker − 12` |
+| `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE` 14 bytes before the constant `19 06` tag, i.e. `@ marker − 12` on a record that has a marker. Locate the tag at its fixed position (`@ mediaPath − 13`) rather than scanning for the `ff`/`fe` byte in front of it: that byte is `f6` on a Pocket 3 still and `c7` on a panorama, so a scan misses the record and reads the **next** one's size |
 | `duration` | **Long** | video length (ms) |
 | `frameRate` | enum `VideoFrameRate` | **mapped**: `u8 @ marker − 2`; the fps rational carries the same value |
 | `resolution` | enum `VideoResolution` | **mapped**: `u8 @ marker − 1` (table below) |
