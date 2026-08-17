@@ -517,7 +517,6 @@ class CameraSession(
             while (System.nanoTime() < deadline) {
                 val dg = recvAll(100)
                 parseStatus(dg)                       // also updates playbackReported, which decides this
-                for (f in modeReplyFrames(dg)) log("datalink: 0x02/0x0C <- $f")
                 // The CAMERA's answer decides it, not the command's. A Pocket 3 replies status 0 to
                 // this and stays in capture — screen on the live view, gimbal unfolded — so an ack
                 // means "received", nothing more. Bit 30 is the only thing that means "in playback".
@@ -530,9 +529,10 @@ class CameraSession(
                 if (reply != null) {
                     val status = reply[0].toInt() and 0xFF
                     if (status != 0x00) {
-                        log("datalink: playback REFUSED 0x%02x on attempt %d [%s]".format(
-                            status, n + 1, reply.joinToString("") { "%02x".format(it) }))
-                        break                         // don't wait out the window — re-send instead
+                        // A refusal is definitive. Re-sending a command the body does not implement
+                        // costs a second an attempt and cannot start working, so switch route now.
+                        log("datalink: playback refused (0x%02x) — trying 0x01/0x01".format(status))
+                        return enterPlaybackViaControl()
                     }
                 }
                 sendAck()
@@ -596,37 +596,6 @@ class CameraSession(
         return false
     }
 
-    /**
-     * Every `0x02/0x0C` frame in [dg] as `flags=0x.. payload=…`, for the playback log.
-     *
-     * The flags byte at `+8` is the point: it is what tells a response apart from an unsolicited push,
-     * and both [DumlTransport.scanFrames] and [findReply] drop it. Same frame validation as the former
-     * — CRC8 on the header, CRC16 on the body — so a byte pattern that merely looks like a frame is
-     * not reported as one.
-     */
-    private fun modeReplyFrames(dg: List<ByteArray>): List<String> {
-        val out = ArrayList<String>()
-        for (raw in dg) {
-            var i = 0
-            while (i + 13 <= raw.size) {
-                if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
-                val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-                if (len < 13 || i + len > raw.size) { i++; continue }
-                if (DjiCrc.computeCrc8(raw.copyOfRange(i, i + 3)) != (raw[i + 3].toInt() and 0xFF)) { i++; continue }
-                val body = raw.copyOfRange(i, i + len - 2)
-                val want = (raw[i + len - 2].toInt() and 0xFF) or ((raw[i + len - 1].toInt() and 0xFF) shl 8)
-                if (DjiCrc.computeCrc16(body) != want) { i++; continue }
-                if ((raw[i + 9].toInt() and 0xFF) == 0x02 && (raw[i + 10].toInt() and 0xFF) == 0x0C) {
-                    val pl = raw.copyOfRange(i + 11, i + len - 2)
-                    out.add("flags=0x%02x payload=%s".format(
-                        raw[i + 8].toInt() and 0xFF,
-                        if (pl.isEmpty()) "(empty)" else pl.joinToString("") { "%02x".format(it) }))
-                }
-                i++
-            }
-        }
-        return out
-    }
 
     /**
      * How long a registered session keeps accepting inline command WRITES.
