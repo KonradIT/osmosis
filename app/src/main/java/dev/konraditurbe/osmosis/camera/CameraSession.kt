@@ -502,6 +502,15 @@ class CameraSession(
      * sequence numbers and get subsequent commands rejected as out-of-window.
      */
     private fun enterPlaybackConfirmed(attempts: Int = 3): Boolean {
+        // Ask the camera before telling it anything. Playback is camera-wide and outlives our session,
+        // so after a re-registration it is usually still in it — and on a body that refuses 0x02/0x0c
+        // this saves three pointless refusals. Costs one drain when the mode really is off.
+        parseStatus(recvAll(120))
+        if (playbackReported == true) {
+            playbackHeld = true
+            log("datalink: playback mode already held (camera says so)")
+            return true
+        }
         repeat(attempts) { n ->
             sendDuml(0x02, 0x0C, hex("01010001"), receiverType = 0x01, receiverId = 0)
             val deadline = System.nanoTime() + 900_000_000L
@@ -681,10 +690,12 @@ class CameraSession(
         resetStatus()
         Thread {
             var tick = 0
-            // Usually already held: fetchFileList enters playback before the list query, because some
-            // bodies only serve a complete manifest in playback. This is the fallback for the paths
-            // that start a keep-alive without having listed (the delete flow's fresh session).
-            if (!playbackHeld) enterPlaybackConfirmed()
+            // Unconditional, and cheap when it is a no-op: [enterPlaybackConfirmed] asks the camera
+            // first and returns straight away if it is already in playback. Gating this on our own
+            // playbackHeld instead was wrong — that flag survives a re-registration, so a refreshed
+            // session (the delete flow) would have skipped entry on a body that drops the mode when
+            // the old session goes away, and written outside playback believing it held.
+            enterPlaybackConfirmed()
             while (keepAliveOn) {
                 runCatching {
                     val dg = recvAll(200)

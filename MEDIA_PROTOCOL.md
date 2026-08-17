@@ -564,9 +564,7 @@ registered — 493 and 480 times in that 49 s session — so battery and storage
 ⚠️ **Enter playback BEFORE the first list query.** Pagination has always needed it, but so does the
 first page on some bodies: a Pocket 3 still in capture declares the right file count and then serves
 only part of the records — `6 files` announced, two returned, both the oldest, after a 4 s wait for data
-that never arrived. The partial blob is worse than short, because the records it does return carry wrong
-handles: two files came back sharing one, which the collision guard then correctly refused to delete.
-In playback the same query returns all six with distinct handles. The official app also lists only after
+that never arrived. In playback the same query returns all six. The official app also lists only after
 entering playback.
 
 **Confirming the camera really entered playback:** read bit 30 of the flags word in `0x02/0x80`
