@@ -1499,8 +1499,13 @@ class CameraSession(
         // body whose stills carry no marker, and it agreed with the marker read everywhere both fired.
         val starred = starFlagBySignature(bytes, selfPos.takeIf { it >= 0 } ?: lo, hi)
             ?: starFlag(bytes, lo, hi)
-        val resolution = if (isVideo && hasMarker && head + 7 < bytes.size)
-            resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else photoRes
+        val resIndex = if (isVideo && hasMarker && head + 7 < bytes.size)
+            bytes[head + 7].toInt() and 0xFF else -1
+        val resolution = if (resIndex >= 0) resolutionForIndex(resIndex) else photoRes
+        // An unmapped code is the only thing standing between a clip and its resolution label, and
+        // until now it was invisible: the record decoded fine, the field just came out null. Name it,
+        // so one connect to a body shooting an unlisted format is enough to extend the table.
+        if (resIndex >= 0 && resolution == null) log("datalink: video format index $resIndex not mapped")
         // Media type: the byte before the constant `19 06` tag, which sits at mediaPath-13. Read only
         // when that tag is actually there, so a record shaped differently yields -1 rather than
         // whatever byte happens to precede the path. 0x00 still, 0x03 video, 0x04 panorama.
@@ -1587,6 +1592,10 @@ class CameraSession(
         45 -> "2688x1512"  // 2.7K 16:9
         95 -> "2688x2016"  // 2.7K 4:3
         103 -> "3840x2880" // 4K 4:3
+        // A named format rather than a pixel count: the camera calls this one "4K OpenGate" and its
+        // frame is 1:1, so no W×H in the 4K family describes it. Consumers must treat an entry here as
+        // a label, not as something to parse — see MediaPreviewActivity.loadVideo.
+        125 -> "4K OpenGate"
         else -> null
     }
 
