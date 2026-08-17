@@ -561,8 +561,13 @@ out of it by something outside the protocol, such as a button press on the body.
 
 **What playback does *not* gate:** status pushes (`0x02/0x80`, `0x02/0x82`) arrive unprompted once
 registered — 493 and 480 times in that 49 s session — so battery and storage need no polling either way.
-Neither does the **first** page of the media list: only pagination needs playback, so a client that shows
-just the newest 45 files can skip this section entirely.
+⚠️ **Enter playback BEFORE the first list query.** Pagination has always needed it, but so does the
+first page on some bodies: a Pocket 3 still in capture declares the right file count and then serves
+only part of the records — `6 files` announced, two returned, both the oldest, after a 4 s wait for data
+that never arrived. The partial blob is worse than short, because the records it does return carry wrong
+handles: two files came back sharing one, which the collision guard then correctly refused to delete.
+In playback the same query returns all six with distinct handles. The official app also lists only after
+entering playback.
 
 **Confirming the camera really entered playback:** read bit 30 of the flags word in `0x02/0x80`
 ([§20b](#20b-camera-state-flags-0x020x80)). Do **not** infer it from gimbal telemetry

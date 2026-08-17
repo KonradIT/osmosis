@@ -187,6 +187,19 @@ class CameraSession(
         runCatching { syncTime() }   // set the camera clock + timezone to the phone's, on every connect
         onFetchProgress?.invoke(50)
 
+        // Enter playback BEFORE asking for the list.
+        //
+        // A Pocket 3 that is still in capture declares the right file count and then serves only part
+        // of the records: `6 files (batch 0)` followed by two decoded, both the oldest, after a 4 s
+        // wait for data that never came. Once it is in playback the same query returns everything. The
+        // official app does it in this order too — playback first, list second.
+        //
+        // Safe on the bodies that do not need it: entering here is the same call the keep-alive would
+        // make a moment later, it is idempotent, and [startKeepAlive] skips it when it already holds.
+        // Runs on this thread, which is the session thread and the only one sending right now, so the
+        // sequence-interleaving rule that puts this on the keep-alive thread still holds.
+        enterPlaybackConfirmed()
+
         // No retry on an empty answer, deliberately. There WAS one, added for a log where a camera
         // handshook, streamed status and served no media across several connects — but the cause was
         // ours: the tester tapped connect three times, each tap opened a datalink while the last was
@@ -494,39 +507,71 @@ class CameraSession(
             val deadline = System.nanoTime() + 900_000_000L
             while (System.nanoTime() < deadline) {
                 val dg = recvAll(100)
-                parseStatus(dg)                       // keep the status pill fed while we wait
-                // Say what actually came back, verbatim, before deciding anything about it.
-                //
-                // A Pocket 3 sat on its live-preview screen — tester-observed — through a session this
-                // method had logged as "playback mode held" on the first attempt. So the frame we
-                // accept as the reply is not doing what we think. The candidates are a refusal status
-                // we were not reading, an accepted command the body ignores, or a frame that is not the
-                // reply at all: [findReply] matches on cmdSet/cmdId only and never looks at the flags
-                // byte, so an unsolicited push of the same pair satisfies it. One line of ground truth
-                // separates those; three rounds of inference did not.
+                parseStatus(dg)                       // also updates playbackReported, which decides this
                 for (f in modeReplyFrames(dg)) log("datalink: 0x02/0x0C <- $f")
+                // The CAMERA's answer decides it, not the command's. A Pocket 3 replies status 0 to
+                // this and stays in capture — screen on the live view, gimbal unfolded — so an ack
+                // means "received", nothing more. Bit 30 is the only thing that means "in playback".
+                if (playbackReported == true) {
+                    playbackHeld = true
+                    log("datalink: playback mode held" + if (n > 0) " (confirmed on attempt ${n + 1})" else "")
+                    return true
+                }
                 val reply = findReply(dg, 0x02, 0x0C)
                 if (reply != null) {
-                    // Accept on status 0 only. Behaviour is otherwise unchanged: the Nano, Xtra and
-                    // Pocket 4 all confirm playback correctly today, and tightening the match on a
-                    // guess would risk them to fix a body we cannot yet explain.
                     val status = reply[0].toInt() and 0xFF
-                    if (status == 0x00) {
-                        playbackHeld = true
-                        log("datalink: playback mode held" +
-                            if (n > 0) " (confirmed on attempt ${n + 1})" else "")
-                        return true
+                    if (status != 0x00) {
+                        log("datalink: playback REFUSED 0x%02x on attempt %d [%s]".format(
+                            status, n + 1, reply.joinToString("") { "%02x".format(it) }))
+                        break                         // don't wait out the window — re-send instead
                     }
-                    log("datalink: playback REFUSED 0x%02x on attempt %d [%s]".format(
-                        status, n + 1, reply.joinToString("") { "%02x".format(it) }))
-                    break                             // don't wait out the window — re-send instead
                 }
                 sendAck()
             }
         }
+        // 0x02/0x0c did not move the camera. Try the other route before giving up.
+        if (enterPlaybackViaControl()) return true
         // Not fatal — the browse still works, but the camera stays in capture (gimbal unfolded, and it
         // can still be recording), so say so rather than pretend we hold it.
         log("datalink: playback mode NOT confirmed after $attempts attempts — camera may still be in capture")
+        return false
+    }
+
+    /**
+     * The Pocket 3's playback entry: `0x01/0x01` (`SPECIAL Control`), not `0x02/0x0c`.
+     *
+     * Replayed from a labelled capture of the official app on a Pocket 3 (2026-08-17), where
+     * `0x02/0x0c` does not appear once in 128 s. Two payloads go out at ~20 Hz across 1.35 s and the
+     * camera's playback bit sets 358 ms into the second; nothing else in that capture uses cmdset
+     * `0x01`. `cmd_type 0x00` and no reply, so there is nothing to wait for — [playbackReported] is
+     * the only signal, which is exactly why this is safe to attempt on any body: a camera that ignores
+     * it leaves the bit alone and we report not-held, the same as before.
+     *
+     * The two payloads differ in byte 0 (`03`→`00`) and byte 9 (`07`→`04`). Which one carries the mode
+     * is unknown, so both are sent verbatim in the captured order rather than reduced to a guess.
+     *
+     * No exit counterpart: the capture never left playback, so there is nothing to replay for it.
+     * Teardown still sends `0x02/0x0c 01010000`, which a Pocket 3 ignores as harmlessly as the enter.
+     */
+    private fun enterPlaybackViaControl(): Boolean {
+        log("datalink: 0x02/0x0C did not move the camera — trying 0x01/0x01 (the Pocket 3 route)")
+        val prelude = hex("0300000000040000000701")
+        val enter = hex("0000000000040000000401")
+        val deadline = System.nanoTime() + 2_500_000_000L
+        var sent = 0
+        while (System.nanoTime() < deadline) {
+            // Six of the first, then the second for the rest — the capture's own proportions.
+            sendDuml(0x01, 0x01, if (sent < 6) prelude else enter,
+                receiverType = 0x01, receiverId = 0, cmdType = 0)
+            sent++
+            parseStatus(recvAll(50))
+            if (playbackReported == true) {
+                playbackHeld = true
+                log("datalink: playback mode held via 0x01/0x01 (after $sent frames)")
+                return true
+            }
+        }
+        log("datalink: 0x01/0x01 sent $sent frames, camera still reports capture")
         return false
     }
 
@@ -636,7 +681,10 @@ class CameraSession(
         resetStatus()
         Thread {
             var tick = 0
-            enterPlaybackConfirmed()
+            // Usually already held: fetchFileList enters playback before the list query, because some
+            // bodies only serve a complete manifest in playback. This is the fallback for the paths
+            // that start a keep-alive without having listed (the delete flow's fresh session).
+            if (!playbackHeld) enterPlaybackConfirmed()
             while (keepAliveOn) {
                 runCatching {
                     val dg = recvAll(200)
