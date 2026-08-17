@@ -714,12 +714,13 @@ Once the link is up the camera answers *every* request, so the **reply byte is a
 
 ### 11. Start recording
 - Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[01]`
-- Reply `00`; recording starts ~860 ms later (the `0x02/0x80` recording bit sets — [§18](#18-camera-status)).
+- Reply `00`, then the `0x02/0x80` recording bit sets ([§18](#18-camera-status)). **Timing is per body** — a Nano takes ~860 ms from request to recording, a Pocket 3 ~600 ms (ack in 380–550 ms, bit set ~200 ms after that) — so wait on the bit, never on a fixed delay.
+- On a Pocket 3 the state byte passes through `41` (bit 6) before reaching `81` (bit 7 = recording), so a client testing `== 0x81` sees the start correctly while one testing "any change" fires early on a camera still spinning up.
 - DUML example: <https://b3yond.d3vl.com/duml/#550e046602010204400202014e61>
 
 ### 12. Stop recording
 - Cmd Set / ID: `0x02` / `0x02`  ·  `cmd_type 0x40`  ·  payload `[00]`
-- Reply `00`; the recording bit clears ~2.4 s later. **Not a toggle** — re-sending `[01]` while recording answers `df`, so drive start/stop off the decoded recording bit ([§18](#18-camera-status)), never by toggling blind.
+- Reply `00`; the recording bit then clears — ~2.4 s on a Nano, ~700 ms on a Pocket 3 (ack in 10–20 ms, state byte `c1` while the file is finalised, then back to `01`). **Not a toggle** — re-sending `[01]` while recording answers `df`, so drive start/stop off the decoded recording bit ([§18](#18-camera-status)), never by toggling blind.
 - DUML example: <https://b3yond.d3vl.com/duml/#550e04660201020440020200c770>
 
 > ⚠️ **Control does not work on Xtra over BLE**
