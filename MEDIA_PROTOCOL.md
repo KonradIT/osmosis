@@ -767,8 +767,10 @@ is unknown, so send both in this order rather than one derived frame.
 - **This is per model.** The Nano and Xtra enter playback on `0x02/0x0c` normally, their bit setting
   ~200 ms after the reply. Try `0x02/0x0c` first, fall through to this when the bit does not set, and
   decide on the bit either way rather than on the model.
-- **There is no exit.** The camera returns to capture by itself when the link drops, and sending
-  `0x02/0x0c 01010000` on teardown is refused harmlessly.
+- **There is no exit command.** The camera returns to capture on its own a few seconds after the link
+  drops. `0x02/0x0c 01010000` is refused harmlessly on teardown, and replaying payload 1 does **not**
+  leave playback — the state bit stays set through two seconds of it, so that payload is a prelude to
+  the switch rather than the mode being left.
 
 ### 14. Camera parameters
 
