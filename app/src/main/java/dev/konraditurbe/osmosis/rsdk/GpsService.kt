@@ -46,6 +46,8 @@ class GpsService : Service(), RsdkController.Listener {
     private var lastFixMs = 0L
     private var satellites = 0
     private var status: RsdkProtocol.CameraStatus? = null
+    /** The text mode from a `0x1D/0x06` push, on bodies that report it that way instead. */
+    private var modeInfo: RsdkProtocol.ModeInfo? = null
     private var connected = false
 
     private var pushes = 0
@@ -82,10 +84,10 @@ class GpsService : Service(), RsdkController.Listener {
                 // (or a dead BLE write) is diagnosable from logcat without leaking coordinates.
                 if (ok != lastWriteOk || pushes % 15 == 0) {
                     val age = System.currentTimeMillis() - loc.time
-                    // `stamped` is exactly the wall-clock written into the video: it comes from the
-                    // FIX's own timestamp, so a stale fix would also back-date the recording (that's
-                    // what produced a 1 h-behind gpsTime). With freshFix() it tracks real time.
-                    val stamped = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(loc.time))
+                    // `stamped` is the wall-clock written into the video — now, per [buildGpsFrame],
+                    // so it keeps advancing while a stale fix repeats. `fixAge` beside it is what says
+                    // how old the *position* under that timestamp is.
+                    val stamped = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
                     log("GPS: pushes=$pushes fixAge=${age}ms sats=$satellites stamped=$stamped write=${if (ok) "ok" else "FAILED"}")
                 }
                 lastWriteOk = ok
@@ -185,6 +187,11 @@ class GpsService : Service(), RsdkController.Listener {
         updateNotification()
     }
     override fun onStatus(s: RsdkProtocol.CameraStatus) { status = s; updateNotification() }
+    override fun onModeInfo(info: RsdkProtocol.ModeInfo) {
+        if (info != modeInfo) log("R-SDK: camera mode is ${info.label}")
+        modeInfo = info
+        updateNotification()
+    }
     override fun onDisconnected() { if (connected) { connected = false; stop() } }
     override fun onFailed(reason: String) { log("GPS: $reason"); stop() }
 
@@ -207,7 +214,18 @@ class GpsService : Service(), RsdkController.Listener {
 
     private fun buildGpsFrame(loc: Location): ByteArray {
         logTimeZoneOnce()
-        val cal = Calendar.getInstance().apply { timeInMillis = loc.time }
+        // Stamp **now**, not the fix's own timestamp.
+        //
+        // The camera writes this value into the video's telemetry track verbatim, once per sample, so
+        // when the phone's fix stops updating — indoors, routinely — restamping the fix's time freezes
+        // the recording's clock as well as its position. Two clips off an Action 6 came back with 119
+        // and 63 samples all carrying a single identical timestamp, which is worse than a slightly
+        // aged position: a frozen clock makes the whole track undatable, while a position up to
+        // [PUSH_MAX_AGE_MS] old is what a GPS receiver would report anyway between fixes.
+        //
+        // When the fix is fresh the two are the same value; [freshFix] still decides whether the
+        // position is fit to send at all, and the log carries the age so staleness stays visible.
+        val cal = Calendar.getInstance()
         val ymd = (cal.get(Calendar.YEAR)) * 10000 + (cal.get(Calendar.MONTH) + 1) * 100 + cal.get(Calendar.DAY_OF_MONTH)
         val hms = cal.get(Calendar.HOUR_OF_DAY) * 10000 + cal.get(Calendar.MINUTE) * 100 + cal.get(Calendar.SECOND)
         // Split scalar speed + bearing into N/E components (cm/s); phone has no vertical velocity.
@@ -234,7 +252,9 @@ class GpsService : Service(), RsdkController.Listener {
     }
 
     private fun buildNotification(): Notification {
-        val mode = status?.modeName
+        // Prefer the text push: where a camera sends both, it is the camera's own wording, and where it
+        // sends only 0x1D/0x06 (Action 6) it is the only mode there is.
+        val mode = modeInfo?.label ?: status?.modeName
             ?: if (connected) "—" else getString(R.string.gps_notif_connecting)
         val rec = getString(if (status?.recording == true) R.string.gps_notif_rec_yes else R.string.gps_notif_rec_no)
         val gps = getString(if (gpsHealthy()) R.string.gps_notif_healthy else R.string.gps_notif_not_healthy)

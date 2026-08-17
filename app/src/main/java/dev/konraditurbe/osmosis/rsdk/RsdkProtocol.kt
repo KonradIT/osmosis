@@ -59,6 +59,7 @@ object RsdkProtocol {
     const val ID_STATUS_PUSH = 0x02
     const val ID_RECORD_CTRL = 0x03
     const val ID_STATUS_SUB = 0x05
+    const val ID_STATUS_PUSH_NEW = 0x06   // DJI's `new_camera_status_push` — mode as text
 
     /** Wrap a DATA payload (after CmdSet/CmdID) in a full R-SDK frame. */
     fun frame(cmdSet: Int, cmdId: Int, cmdType: Int, payload: ByteArray, seq: Int): ByteArray {
@@ -178,6 +179,36 @@ object RsdkProtocol {
             resolution = p[2].toInt() and 0xFF, fps = p[3].toInt() and 0xFF,
             recordTimeS = recordTime, battery = battery,
         )
+    }
+
+    /**
+     * The camera's mode as **text**, off a `0x1D/0x06` push — DJI's `new_camera_status_push`.
+     *
+     * A newer body reports its mode this way instead of (or as well as) the numeric `0x1D/0x02`
+     * struct: a name ("VIDEO") and a parameter line ("4K30"), each a length-prefixed ASCII field in a
+     * fixed 46-byte frame. Nothing in it says whether the camera is recording, so [CameraStatus] is
+     * still the only source for that.
+     */
+    data class ModeInfo(val name: String, val param: String) {
+        /** "VIDEO · 4K30", or just the name when the camera sends no parameter line. */
+        val label: String get() = if (param.isEmpty()) name else "$name · $param"
+    }
+
+    /**
+     * Parse `new_camera_status_push_command_frame` (`0x1D/0x06`), 46 B:
+     * `[01][nameLen][name:21][02][paramLen][param:21]`.
+     *
+     * The two type bytes are fixed, so they are checked rather than skipped — a frame that doesn't
+     * carry them is a different layout and reading strings out of it would produce plausible garbage.
+     */
+    fun parseNewCameraStatus(p: ByteArray): ModeInfo? {
+        if (p.size < 46) return null
+        if ((p[0].toInt() and 0xFF) != 0x01 || (p[23].toInt() and 0xFF) != 0x02) return null
+        fun str(at: Int, len: Int): String {
+            val n = len.coerceIn(0, 21)
+            return String(p, at, n, Charsets.US_ASCII).trimEnd('\u0000').trim()
+        }
+        return ModeInfo(str(2, p[1].toInt() and 0xFF), str(25, p[24].toInt() and 0xFF))
     }
 
     private val MODE_NAMES = mapOf(

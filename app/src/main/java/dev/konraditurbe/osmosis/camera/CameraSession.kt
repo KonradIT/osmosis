@@ -1477,7 +1477,15 @@ class CameraSession(
         // Media byte size = u32-LE at head-4 (marker-12) for video; photos read it off their own marker
         // (above). Ground-truth-verified byte-exact against the SD card (video) and HTTP (photo).
         val size = if (isVideo && hasMarker && head >= 4) u32le(bytes, head - 4) else photoSize
-        val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, hi) else null
+        // Bounded at the NEXT record's head, for the same reason the handle scan is bounded:
+        // [fpsInRange] keeps the LAST rational it finds and [hi] reaches into the next record, so a
+        // clip whose neighbour was shot at a different frame rate reported the neighbour's rate.
+        //
+        // The ceiling has to be the next head rather than this record's own path, because the two
+        // field orders disagree about where the path sits: the DJI_ family writes
+        // `head · enum block · filename · media path`, the CAM_ family `head · media path · enum
+        // block · filename`. Only "somewhere before the next record starts" is true of both.
+        val fps = if (isVideo && hasMarker) fpsInRange(bytes, head, nextHead(bytes, head, hi)) else null
         // Video duration in whole seconds = u16-LE at **marker-4** (= head+4), immediately before the
         // frameRate/resolution codes: `… [dur:u16-LE][fps:u8][res:u8] 03 ff 19 06 …`. Universal —
         // ground-truthed 16/16 on the Nano and 3/3 on the Xtra (incl. a 75 s clip). NB the Nano also
@@ -1491,8 +1499,13 @@ class CameraSession(
         // body whose stills carry no marker, and it agreed with the marker read everywhere both fired.
         val starred = starFlagBySignature(bytes, selfPos.takeIf { it >= 0 } ?: lo, hi)
             ?: starFlag(bytes, lo, hi)
-        val resolution = if (isVideo && hasMarker && head + 7 < bytes.size)
-            resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else photoRes
+        val resIndex = if (isVideo && hasMarker && head + 7 < bytes.size)
+            bytes[head + 7].toInt() and 0xFF else -1
+        val resolution = if (resIndex >= 0) resolutionForIndex(resIndex) else photoRes
+        // An unmapped code is the only thing standing between a clip and its resolution label, and
+        // until now it was invisible: the record decoded fine, the field just came out null. Name it,
+        // so one connect to a body shooting an unlisted format is enough to extend the table.
+        if (resIndex >= 0 && resolution == null) log("datalink: video format index $resIndex not mapped")
         // Media type: the byte before the constant `19 06` tag, which sits at mediaPath-13. Read only
         // when that tag is actually there, so a record shaped differently yields -1 rather than
         // whatever byte happens to precede the path. 0x00 still, 0x03 video, 0x04 panorama.
@@ -1579,6 +1592,7 @@ class CameraSession(
         45 -> "2688x1512"  // 2.7K 16:9
         95 -> "2688x2016"  // 2.7K 4:3
         103 -> "3840x2880" // 4K 4:3
+        125 -> "3840x3840" // 4K 1:1 aka OpenGate
         else -> null
     }
 
@@ -1667,6 +1681,26 @@ class CameraSession(
         val idx = indexOf(bytes, fileName.toByteArray(Charsets.ISO_8859_1))
         if (idx < 0) return null
         return fpsInRange(bytes, idx - 220, idx)
+    }
+
+    /**
+     * Where the record after the one at [head] begins, or [hi] if there is no other in range.
+     *
+     * The record marker `[00|03][ff|fe] 19 06` sits at `head + 8`, so the next occurrence of it marks
+     * the next record — the only boundary that holds whichever order a body writes its fields in.
+     */
+    private fun nextHead(bytes: ByteArray, head: Int, hi: Int): Int {
+        var m = head + 9                                    // past this record's own marker
+        val stop = minOf(hi, bytes.size) - 4
+        while (m < stop) {
+            val kind = bytes[m].toInt() and 0xFF
+            val star = bytes[m + 1].toInt() and 0xFF
+            if ((kind == 0x03 || kind == 0x00) && (star == 0xFF || star == 0xFE) &&
+                bytes[m + 2] == 0x19.toByte() && bytes[m + 3] == 0x06.toByte()
+            ) return m - 8
+            m++
+        }
+        return hi
     }
 
     /** Scan [start,end) for the fps rational (num/den, den ∈ {1000,1001}); takes the last match, which

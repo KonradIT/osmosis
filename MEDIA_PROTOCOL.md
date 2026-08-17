@@ -87,7 +87,7 @@ Where a body behaves differently from the rest of the line:
 | Osmo Pocket 4 Pro | `DCIM/DJI_001/DJI_…` | `0x00100000` / `0x40` ⚠️ | ⚠️ 45 → **0**, 1 → **1** | `(unconfirmed)` | `(unconfirmed)` |
 | Osmo Action 5 Pro | `DCIM/DJI_001/DJI_…_D` | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.LRF` | `(unconfirmed)` |
 | Xtra Edge Pro | `DCIM/CAM_001/CAM_…_D` | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.XRF` | ❌ `44`/`48` — a length |
-| Osmo Action 6 | `DCIM/DJI_001/DJI_…` | `0x4010xxxx` | internal (only store) → **1** | `(unconfirmed)` | `(unconfirmed)` |
+| Osmo Action 6 | `DCIM/DJI_001/DJI_…_D` | SD `0x00100000`, internal `0x40100000`, step `0x40` | SD → **0**, internal → **1** | `.LRF` | ✅ real flag, `0`/`1` |
 | Osmo Pocket 3 | `DCIM/DJI_001/DJI_…_D` | videos `0x00040000` / `0x10`; **stills carry none** | microSD (only store) → **0** | `.LRF` | ❌ not at `@+9` — see the star signature below |
 
 - **Path-addressed bodies only.** Index-addressed devices have no paths, handles or stores to tabulate:
@@ -102,8 +102,12 @@ Where a body behaves differently from the rest of the line:
 - **Naming does not identify the family.** Only the Xtra rebrand writes `CAM_…`; genuine Action and
   Pocket bodies all write `DJI_…`. Custom Folder/File prefixes decode identically
   ([§1](#1-get-media-list)), so never parse a name to decide anything.
-- The **manifest count header reads `0` on the Action 5 and 6** — count records instead. Nano, Xtra,
-  Pocket 3 and Pocket 4 all write a true count.
+- The **manifest count header reads `0` on the Action 5 Pro** — count records instead. Nano, Xtra,
+  Action 6, Pocket 3 and Pocket 4 all write a true count, per list.
+- **A two-store body sends one list per store**, each with its own header and its own handle base, so
+  which store a file lives on is known from the manifest alone — no HTTP probe, and no assuming the
+  first file's store applies to the rest. The same file *number* can exist in both lists (`0001` on the
+  card and `0001` on the built-in store), so nothing may key off the name; only the handle separates them.
 
 ### Storage frame and power, per body
 
@@ -112,7 +116,7 @@ Where a body behaves differently from the rest of the line:
 | Osmo Nano | 22 B, `stores=1` | ⚠️ can report `0/0` with a card in and files on internal |
 | Osmo Pocket 3 | 22 B, `stores=1` | the 22 B body is why the decode gate is `>= 22`, not `>= 32` |
 | Xtra Edge Pro / A5P | **40 B**, `stores=2` | e.g. `60776/58151` SD + `48980/44807` built-in |
-| Osmo Action 6 | `(unconfirmed)` | `@6/@10` = `121785/109748` MiB, matching its own screen |
+| Osmo Action 6 | **40 B**, `stores=2` | e.g. `121811/121630` card + `51229/51179` built-in; the card block matches its own screen |
 | Osmo Pocket 4 | **40 B**, `stores=2` | two-store body **even with no card** — first block reads `0/0` |
 
 - **Dock and charging bytes (`@27`, `@32`) were mapped on a Nano and are not portable.** A Pocket 4
@@ -250,15 +254,39 @@ Each record carries a **marker** the header fields hang off: **videos `03 ff 19 
 | media path | `1a … 00 00 00 01` value | `DCIM/<folder>/<base>`, no extension |
 | thumb path | `1a … 00 00 00 02` value | `MISC/THM/<folder>/<base>` |
 | extension  | `0d` filename field | the only field carrying `.MP4`/`.JPG`/… |
-| delete handle | `u32-LE @ head` (`head = marker − 8`) | **video only**; feeds `0x00/0x28` ([§2](#2-delete-media)); `0` = photo, not deletable |
+| delete handle | `u32-LE @ head` (`head = marker − 8`) | feeds `0x00/0x28` ([§2](#2-delete-media)); stills carry one too wherever they carry a marker — a Pocket 3's do not, and are the only records with no handle |
 | **media byte size** | **`u32-LE`, 14 B before the `19 06` pair** (= video `marker − 12`) | real file size, **video *and* photo** |
 | proxy (`.LRF`) size | `u32-LE @ marker + 30` | the low-res sidecar's size |
-| fps | rational `<u32 num><u32 den>` near the record | `a861 0000 e803 0000` = 25000/1000 = **25 fps** — what the parser reads |
+| fps | rational `<u32 num><u32 den>`, in the record's enum block | `a861 0000 e803 0000` = 25000/1000 = **25 fps**; `3075 0000 e903 0000` = 30000/1001 = **29.97**. Written twice in a row; `den` ∈ {1000, 1001}. Search must stop at the next record's head — see below |
 | frameRate | `u8 @ marker − 2` | the `VideoFrameRate` enum for the same value (table below) |
 | resolution *(video)* | `u8 @ marker − 1` | video-format index → pixel size (table below) |
 | **duration *(video)*** | **`u16-LE @ marker − 4`** (= `head + 4`) | whole **seconds**; = `floor(moov ms / 1000)`. |
 | **width, height *(photo)*** | **`u32-LE`, `+58` / `+62` from the `19 06` pair** | photo pixel dimensions (videos have none here — they use the resolution enum) |
-| ⭐ starTag | `u8 @ [ff\|fe] 19 06 + 9` | favourite flag — **Nano only**; test `== 1`, never `!= 0` (see below) |
+| ⭐ starTag | `u8 @ [ff\|fe] 19 06 + 9` | favourite flag — **Nano and Action 6**; test `== 1`, never `!= 0` (see below) |
+
+##### Field order differs between bodies — bound every scan at the record
+
+Two orders are in use, and neither the media path nor the filename is at a fixed distance from the
+marker in both:
+
+```
+head · enum block · filename · media path · thumb path      # Action 6
+head · media path · thumb path · enum block · filename      # Xtra / Action 5 Pro (CAM_ family)
+```
+
+Consequences for any parser that *searches* for a field rather than indexing it:
+
+- **Bound the search at the next record's head, not at the record's own path.** The head is the one
+  landmark both orders agree on: the marker `[00|03][ff|fe] 19 06` at `head + 8` starts every record.
+  A window that runs to the next path is right on one family and wrong on the other; a window that
+  simply overshoots reads the *neighbouring* file's value, which is far worse than reading nothing —
+  the field is populated and plausible, just belonging to another file. A clip beside one shot at a
+  different frame rate is the case that exposes it.
+- **The `19 06` tag is at `mediaPath − 13` only where the media path follows the marker directly**
+  (Pocket 3). Locate it from the marker wherever a marker exists, and fall back to the fixed position
+  for bodies whose stills carry none.
+- Records are **not** fixed-width, and not all bodies write the same fields, so record boundaries come
+  from the markers, never from a stride.
 
 ##### Two stores answered separately and labelled for free
 
@@ -367,8 +395,8 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 | field | type | notes |
 |-------|------|-------|
 | `fileName` | String | e.g. `DJI_…_D.MP4` — the `0d` field |
-| `fileType` | enum `MediaFileType` | **mapped**: `u8` two bytes before the constant `19 06` tag (`@ mediaPath − 15`) — the same byte the delete-handle marker reads as its "kind", so it is on **every** record, including stills that carry no marker. It is the only thing separating an in-camera panorama (`4`) from an ordinary JPEG (`0`): both are written as `.JPG` |
-| `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE` 14 bytes before the constant `19 06` tag, i.e. `@ marker − 12` on a record that has a marker. Locate the tag at its fixed position (`@ mediaPath − 13`) rather than scanning for the `ff`/`fe` byte in front of it: that byte is `f6` on a Pocket 3 still and `c7` on a panorama, so a scan misses the record and reads the **next** one's size |
+| `fileType` | enum `MediaFileType` | **mapped**: `u8` two bytes before the constant `19 06` tag — the same byte the delete-handle marker reads as its "kind". It is the only thing separating an in-camera panorama (`4`) from an ordinary JPEG (`0`), both of which are written as `.JPG`. Reachable at `@ mediaPath − 15` only where the media path follows the marker (Pocket 3); where the filename field sits in between (Action 6) that offset holds other bytes, so read it from the marker or report unknown — never from the offset alone |
+| `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE` 14 bytes before the constant `19 06` tag, i.e. `@ marker − 12` on a record that has a marker. Do **not** find the tag by scanning for the `ff`/`fe` byte in front of it: that byte is `f6` on a Pocket 3 still and `c7` on a panorama, so the scan misses the record and reads the **next** one's size. Anchor on the marker, or — for stills that carry no marker — on the fixed `@ mediaPath − 13` |
 | `duration` | **Long** | video length (ms) |
 | `frameRate` | enum `VideoFrameRate` | **mapped**: `u8 @ marker − 2`; the fps rational carries the same value |
 | `resolution` | enum `VideoResolution` | **mapped**: `u8 @ marker − 1` (table below) |
@@ -383,18 +411,22 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 
 
 **Star / Heart / Favorite** — the byte at `[ff|fe] 19 06` + 9 is DJI's `MediaFileStarTag`: `0 = NONE`,
-`1 = TAGGED`. **Read it strictly as `== 1`.** On the Nano it is a real flag — `nano_delete.bin` splits
-**19 unstarred / 26 starred** — but on the Action family that byte is a *length* and never 0 or 1:
+`1 = TAGGED`. **Read it strictly as `== 1`.** On the Nano and the Action 6 it is a real flag; on the
+`CAM_` family (Xtra / Action 5 Pro) the same offset lands on a path *length* and is never 0 or 1,
+because those records order their fields differently:
 
 | fixture | camera | byte @ +9 |
 |---|---|---|
 | `nano_delete.bin` | Nano | `0` ×19, `1` ×26 — the flag |
 | `nano_45.bin` | Nano | `0` ×45 (captured before anything was favourited) |
+| `oa6_sd_3.bin` | Action 6, card | `0` ×2, `1` ×1 — the flag, and the `1` is a **still** |
+| `oa6_internal_2.bin` | Action 6, built-in | `0` ×1, `1` ×1 — the flag, and the `1` is a **video** |
 | `xtra_13.bin` | Xtra Edge Pro | `44` ×13 |
 | `xtra_delete.bin` | Xtra Edge Pro | `44` ×41, `48` ×4 |
 | `op3_15.bin` | Pocket 3 | `48` ×15 — a length, not the flag |
 
-A `!= 0` test therefore marks **every** file on an Action-family body as starred.
+A `!= 0` test therefore marks **every** file on a `CAM_`-family body as starred. Model name is no
+guide to which case applies — the Action 6 reads as a flag where the Action 5 Pro reads as a length.
 
 **On a Pocket 3 the flag is not marker-relative at all**, and cannot be: its **stills carry no marker**,
 so a favourited photo is unreachable from `+9` at any offset. It is instead a `00`/`01` byte immediately
@@ -405,9 +437,15 @@ following a fixed 12-byte signature —
 ```
 
 — which occurs exactly once per record, after that record's own media path, for **every** media type.
-Reading it there tracks the camera's own gallery for stills and videos alike. Prefer this where the
-signature is present and fall back to `+9` otherwise; writing a favourite works on every body
-regardless ([§3](#3-favorite--star-media)).
+Reading it there tracks the camera's own gallery for stills and videos alike.
+
+**Prefer the signature where it matches, and fall back to `+9` otherwise.** The two reads do not
+conflict: the twelfth byte is `03` only on the body that keeps the flag there, so on an Action 6 —
+whose records carry `1b 0a 00 00 00 02 02 01 14 02 15 00` — the signature does not match, the fallback
+fires, and `+9` is the correct answer for both a favourited still and a favourited video. Match the
+full twelve bytes; a shortened signature matches on bodies where the following byte is not the flag and
+reports everything as unfavourited. Writing a favourite works on every body regardless
+([§3](#3-favorite--star-media)).
 
 **frameRate** (`marker−2`) — `VideoFrameRate`:
 
@@ -475,6 +513,12 @@ regardless ([§3](#3-favorite--star-media)).
 | `45` | 2688×1512 (2.7K 16:9) |
 | `95` | 2688×2016 (2.7K 4:3) |
 | `103` | 3840×2880 (4K 4:3) |
+| `125` | 3840×3840 (**4K OpenGate**, 1:1 full sensor) |
+
+`125` is the only **square** entry — 3840×3840, measured off the file (HEVC @ 29.97), which is the full
+sensor read out at 1:1 and what DJI's UI calls "OpenGate". Its `.LRF` proxy is square too (720×720,
+against 1280×720 for 4K 16:9), so the aspect is known before fetching anything. Bitrate runs far above
+the neighbouring modes: ~96 Mbit/s, 127 MB for 10 s, against 42 MB for 9 s of 4K 16:9.
 
 
 **Parsed — index-based** (older Osmo Action 1/2/3): header `[u32-LE count][u32-LE total_size]`, then fixed **65 B** records, **no path strings** (files keyed by numeric `FileIndex`):
@@ -492,7 +536,10 @@ regardless ([§3](#3-favorite--star-media)).
 - Payload: `[count:u8][handle:u32-LE × count][count:u32-LE] 00 [count:u32-LE] 01 01 00 00`  — delete 1 file `h`: `01 <h> 01000000 00 01000000 01010000`
 - `handle` = per-file object id from the manifest record head (below); the trailing `00 … 01 01 00 00` is a storage selector, verbatim from the capture.
 - Response: `0x00/0x28` → `0000` = OK  ·  `00d6` = no such handle
-- **Handle** — u32-LE at the record head, located by anchoring on the constant record marker `03 ff 19 06` (at head + 8, so `handle = u32 @ marker − 8`). Nano (361 B records) `0x40100000 + seq × 0x40`; the Action family — Xtra Edge Pro, Action 5/6, Pocket 3 (272 B records) — `base + seq × 0x10`, base `0x40040000` internal / `0x00040000` SD. **Fit base and step from the handles the manifest already exposes** rather than hardcoding either: both are per camera *and* per store. Anchoring on the marker is also what makes this safe — searching for a `0x40`-aligned dword finds the right value on a Nano and the wrong one on an Xtra, which the camera rejects with `0xd6`. (Naming doesn't track the family: only the Xtra rebrand writes `CAM_…`, while genuine Action/Pocket units use `DJI_…`.) Photo records lack the marker → non-deletable (fail-safe).
+- **Handle** — u32-LE at the record head, located by anchoring on the constant record marker `03 ff 19 06` (at head + 8, so `handle = u32 @ marker − 8`). Nano (361 B records) `0x40100000 + seq × 0x40`; the Action family — Xtra Edge Pro, Action 5/6, Pocket 3 (272 B records) — `base + seq × 0x10`, base `0x40040000` internal / `0x00040000` SD. **Fit base and step from the handles the manifest already exposes** rather than hardcoding either: both are per camera *and* per store. Anchoring on the marker is also what makes this safe — searching for a `0x40`-aligned dword finds the right value on a Nano and the wrong one on an Xtra, which the camera rejects with `0xd6`. (Naming doesn't track the family: only the Xtra rebrand writes `CAM_…`, while genuine Action/Pocket units use `DJI_…`.) **Stills are deletable wherever their records carry a marker** — an Action 6 photo deletes by handle exactly as a clip does. Only a Pocket 3 still has no marker, and therefore no handle, and must be treated as non-deletable (fail-safe) rather than given a neighbour's.
+- **A favourite does not protect a file** — a starred still deletes with `0000` like any other. Nothing on the wire refuses a delete on that basis, so a client that wants a guard has to implement it.
+- **The camera's own storage report is a free confirmation.** Free space in `0x02/0xdc` ([§20](#20-storage-status)) moves by the deleted file's size within a second or two, so a client can verify the *intended* file went without re-listing the manifest — useful because `0x00/0x28` addresses by handle, so deleting the wrong file also returns `0000`.
+- **Cost**: about a second from request to `0000` on an Action 6. A delete issued on a session older than the write window costs a re-registration first (handshake + register ≈ 4 s), which is the visible delay, not the delete.
 - ⚠️ **Reject duplicate handles.** A fitted base/step can collide when a manifest mixes stores or a record decodes short. Since the delete is irreversible, treat a handle held by more than one file as non-deletable for *all* of them rather than choosing between them.
 - **Session** — a *write*: it lands inline on the live browse session when the `ackSeq` is correct (see *Datalink transport / sequencing*), else send it in a freshly-registered session (handshake → register → subscribe). Reads answer either way; only writes drop on a wrong `ackSeq`.
 - DUML example (delete handle `0x40104480`): <https://b3yond.d3vl.com/duml/#551f044e020100a0400028018044104001000000000100000001010000a0d1>
