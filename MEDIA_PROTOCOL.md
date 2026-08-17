@@ -513,13 +513,13 @@ reports everything as unfavourited. Writing a favourite works on every body rega
 | `45` | 2688×1512 (2.7K 16:9) |
 | `95` | 2688×2016 (2.7K 4:3) |
 | `103` | 3840×2880 (4K 4:3) |
-| `125` | **4K OpenGate** — a 1:1 full-sensor frame the camera names rather than sizes |
+| `125` | 3840×3840 (**4K OpenGate**, 1:1 full sensor) |
 
-`125` is not a pixel pair: the camera's own UI calls it "4K OpenGate", and its `.LRF` proxy is square
-(720×720 against 1280×720 for 4K 16:9). Anything mapping this table to `W×H` needs a path for a format
-that has a name instead — inventing a 4K-family pixel size for it puts a wrong number in front of the
-user. Its bitrate is far above the neighbouring modes: 127 MB for 10 s (~101 Mbit/s) against 42 MB for
-9 s of 4K 16:9.
+`125` is the one entry whose pixel pair is not what a user is shown. The frame is **square** — measured
+off the file, HEVC 3840×3840 @ 29.97 — so "4K" names the side length and no 16:9 or 4:3 label fits it;
+the camera's own UI calls the mode "4K OpenGate". Its `.LRF` proxy is square too (720×720, against
+1280×720 for 4K 16:9), which is how the aspect can be told before fetching anything. Bitrate runs far
+above the neighbouring modes: ~96 Mbit/s, 127 MB for 10 s, against 42 MB for 9 s of 4K 16:9.
 
 
 **Parsed — index-based** (older Osmo Action 1/2/3): header `[u32-LE count][u32-LE total_size]`, then fixed **65 B** records, **no path strings** (files keyed by numeric `FileIndex`):

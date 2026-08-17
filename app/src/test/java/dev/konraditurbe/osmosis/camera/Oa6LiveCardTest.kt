@@ -99,8 +99,9 @@ class Oa6LiveCardTest {
     /**
      * `4K OpenGate` — the camera's own name for a 1:1 full-sensor clip, format index **125**.
      *
-     * Carried as a label rather than a pixel pair on purpose: no W×H in the 4K family describes a
-     * square frame, and inventing one would put a wrong number in front of the user. Anything reading
+     * Carried as a label rather than a pixel pair on purpose: the frame measures 3840×3840 (ffprobed
+     * off the downloaded file), so "4K" is its side length and no 16:9 or 4:3 label describes it, while
+     * "OpenGate" is what the camera's own UI calls the mode. Anything reading
      * [dev.konraditurbe.osmosis.core.CameraFile.resolution] must therefore tolerate a non-`W x H` value.
      */
     @Test
