@@ -1488,7 +1488,10 @@ class CameraSession(
         // ⭐ starTag and the resolution index, both u8, ground-truth-verified against the SD card.
         // The star byte sits 9 bytes past the record's `[ff|fe] 19 06` marker (videos use `03 ff 19 06`,
         // photos a `fe 19 06` variant); the resolution index is at marker-1 (video header only).
-        val starred = starFlag(bytes, lo, hi)
+        // Prefer the signature read where the record has one: it is the only thing that works on a
+        // body whose stills carry no marker, and it agreed with the marker read everywhere both fired.
+        val starred = starFlagBySignature(bytes, selfPos.takeIf { it >= 0 } ?: lo, hi)
+            ?: starFlag(bytes, lo, hi)
         val resolution = if (isVideo && hasMarker && head + 7 < bytes.size)
             resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else photoRes
         return CameraFile(
@@ -1531,6 +1534,36 @@ class CameraSession(
         }
         return false
     }
+
+    /**
+     * The favourite flag as a Pocket 3 writes it: a `00`/`01` byte after a fixed 12-byte signature.
+     *
+     * The marker-relative read above cannot work on this body. It anchors on `[ff|fe] 19 06`, and a
+     * Pocket 3 **still** carries no such marker at all — so a favourited photo could never show a heart,
+     * whatever offset was used. This anchors on [STAR_SIG] instead, which sits *after* the record's own
+     * media path and is present once per record whatever the media type.
+     *
+     * Established by a controlled A/B on one card, camera in hand (2026-08-17): two dumps of the same
+     * nine files, differing in exactly three bytes, and all three were the favourites that had been
+     * changed between them — one video cleared, one video and one **photo** set. Eighteen records
+     * across the two dumps, every one agreeing with the camera's own gallery.
+     */
+    private fun starFlagBySignature(bytes: ByteArray, lo: Int, hi: Int): Boolean? {
+        var q = lo
+        val end = minOf(hi, bytes.size - STAR_SIG.size - 1)
+        while (q <= end) {
+            var k = 0
+            while (k < STAR_SIG.size && bytes[q + k] == STAR_SIG[k]) k++
+            if (k == STAR_SIG.size) return (bytes[q + STAR_SIG.size].toInt() and 0xFF) == 1
+            q++
+        }
+        return null
+    }
+
+    /** See [starFlagBySignature]. Constant across every Pocket 3 record dumped, once per record. */
+    private val STAR_SIG = byteArrayOf(
+        0x1b, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x02, 0x01, 0x14, 0x02, 0x15, 0x03,
+    )
 
     private fun resolutionForIndex(code: Int): String? = when (code) {
         10 -> "1920x1080"  // 1080p 16:9  (Xtra-verified)

@@ -77,4 +77,36 @@ class Op3LiveCardTest {
         assertEquals("JPG", pano.ext)
         assertEquals(0L, pano.handle)
     }
+
+    /**
+     * The favourite flag, established by a controlled A/B with the camera in hand.
+     *
+     * `op3_9_pano.bin` and `op3_9_stars_moved.bin` are the same nine files minutes apart, with only the
+     * favourites changed in between — `0001` cleared, `0005` set, and `0002` (a **still**) set. The two
+     * blobs differ in exactly three bytes, and those three are these flags.
+     *
+     * It is read off a fixed signature rather than the `[ff|fe] 19 06` marker because a Pocket 3 still
+     * has no marker at all: before this, a favourited photo could not show a heart at any offset.
+     */
+    @Test
+    fun `the favourite flag tracks the camera on both videos and stills`() {
+        val before = decode("op3_9_pano.bin").associateBy { it.name }
+        val after = decode("op3_9_stars_moved.bin").associateBy { it.name }
+        fun starOf(m: Map<String, dev.konraditurbe.osmosis.core.CameraFile>, n: String) =
+            m.entries.first { it.key.contains(n) }.value.starred
+
+        assertTrue("0001 was favourited", starOf(before, "_0001_D"))
+        assertTrue("and was cleared on the camera", !starOf(after, "_0001_D"))
+
+        assertTrue("0005 was not favourited", !starOf(before, "_0005_D"))
+        assertTrue("and was set on the camera", starOf(after, "_0005_D"))
+
+        // The one that the marker-based read could never have seen.
+        assertTrue("0002 is a still", after.entries.first { it.key.contains("_0002_D") }.value.ext == "JPG")
+        assertTrue("0002 was not favourited", !starOf(before, "_0002_D"))
+        assertTrue("and a favourited STILL reads as starred", starOf(after, "_0002_D"))
+
+        assertEquals("exactly one star before", 1, before.values.count { it.starred })
+        assertEquals("exactly two after", 2, after.values.count { it.starred })
+    }
 }
