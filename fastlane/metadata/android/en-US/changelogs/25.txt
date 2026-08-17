@@ -1,0 +1,5 @@
+Osmo Pocket 3 gets the fixes it has been waiting for. The camera is put into playback properly, so the whole card is listed instead of the first few files, photos show their heart when you have favourited them on the camera, and files that refused to delete now delete. Panoramas are marked as such, and a photo no longer borrows the file size of the clip next to it.
+
+Osmo Action 6 is fully supported, with a card and internal storage both listed and each file downloaded from the right one. Clips shot in 4K OpenGate are recognised. GPS sync now shows what the camera is doing, and the recorded track keeps a correct clock even when your phone's location goes quiet indoors.
+
+Every clip shows its own frame rate — on a card mixing 25 and 30 fps, some were showing their neighbour's.
