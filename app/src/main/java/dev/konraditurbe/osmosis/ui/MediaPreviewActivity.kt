@@ -563,14 +563,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     private fun loadVideo() {
         // Resolution comes straight from the manifest (res-index enum, marker-1) — no moov. An unmapped
         // code just leaves it blank (the clip still plays); add the code to resolutionForIndex when seen.
-        // Most codes map to a pixel W×H, which gets coarsened to 4K/2.7K/1080p. A few are formats the
-        // camera names itself ("4K OpenGate", a 1:1 frame no pixel pair in the 4K family describes) —
-        // those come through as the label to show, so pass them straight to the bar.
-        file.resolution?.let { r ->
-            val wh = r.split('x').mapNotNull { it.toIntOrNull() }
-            resTag = if (wh.size == 2) coarseRes(wh[0], wh[1]) else r
-            renderTop()   // onCreate already drew the top bar
-        }
+        file.resolution?.split('x')?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 2 }
+            ?.let { resTag = coarseRes(it[0], it[1]); renderTop() }   // onCreate already drew the top bar
         // Try the low-res proxy first (listed .LRF/.LRV, or a derived .XRF sidecar the Xtra/Action 5
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
         streamCandidates = file.previewCandidates()

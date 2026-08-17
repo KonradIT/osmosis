@@ -515,11 +515,10 @@ reports everything as unfavourited. Writing a favourite works on every body rega
 | `103` | 3840×2880 (4K 4:3) |
 | `125` | 3840×3840 (**4K OpenGate**, 1:1 full sensor) |
 
-`125` is the one entry whose pixel pair is not what a user is shown. The frame is **square** — measured
-off the file, HEVC 3840×3840 @ 29.97 — so "4K" names the side length and no 16:9 or 4:3 label fits it;
-the camera's own UI calls the mode "4K OpenGate". Its `.LRF` proxy is square too (720×720, against
-1280×720 for 4K 16:9), which is how the aspect can be told before fetching anything. Bitrate runs far
-above the neighbouring modes: ~96 Mbit/s, 127 MB for 10 s, against 42 MB for 9 s of 4K 16:9.
+`125` is the only **square** entry — 3840×3840, measured off the file (HEVC @ 29.97), which is the full
+sensor read out at 1:1 and what DJI's UI calls "OpenGate". Its `.LRF` proxy is square too (720×720,
+against 1280×720 for 4K 16:9), so the aspect is known before fetching anything. Bitrate runs far above
+the neighbouring modes: ~96 Mbit/s, 127 MB for 10 s, against 42 MB for 9 s of 4K 16:9.
 
 
 **Parsed — index-based** (older Osmo Action 1/2/3): header `[u32-LE count][u32-LE total_size]`, then fixed **65 B** records, **no path strings** (files keyed by numeric `FileIndex`):

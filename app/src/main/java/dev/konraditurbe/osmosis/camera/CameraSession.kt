@@ -1592,11 +1592,7 @@ class CameraSession(
         45 -> "2688x1512"  // 2.7K 16:9
         95 -> "2688x2016"  // 2.7K 4:3
         103 -> "3840x2880" // 4K 4:3
-        // A named format rather than a pixel count. The frame measures 3840x3840 — square, so "4K" is
-        // the side length and no W×H in the 4K family describes it — and the camera's own UI calls it
-        // "4K OpenGate", which is what a user is looking for. Consumers must treat an entry here as a
-        // label, not as something to parse — see MediaPreviewActivity.loadVideo.
-        125 -> "4K OpenGate"
+        125 -> "3840x3840" // 4K 1:1 aka OpenGate
         else -> null
     }
 

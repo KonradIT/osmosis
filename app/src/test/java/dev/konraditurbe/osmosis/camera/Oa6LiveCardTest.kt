@@ -97,16 +97,15 @@ class Oa6LiveCardTest {
     }
 
     /**
-     * `4K OpenGate` — the camera's own name for a 1:1 full-sensor clip, format index **125**.
+     * Format index **125** is the 1:1 full-sensor mode the camera's UI calls "4K OpenGate", and it
+     * carries pixels like every other index: 3840×3840, ffprobed off the downloaded file.
      *
-     * Carried as a label rather than a pixel pair on purpose: the frame measures 3840×3840 (ffprobed
-     * off the downloaded file), so "4K" is its side length and no 16:9 or 4:3 label describes it, while
-     * "OpenGate" is what the camera's own UI calls the mode. Anything reading
-     * [dev.konraditurbe.osmosis.core.CameraFile.resolution] must therefore tolerate a non-`W x H` value.
+     * Kept as a `W x H` string with an ASCII `x`, because that is what the preview parses to coarsen a
+     * clip to "4K" — a `×` here reads as one token and blanks the label instead.
      */
     @Test
-    fun `the OpenGate format index decodes to its name, and 4K 16 by 9 still to pixels`() {
-        assertEquals("4K OpenGate", sd.first { it.name.contains("_0002_") }.resolution)
+    fun `the OpenGate index decodes to a square 4K frame`() {
+        assertEquals("3840x3840", sd.first { it.name.contains("_0002_") }.resolution)
         assertEquals("3840x2160", sd.first { it.name.contains("_0001_") }.resolution)
         assertEquals("3840x2160", internal.first { it.isVideo }.resolution)
     }
