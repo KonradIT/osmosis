@@ -250,6 +250,37 @@ objectively rather than by eye: the failing clip's `djmd` track decoded to 719 p
 distinct position and one distinct timestamp. That track is **protobuf, not encrypted** — read it with
 [`pyosmogps`](https://github.com/francescocaponio/pyosmogps), which doubles as the regression harness.
 
+**2026-08-17, on an Action 6 — two more, and the "stale fix" diagnosis above was only half right.**
+
+*The mode never showed.* This body never sends the numeric `0x1D/0x02` status struct at all. It answers
+the subscription with `0x1D/0x06`, DJI's `new_camera_status_push`, which carries the mode as **text** —
+a 46-byte frame of length-prefixed ASCII, `VIDEO` plus a parameter line `4K25 RS`. The demo declares a
+parser for it and then drives its own state machine from `0x1D/0x02` only, so it is equally blind here.
+It also answers the subscription **once** and never pushes again — not periodically, not on a mode
+change, not when recording starts — so the subscription is now re-sent whenever the feed goes quiet.
+Nothing in that frame carries recording state, so on this body `recording` has no source at all.
+
+*The clock froze, and the fix's timestamp was the cause.* Four clips recorded during a session decoded
+to one distinct position each and — in two of them — **one distinct timestamp for the entire clip**
+(119 and 63 samples). Stamping each sample with the *fix's* time, chosen precisely to stop a stale seed
+back-dating a recording, freezes the video's clock whenever the phone stops producing fixes, which
+indoors is the normal case. The sample now carries **now**, with `freshFix()` still gating whether the
+position is fit to send; a position a few seconds old is what any receiver reports between fixes, while
+a frozen clock makes the whole track undatable. This also proves the camera writes our pushed time
+**verbatim** rather than using its own clock — a frozen track under a running camera clock could not
+happen otherwise.
+
+*Still open — a clean one-hour offset.* The camera stores our pushed local wall clock minus exactly
+1 h (`19:43:08` pushed → `"2026-08-17 18:43:08"` in the track), on all four clips, while the file's own
+name carries the correct local time. Our `0x00/0x6a` sync sends the right epoch, `+120` minutes and
+`Europe/Madrid`, so the likeliest reading is that the camera converts using the zone's **standard**
+offset and ignores DST — untested, and not worth compensating for on one observation: a DST fudge that
+is right in August is wrong in December.
+
+Control for all of it: a clip recorded minutes before the session, with the same camera, decodes to
+**zero** telemetry points. These bodies carry no GNSS of their own, so everything in the track is what
+we put there.
+
 **Branch `rsdk-device-id`** (unmerged) names the camera from the `device_id` its connection request
 carries, and settles which models can do this at all: DJI's R-SDK table covers the Action 4/5 Pro/6 and
 the 360, lists the Nano as unsupported and omits the Pocket 3. It also establishes on hardware that the
