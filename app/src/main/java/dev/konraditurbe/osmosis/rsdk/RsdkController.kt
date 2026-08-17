@@ -25,6 +25,7 @@ class RsdkController(private val context: Context, private val listener: Listene
         fun onLog(s: String)
         fun onConnected()
         fun onStatus(status: RsdkProtocol.CameraStatus)
+        fun onModeInfo(info: RsdkProtocol.ModeInfo)
         fun onDisconnected()
         fun onFailed(reason: String)
     }
@@ -55,6 +56,7 @@ class RsdkController(private val context: Context, private val listener: Listene
 
     fun disconnect() {
         main.removeCallbacks(approvalTimeout)
+        main.removeCallbacks(statusPoll)
         gatt?.disconnect(); gatt?.close(); gatt = null
     }
 
@@ -93,11 +95,78 @@ class RsdkController(private val context: Context, private val listener: Listene
     }
 
     override fun onNotification(sourceChar: UUID, raw: ByteArray, parsed: DjiMessage?) {
-        val f = RsdkProtocol.parse(raw) ?: return // ignore non-R-SDK / partial notifications
+        val f = RsdkProtocol.parse(raw)
+        if (f == null) {
+            // Dropping these silently made "the camera sends no status" and "it sends status we can't
+            // read" the same observation. A frame the camera addressed to us and we threw away is
+            // worth a line — capped, because a mis-framed link would otherwise flood the log.
+            if (raw.isNotEmpty() && (raw[0].toInt() and 0xFF) == 0xAA && unparsed++ < 20) {
+                val len = if (raw.size >= 3) ((raw[1].toInt() and 0xFF) or ((raw[2].toInt() and 0xFF) shl 8)) and 0x03FF else -1
+                listener.onLog("R-SDK: unparsed frame, ${raw.size}B on the wire, header says ${len}B" +
+                    (if (len > raw.size) " (fragmented)" else "") + " — ${raw.take(16).joinToString("") { "%02x".format(it) }}")
+            }
+            return
+        }
         when {
             f.cmdSet == RsdkProtocol.SET_GENERAL && f.cmdId == RsdkProtocol.ID_CONNECTION -> onConnectionFrame(f)
             f.cmdSet == RsdkProtocol.SET_CAMERA && f.cmdId == RsdkProtocol.ID_STATUS_PUSH ->
-                RsdkProtocol.parseCameraStatus(f.payload)?.let { main.post { listener.onStatus(it) } }
+                RsdkProtocol.parseCameraStatus(f.payload)?.also { lastStatusMs = System.currentTimeMillis() }
+                    ?.let { main.post { listener.onStatus(it) } }
+                    ?: listener.onLog("R-SDK: status push too short to decode (${f.payload.size}B)")
+            // The "new" status push: an Action 6 reports its mode here as text and never sends the
+            // numeric 0x1D/0x02 at all, which is why the mode read as unknown on it.
+            f.cmdSet == RsdkProtocol.SET_CAMERA && f.cmdId == RsdkProtocol.ID_STATUS_PUSH_NEW ->
+                RsdkProtocol.parseNewCameraStatus(f.payload)?.also { lastStatusMs = System.currentTimeMillis() }
+                    ?.let { main.post { listener.onModeInfo(it) } }
+                    ?: listener.onLog("R-SDK: new status push not in the documented shape " +
+                        "(${f.payload.size}B) — ${f.payload.take(8).joinToString("") { "%02x".format(it) }}")
+            // Anything else the camera volunteers: we asked for a subscription and this is what came
+            // back, so name it rather than discard it.
+            else -> if (unhandled++ < 20)
+                listener.onLog("R-SDK: unhandled %02x/%02x type=0x%02x %dB payload=%s  ascii=%s"
+                    .format(f.cmdSet, f.cmdId, f.cmdType, f.payload.size,
+                        f.payload.joinToString("") { "%02x".format(it) },
+                        f.payload.joinToString("") { b ->
+                            val c = b.toInt() and 0xFF
+                            if (c in 0x20..0x7E) c.toChar().toString() else "."
+                        }))
+        }
+    }
+
+    private var unparsed = 0
+    private var unhandled = 0
+
+    /** Subscribe: push_mode 3 = periodic + on-change, push_freq 20 (2 Hz, fixed) — DJI's own values. */
+    private fun subscribeStatus() = send(
+        RsdkProtocol.SET_CAMERA, RsdkProtocol.ID_STATUS_SUB, RsdkProtocol.CMD_NO_RESPONSE,
+        RsdkProtocol.statusSubscription(pushMode = 3, pushFreq = 20),
+    )
+
+    private var lastStatusMs = 0L
+    private var polling = false
+
+    /**
+     * Keep the status feed alive on a camera that answers the subscription **once**.
+     *
+     * An Action 6 replies to `0x1D/0x05` with a single `0x1D/0x06` and then never pushes again — not
+     * periodically, not when the mode changes, not when recording starts — so a client that subscribes
+     * and waits, as DJI's demo does, shows the mode the camera happened to be in at connect for the
+     * rest of the session.
+     *
+     * Re-subscribing only when the feed has gone quiet leaves a camera that *does* push properly
+     * completely alone: on those, this never fires a single extra frame.
+     */
+    private val statusPoll = object : Runnable {
+        override fun run() {
+            if (!connected) return
+            if (System.currentTimeMillis() - lastStatusMs > STATUS_STALE_MS) {
+                if (!polling && lastStatusMs != 0L) {
+                    polling = true
+                    listener.onLog("R-SDK: camera answers the status subscription once — polling it instead")
+                }
+                subscribeStatus()
+            }
+            main.postDelayed(this, STATUS_POLL_MS)
         }
     }
 
@@ -121,16 +190,23 @@ class RsdkController(private val context: Context, private val listener: Listene
             RsdkProtocol.connectionResponse(deviceId, retCode = 0, cameraReserved = 0), useSeq = f.seq)
         connected = true
         listener.onLog("R-SDK: connected — subscribing to camera status")
-        // Subscribe: push_mode 3 = periodic + on-change, push_freq 20 (2 Hz, fixed).
-        send(RsdkProtocol.SET_CAMERA, RsdkProtocol.ID_STATUS_SUB, RsdkProtocol.CMD_NO_RESPONSE,
-            RsdkProtocol.statusSubscription(pushMode = 3, pushFreq = 20))
+        subscribeStatus()
+        main.postDelayed(statusPoll, STATUS_POLL_MS)
         main.post { listener.onConnected() }
     }
 
     override fun onDisconnected() {
         main.removeCallbacks(approvalTimeout)
+        main.removeCallbacks(statusPoll)
         connected = false
         main.post { listener.onDisconnected() }
+    }
+
+    private companion object {
+        /** How often to check the status feed. Also the poll rate on a camera that needs one. */
+        const val STATUS_POLL_MS = 1500L
+        /** Quiet for longer than this and the subscription is treated as not running. */
+        const val STATUS_STALE_MS = 2000L
     }
 
     private fun fail(reason: String) {

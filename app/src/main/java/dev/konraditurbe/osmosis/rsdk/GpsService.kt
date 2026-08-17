@@ -46,6 +46,8 @@ class GpsService : Service(), RsdkController.Listener {
     private var lastFixMs = 0L
     private var satellites = 0
     private var status: RsdkProtocol.CameraStatus? = null
+    /** The text mode from a `0x1D/0x06` push, on bodies that report it that way instead. */
+    private var modeInfo: RsdkProtocol.ModeInfo? = null
     private var connected = false
 
     private var pushes = 0
@@ -185,6 +187,11 @@ class GpsService : Service(), RsdkController.Listener {
         updateNotification()
     }
     override fun onStatus(s: RsdkProtocol.CameraStatus) { status = s; updateNotification() }
+    override fun onModeInfo(info: RsdkProtocol.ModeInfo) {
+        if (info != modeInfo) log("R-SDK: camera mode is ${info.label}")
+        modeInfo = info
+        updateNotification()
+    }
     override fun onDisconnected() { if (connected) { connected = false; stop() } }
     override fun onFailed(reason: String) { log("GPS: $reason"); stop() }
 
@@ -234,7 +241,9 @@ class GpsService : Service(), RsdkController.Listener {
     }
 
     private fun buildNotification(): Notification {
-        val mode = status?.modeName
+        // Prefer the text push: where a camera sends both, it is the camera's own wording, and where it
+        // sends only 0x1D/0x06 (Action 6) it is the only mode there is.
+        val mode = modeInfo?.label ?: status?.modeName
             ?: if (connected) "—" else getString(R.string.gps_notif_connecting)
         val rec = getString(if (status?.recording == true) R.string.gps_notif_rec_yes else R.string.gps_notif_rec_no)
         val gps = getString(if (gpsHealthy()) R.string.gps_notif_healthy else R.string.gps_notif_not_healthy)
