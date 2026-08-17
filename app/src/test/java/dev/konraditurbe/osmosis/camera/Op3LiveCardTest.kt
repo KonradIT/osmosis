@@ -62,20 +62,13 @@ class Op3LiveCardTest {
         }
     }
 
-    /**
-     * The panorama is written as a plain `.JPG` and decodes as one.
-     *
-     * Telling it apart is not done yet: two bytes in its record differ from every normal still on the
-     * same card — `path-15` reads `0x04` where a normal photo reads `0x00`, and `path-14` reads `0xc7`
-     * where they read a uniform `0xf6`. With a single panorama either could be the type and the other a
-     * coincidence, so nothing keys off them. This pins today's behaviour, which is that it looks like an
-     * ordinary photo.
-     */
+    /** The panorama is written as a plain `.JPG` and carries no handle, like any other still. */
     @Test
-    fun `the panorama is indistinguishable from a photo so far`() {
+    fun `a panorama is still a handleless JPG`() {
         val pano = decode("op3_9_pano.bin").first { it.name.contains("_0010_D") }
         assertEquals("JPG", pano.ext)
         assertEquals(0L, pano.handle)
+        assertTrue("and is recognised as a panorama", pano.isPanorama)
     }
 
     /**
@@ -108,5 +101,33 @@ class Op3LiveCardTest {
 
         assertEquals("exactly one star before", 1, before.values.count { it.starred })
         assertEquals("exactly two after", 2, after.values.count { it.starred })
+    }
+
+    /**
+     * The media-type byte, and with it the panorama.
+     *
+     * `op3_11_panos.bin` is the same card again with an ordinary photo and a second panorama shot back
+     * to back, so both kinds appear twice or more on one card: two panoramas read `0x04`, six stills
+     * read `0x00`, three videos read `0x03`. The byte sits at `mediaPath - 15`, immediately before the
+     * constant `19 06` tag, and is the same one the delete-handle marker reads as its "kind".
+     *
+     * A panorama is written as a plain `.JPG` with nothing else to distinguish it, so this byte is the
+     * only thing that can. Superseding [the panorama is indistinguishable from a photo so far].
+     */
+    @Test
+    fun `the type byte separates panoramas from photos and videos`() {
+        val files = decode("op3_11_panos.bin")
+        assertEquals(11, files.size)
+
+        val panos = files.filter { it.isPanorama }
+        assertEquals("two panoramas on this card", 2, panos.size)
+        assertTrue("both are written as ordinary JPGs", panos.all { it.ext == "JPG" })
+        assertTrue("0010 and 0012",
+            panos.map { it.name.substringAfter("_0").take(3) }.toSet() == setOf("010", "012"))
+
+        assertEquals("stills", 0x00, files.first { it.name.contains("_0011_D") }.mediaType)
+        assertEquals("videos", 0x03, files.first { it.name.contains("_0001_D") }.mediaType)
+        assertTrue("no video is ever a panorama", files.none { it.isVideo && it.isPanorama })
+        assertEquals("six ordinary stills", 6, files.count { it.mediaType == 0x00 })
     }
 }

@@ -59,6 +59,17 @@ data class CameraFile(
      * Last in the parameter list on purpose — several call sites construct a CameraFile positionally.
      */
     val handleShared: Boolean = false,
+
+    /**
+     * The record's media-type byte, or -1 when the record carries no type tag.
+     *
+     * `0x00` still · `0x03` video · `0x04` panorama. It sits at `mediaPath - 15`, immediately before
+     * the constant `19 06` tag, and is the same byte the delete-handle marker reads as its "kind".
+     *
+     * Kept as the raw value rather than a set of booleans because only three values have ever been
+     * seen and a fourth would otherwise decode as "not a panorama" silently.
+     */
+    val mediaType: Int = -1,
 ) {
     /** DCF-index-addressed media, fetched over `/v1` rather than by path over `/v2`. */
     val isIndexed: Boolean get() = fileIndex != 0L
@@ -108,6 +119,14 @@ data class CameraFile(
     } ?: ""
 
     val isVideo: Boolean get() = ext in setOf("MP4", "MOV", "OSV", "INSV", "LRF", "LRV", "XRF")
+
+    /**
+     * An in-camera-stitched panorama. Written as an ordinary `.JPG`, so only [mediaType] tells it apart.
+     *
+     * Established on an Osmo Pocket 3 with the camera in hand: two panoramas read `0x04` where six
+     * ordinary stills on the same card read `0x00` and three videos read `0x03`.
+     */
+    val isPanorama: Boolean get() = mediaType == 0x04
     val isImage: Boolean get() = ext in setOf("JPG", "JPEG", "DNG", "HEIC", "RAW")
 
     companion object {

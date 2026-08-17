@@ -1495,11 +1495,19 @@ class CameraSession(
             ?: starFlag(bytes, lo, hi)
         val resolution = if (isVideo && hasMarker && head + 7 < bytes.size)
             resolutionForIndex(bytes[head + 7].toInt() and 0xFF) else photoRes
+        // Media type: the byte before the constant `19 06` tag, which sits at mediaPath-13. Read only
+        // when that tag is actually there, so a record shaped differently yields -1 rather than
+        // whatever byte happens to precede the path. 0x00 still, 0x03 video, 0x04 panorama.
+        // selfPos is the start of the path FIELD (`1a <len> 00 00 00 <sub>`), so the path text begins six
+        // bytes later and the tag lands at selfPos-7.
+        val mediaType = if (selfPos >= 9 && selfPos <= bytes.size &&
+            bytes[selfPos - 7] == 0x19.toByte() && bytes[selfPos - 6] == 0x06.toByte()
+        ) bytes[selfPos - 9].toInt() and 0xFF else -1
         return CameraFile(
             path = path, thumbPath = thumbPath, storage = 0,
             resLabel = fps?.let { "${it}fps" }, proxyPath = proxyExt?.let { "$mediaDir.$it" },
             handle = handle, sizeBytes = size, starred = starred, resolution = resolution,
-            durationSec = durationSec,
+            durationSec = durationSec, mediaType = mediaType,
         )
     }
 
