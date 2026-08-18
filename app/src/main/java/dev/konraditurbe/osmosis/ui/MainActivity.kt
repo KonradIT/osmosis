@@ -1087,7 +1087,20 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             imageLoader?.shutdown(); imageLoader = null
             metaLoader?.shutdown(); metaLoader = null
             updateDownloadFab()        // nothing to download; drop any queue carried from the old camera
-            logLine("No media found on camera.")
+            // "No media" and "media the camera will not list" look identical on screen, and the
+            // camera itself can tell them apart: it reports each store's used space in the same
+            // session. Real content behind a zero-length list is a card the camera is not indexing —
+            // typically one written by another body, or not formatted in this one — and saying so is
+            // the difference between a user checking their card and filing a bug against us.
+            val st = currentStatus
+            val usedMb = maxOf(st.sdTotalMb - st.sdFreeMb, 0) +
+                maxOf(st.internalTotalMb - st.internalFreeMb, 0)
+            if (usedMb > EMPTY_LIST_USED_MB) {
+                logLine("No media listed, yet the camera reports ${usedMb / 1024} GB in use — the " +
+                    "card may have been written by another camera, or may need formatting in this one.")
+            } else {
+                logLine("No media found on camera.")
+            }
             toast(getString(R.string.no_media_found, pillName()))
             return
         }
@@ -1801,6 +1814,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         /** Total AP rejoins allowed per offload session — a cap, deliberately not reset on success,
          *  so a flapping AP ends in a clear "tap Offload" rather than an endless reconnect loop. */
         private const val MAX_WIFI_REJOINS = 3
+        /** Used space that makes an empty media list worth questioning rather than reporting.
+         *  Comfortably above the few hundred MB of thumbnails, logs and settings a camera keeps
+         *  on a card it considers empty. */
+        private const val EMPTY_LIST_USED_MB = 2_000
     }
 }
 
