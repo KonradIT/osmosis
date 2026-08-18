@@ -83,6 +83,7 @@
     <string name="connected_wifi">Connected · WiFi</string>
     <string name="loading_burst">Loading burst…</string>
     <string name="not_connected">Not connected</string>
+    <string name="no_media_found">%1$s has no media on it</string>
 
     <!-- Date headers -->
     <string name="today">TODAY</string>

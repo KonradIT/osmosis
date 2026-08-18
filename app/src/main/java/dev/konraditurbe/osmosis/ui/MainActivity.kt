@@ -1078,7 +1078,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         applyOrientationChrome()   // hide the pill if we're (re)entering the grid in landscape
         if (!preserveFilters) resetGalleryChips()      // a fresh camera list starts unfiltered
         if (files.isEmpty()) {
+            // Clear the grid before returning. The pill above has already been repainted with the
+            // new camera's name, so leaving the previous camera's adapter in place shows one camera's
+            // files under another camera's header — which reads as "this camera holds those videos".
+            // An empty camera has to look empty.
+            adapter = null
+            grid.adapter = null
+            imageLoader?.shutdown(); imageLoader = null
+            metaLoader?.shutdown(); metaLoader = null
+            updateDownloadFab()        // nothing to download; drop any queue carried from the old camera
             logLine("No media found on camera.")
+            toast(getString(R.string.no_media_found, pillName()))
             return
         }
         imageLoader?.shutdown()
