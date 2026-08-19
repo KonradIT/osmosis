@@ -179,6 +179,10 @@ approval dialog. `PcapAnalysis` rides along on both for reading a capture with o
 **Blockers:** hardware. Both branches are instrumentation waiting for one run each — nothing more can
 be deduced from what we have.
 
+### 19. Bulk delete
+
+When tapping Select, spawn a second FAB above the Download button for mass delete items. Needs a PCAP of deleting multiple photos/videos.
+
 ---
 
 ## Done

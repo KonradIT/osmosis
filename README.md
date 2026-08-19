@@ -45,15 +45,15 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 | Osmo Action 5 Pro / Xtra Edge Pro | Verified on hardware |
 | Osmo Action 6 | Verified on hardware |
 | Osmo Pocket 3 | Verified on hardware |
-| Osmo Pocket 4 / 4 Pro | Planned |
+| Osmo Pocket 4 / 4 Pro | Works, although I haven't tested it myself |
 | Xtra Atto / Edge / Muse | Untested, should work |
 | Osmo Action 1 | Started, parked |
 | Osmo Action 4 | Started |
 | Osmo 360 | Unplanned (needs Mimo to render 360 content) |
 | Osmo Action 2/3 | Best-effort default, untested, not expected to work |
 | DJI Mavic 3 (QuickTransfer) | Verified on hardware — grid, thumbnails, preview, download, battery + storage |
-| DJI Neo 2 (QuickTransfer) | In progress on `support-neo2` — pairs, hands over WiFi credentials and brings the datalink up, but does not unlock its media session the way a Mavic does, so the grid is empty |
-| DJI Mini 3 (QuickTransfer) | In progress on `support-mini3` — untested against hardware so far |
+| DJI Neo 2 (QuickTransfer) | In progress on `support-neo2` |
+| DJI Mini 3 (QuickTransfer) | In progress on `support-mini3` |
 | Any other DJI drone | Unverified, and **not expected to work** |
 
 Want to help adding support for an unsupported camera? [Open an issue](../../issues) so it can be listed as fully supported.
