@@ -41,7 +41,7 @@ class DroneAddressingTest {
     @Test
     fun `a Neo 2 is addressed by path over v2`() {
         assertTrue(DroneProducts.usesHttpV2(0x7E))
-        assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0554.MP4", droneFile(0x7E).urlPath())
+        assertEquals("/v2?storage=1&path=/DCIM/100MEDIA/DJI_0554.MP4", droneFile(0x7E).urlPath())
     }
 
     /**
@@ -54,7 +54,7 @@ class DroneAddressingTest {
     @Test
     fun `a v2 drone thumbnail is a sidecar or EXIF, never the original`() {
         val video = droneFile(0x7E)
-        assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0554.THM", video.thumbUrlPath())
+        assertEquals("/v2?storage=1&path=/DCIM/100MEDIA/DJI_0554.THM", video.thumbUrlPath())
 
         val still = video.copy(path = "DCIM/100MEDIA/DJI_0554.JPG", durationSec = 0)
         val thumb = still.thumbUrlPath()
@@ -69,8 +69,8 @@ class DroneAddressingTest {
     @Test
     fun `a v2 drone preview tries the cheap rendition first`() {
         val chain = droneFile(0x7E).previewCandidates()
-        assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0554.LRF", chain.first())
-        assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0554.MP4", chain.last())
+        assertEquals("/v2?storage=1&path=/DCIM/100MEDIA/DJI_0554.LRF", chain.first())
+        assertEquals("/v2?storage=1&path=/DCIM/100MEDIA/DJI_0554.MP4", chain.last())
     }
 
     @Test
