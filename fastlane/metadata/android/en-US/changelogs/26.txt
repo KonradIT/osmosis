@@ -1,0 +1,3 @@
+Selecting a camera that has nothing on it no longer leaves the previous camera's videos on screen — that made one camera look like it held another's files. If the camera reports free space that doesn't match an empty list, the log now says so, which points at the card rather than the app.
+
+The status pill shows a battery icon next to the percentage.
