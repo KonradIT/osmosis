@@ -75,11 +75,12 @@ class StatusPillView @JvmOverloads constructor(
     fun render(name: String, connection: String, s: CameraStatus, showPower: Boolean) {
         nameView.text = name
         val pct = s.batteryPercent
-        // A charging bolt next to the percentage — the camera reports this while docked.
+        // A charging bolt REPLACES the battery next to the percentage — the camera reports charging
+        // while docked, and two glyphs side by side just crowd the header.
         batteryText.text = when {
             pct !in 0..100 -> "—"
             s.charging -> "⚡ $pct%"
-            else -> "$pct%"
+            else -> "🔋 $pct%"
         }
         batteryBar.progress = pct.coerceIn(0, 100)
         batteryBar.progressTintList = ColorStateList.valueOf(
