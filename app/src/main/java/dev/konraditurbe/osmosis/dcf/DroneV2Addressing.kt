@@ -29,10 +29,19 @@ object DroneV2Addressing : MediaAddressing {
     private const val PROXY_EXT = "LRF"
     private const val SCREEN_EXT = "SCR"
 
-    override fun original(f: CameraFile): String = PathAddressing.byPath(f.storage, f.path)
+    /**
+     * An aircraft wants an **absolute** path — `/DCIM/…`, leading slash — where a camera wants a
+     * relative one. The reference implementation rejects a `/v2` request outright if the path does not
+     * start with `/`, and its own paths come from the aircraft's catalogue, which evidently stores them
+     * that way. Our DCF paths are synthesised relative, so add it here rather than change a shape the
+     * cameras already work with.
+     */
+    private fun absolute(path: String) = if (path.startsWith("/")) path else "/$path"
+
+    override fun original(f: CameraFile): String = PathAddressing.byPath(f.storage, absolute(f.path))
 
     private fun sibling(f: CameraFile, ext: String): String =
-        PathAddressing.byPath(f.storage, "${f.path.substringBeforeLast('.', f.path)}.$ext")
+        PathAddressing.byPath(f.storage, absolute("${f.path.substringBeforeLast('.', f.path)}.$ext"))
 
     /**
      * A video's `.THM` sidecar; a still's own embedded EXIF thumbnail.
