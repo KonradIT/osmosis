@@ -181,7 +181,20 @@ be deduced from what we have.
 
 ### 19. Bulk delete
 
-When tapping Select, spawn a second FAB above the Download button for mass delete items. Needs a PCAP of deleting multiple photos/videos.
+When tapping Select, spawn a second FAB above the Download button for mass delete items.
+
+**Unblocked 2026-08-20 — the capture exists and the wire format is settled.** Deleting eleven files
+in the official app is **one** `0x00/0x28` carrying `count=11` and eleven handles, answered by a
+single `0000` in 100 ms ([MEDIA_PROTOCOL §2](MEDIA_PROTOCOL.md#2-delete-media)). Every handle matched
+what our own decode of the same card produced, so the mapping needs no new work. Two of the eleven
+were interval groups, each sent as its `_001` lead handle alone — a handle addresses the group, so no
+group-expansion is needed first.
+
+That capture also corrected the payload: the u32 after the handles is a constant `1`, not a second
+copy of the count. Our single-file sends were right only because the two are identical at `count=1`.
+
+**What is left is UI and safety**, not protocol: a selection FAB, and deciding what an irreversible
+eleven-file delete has to confirm. The existing collision guard still applies per handle.
 
 ---
 

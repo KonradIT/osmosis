@@ -533,7 +533,19 @@ the neighbouring modes: ~96 Mbit/s, 127 MB for 10 s, against 42 MB for 9 s of 4K
 
 ### 2. Delete media
 - Cmd Set / ID: `0x00` / `0x28`  ·  App → Camera(`0x01`), datalink  ·  **irreversible on the card**
-- Payload: `[count:u8][handle:u32-LE × count][count:u32-LE] 00 [count:u32-LE] 01 01 00 00`  — delete 1 file `h`: `01 <h> 01000000 00 01000000 01010000`
+- Payload: `[count:u8][handle:u32-LE × count] 01 00 00 00 · 00 · [count:u32-LE] 01 01 00 00`
+  - delete 1 file `h`: `01 <h> 01000000 00 01000000 01010000`
+  - delete 11 files: `0b <h₁…h₁₁> 01000000 00 0b000000 01010000` (58 B)
+- ⚠️ The u32 immediately after the handles is a **constant `1`, not the count** — only the second u32
+  carries it. The two are indistinguishable in a single-file delete, which is how they came to be
+  documented as the same field; an 11-file capture separates them.
+- **Deletion is a batch operation, and one command covers the whole selection.** The official app
+  deleting eleven files sends **one** `0x00/0x28` with `count=11` and gets **one** `0000` back, 100 ms
+  later — not eleven commands, and no per-file acknowledgement. Handles go newest-first, matching the
+  order the list is displayed in; nothing suggests the order is required.
+- **A handle addresses a group, not a frame.** Two of those eleven were interval groups, and each was
+  sent as a single handle — the `_001` lead the manifest lists. The frames are never enumerated, so a
+  client does not need group-expansion before deleting one.
 - `handle` = per-file object id from the manifest record head (below); the trailing `00 … 01 01 00 00` is a storage selector, verbatim from the capture.
 - Response: `0x00/0x28` → `0000` = OK  ·  `00d6` = no such handle
 - **Handle** — u32-LE at the record head, located by anchoring on the constant record marker `03 ff 19 06` (at head + 8, so `handle = u32 @ marker − 8`). Nano (361 B records) `0x40100000 + seq × 0x40`; the Action family — Xtra Edge Pro, Action 5/6, Pocket 3 (272 B records) — `base + seq × 0x10`, base `0x40040000` internal / `0x00040000` SD. **Fit base and step from the handles the manifest already exposes** rather than hardcoding either: both are per camera *and* per store. Anchoring on the marker is also what makes this safe — searching for a `0x40`-aligned dword finds the right value on a Nano and the wrong one on an Xtra, which the camera rejects with `0xd6`. (Naming doesn't track the family: only the Xtra rebrand writes `CAM_…`, while genuine Action/Pocket units use `DJI_…`.) **Stills are deletable wherever their records carry a marker** — an Action 6 photo deletes by handle exactly as a clip does. Only a Pocket 3 still has no marker, and therefore no handle, and must be treated as non-deletable (fail-safe) rather than given a neighbour's.
