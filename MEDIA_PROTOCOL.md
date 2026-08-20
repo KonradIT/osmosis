@@ -191,10 +191,15 @@ back per request counter:
   ([below](#paginate-the-full-library)), so a client that fetches the newest page and then filters it
   itself shows "all photos" drawn from the newest 45 files, not from the card. Asking the camera
   returns 45 *matching* records instead.
-- ⚠️ On the same card, `@18 = 01` returned **11** internal records where our own manifest decode found
-  **9** starred. Either the favourite flag is under-read on this body — the `@+9` byte is a length on
-  the `CAM_` family, see [§1](#1-get-media-list) — or the flag selects something broader than the star.
-  Unresolved; the camera's own answer is the one to trust over our decode.
+- **The favourites filter is the ground truth for the star flag, and it is worth diffing against.** On
+  one Xtra card it returned 11 internal records against 9 found by decoding the newest page. The gap
+  is two separate things, and only the second is a defect:
+  - **4** of the 11 are older than the newest page — a filtered query returns up to 45 *matching*
+    records from the whole store, which is the point of asking the camera rather than filtering a page.
+  - **2 records were starred by the decode and not by the camera**, both interval-group leads
+    (`…_0055_D_001.JPG`, `…_0056_D_001.JPG`). The seven non-group favourites in that page agreed
+    exactly. So on the `CAM_` family the star read gives **false positives on `_001` group records** —
+    a group record's extra path field shifts whatever the flag is read from.
 #### Paginate the full library
 
 One `0x00/0x26` returns only the **newest ~45 files** (the `2d` = 45 count at payload byte 14). To reach older files the request carries a **cursor = a 4-byte little-endian file *handle* at payload bytes 10-13** — the same handle the record exposes for delete ([§2](#2-delete-media), `u32-LE @ head`). Two things make it page:
