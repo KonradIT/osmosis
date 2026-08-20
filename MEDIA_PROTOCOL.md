@@ -162,6 +162,39 @@ inspecting the body. `4A 01` alone also matches parameter-subscription pushes ([
 which will corrupt the manifest of any client subscribed to more than a handful of parameters.
 - DUML example: <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000010000002d000d0100ffffffffffffffff0001000000000000000000000000008185>
 
+#### Filter by kind, favourite or highlight — the camera does it
+
+The query carries filter fields, and the camera returns **only** matching records. Filtering is not
+something a client has to do after the fact:
+
+| payload byte | field | values |
+|---|---|---|
+| `@18` | favourites only | `00` all · `01` favourites |
+| `@19–22` | **video** kind mask, u32-LE | `ffffffff` all · `80000000` include · `00000000` exclude |
+| `@23–26` | **photo** kind mask, u32-LE | as above |
+| `@37` | highlights only | `00` all · `02` only files carrying marks |
+
+Measured on an Xtra Edge Pro by driving the official app's own filter chips and counting what came
+back per request counter:
+
+| request | SD | internal |
+|---|---|---|
+| `ffffffff/ffffffff` (default) | 16 MP4 + 15 JPG | 27 MP4 + 18 JPG |
+| `80000000/00000000` | 16 MP4, **no JPG** | 36 MP4, **no JPG** |
+| `00000000/80000000` | 15 JPG, **no MP4** | 32 JPG, **no MP4** |
+| `@18 = 01` | 5 records, mixed | 11 records, mixed |
+| `@37 = 02`, both masks set | 0 records | 3 MP4 |
+
+- **Both masks set plus `@37 = 02` returns videos only**, because only videos carry highlight marks
+  ([§3a](#3a-highlight--moment-marks)) — the kind masks are not what narrows it there.
+- **This matters for pagination, not just for effort.** A page is 45 records
+  ([below](#paginate-the-full-library)), so a client that fetches the newest page and then filters it
+  itself shows "all photos" drawn from the newest 45 files, not from the card. Asking the camera
+  returns 45 *matching* records instead.
+- ⚠️ On the same card, `@18 = 01` returned **11** internal records where our own manifest decode found
+  **9** starred. Either the favourite flag is under-read on this body — the `@+9` byte is a length on
+  the `CAM_` family, see [§1](#1-get-media-list) — or the flag selects something broader than the star.
+  Unresolved; the camera's own answer is the one to trust over our decode.
 #### Paginate the full library
 
 One `0x00/0x26` returns only the **newest ~45 files** (the `2d` = 45 count at payload byte 14). To reach older files the request carries a **cursor = a 4-byte little-endian file *handle* at payload bytes 10-13** — the same handle the record exposes for delete ([§2](#2-delete-media), `u32-LE @ head`). Two things make it page:
