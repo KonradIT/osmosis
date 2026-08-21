@@ -571,12 +571,16 @@ the neighbouring modes: ~96 Mbit/s, 127 MB for 10 s, against 42 MB for 9 s of 4K
 
 ### 2. Delete media
 - Cmd Set / ID: `0x00` / `0x28`  ·  App → Camera(`0x01`), datalink  ·  **irreversible on the card**
-- Payload: `[count:u8][handle:u32-LE × count] 01 00 00 00 · 00 · [count:u32-LE] 01 01 00 00`
-  - delete 1 file `h`: `01 <h> 01000000 00 01000000 01010000`
+- Payload: `[count:u8][handle:u32-LE × count][seq:u32-LE] · 00 · [count:u32-LE] 01 01 00 00`
+  - delete 1 file `h`, first of the session: `01 <h> 01000000 00 01000000 01010000`
   - delete 11 files: `0b <h₁…h₁₁> 01000000 00 0b000000 01010000` (58 B)
-- ⚠️ The u32 immediately after the handles is a **constant `1`, not the count** — only the second u32
-  carries it. The two are indistinguishable in a single-file delete, which is how they came to be
-  documented as the same field; an 11-file capture separates them.
+- ⚠️ **The u32 immediately after the handles is not the count** — only the second u32 carries it. The
+  two are indistinguishable in a single-file delete, which is how they came to be documented as the
+  same field; an 11-file capture separates them.
+- That first u32 is a **per-command counter, and the camera does not police it**: three deletes in one
+  session sending `1`, `2`, `3` were each answered `0000` (Xtra Edge Pro, incl. one that crossed a
+  re-registration). Mimo's capture shows `1` only because it was its first delete of the session, so
+  "constant 1" was the wrong reading of a sample size of one.
 - **Deletion is a batch operation, and one command covers the whole selection.** The official app
   deleting eleven files sends **one** `0x00/0x28` with `count=11` and gets **one** `0000` back, 100 ms
   later — not eleven commands, and no per-file acknowledgement. Handles go newest-first, matching the

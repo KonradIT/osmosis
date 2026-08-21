@@ -117,6 +117,14 @@
     <string name="deleting">Deleting %1$s…</string>
     <string name="deleted">Deleted %1$s</string>
     <string name="delete_no_response">Delete: no response</string>
+    <string name="delete_selected">Delete (%1$d)</string>
+    <string name="bulk_delete_title">Delete %1$d files from the camera?</string>
+    <string name="bulk_delete_message">%1$s\n\nThis permanently deletes them on the camera\'s card. It cannot be undone.</string>
+    <string name="bulk_delete_and_more">…and %1$d more</string>
+    <string name="bulk_delete_skipping">%1$d of the selected files have no delete handle and will be left alone.</string>
+    <string name="bulk_deleting">Deleting %1$d files…</string>
+    <string name="bulk_deleted">Deleted %1$d files</string>
+    <string name="bulk_delete_none">None of the selected files can be deleted — the camera gave no handle for them.</string>
     <string name="delete_failed">Delete failed (0x%1$04x)</string>
 
     <!-- Download progress -->

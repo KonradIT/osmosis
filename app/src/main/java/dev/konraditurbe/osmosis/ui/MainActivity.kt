@@ -277,6 +277,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         cameraList.setOnItemClickListener { _, _, pos, _ -> onCamRowClick(pos) }
         cameraList.setOnItemLongClickListener { _, _, pos, _ -> onCamRowLongClick(pos) }
         findViewById<View>(R.id.fabDownload).setOnClickListener { onDownloadClicked() }
+        findViewById<View>(R.id.fabDelete).setOnClickListener { onBulkDeleteClicked() }
         wireGalleryChips()
         // "Save logs" toggle → persist all log lines to a rotating .log file in external files dir.
         val prefs = getSharedPreferences("osmosis", MODE_PRIVATE)
@@ -1171,7 +1172,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         chipPhotos.setOnClickListener { if (chipPhotos.isChecked) chipVideos.isChecked = false; applyChipsToAdapter() }
         chipVideos.setOnClickListener { if (chipVideos.isChecked) chipPhotos.isChecked = false; applyChipsToAdapter() }
         chipFaved.setOnClickListener { adapter?.setFavedOnly(chipFaved.isChecked) }
-        chipSelect.setOnClickListener { adapter?.setSelectMode(chipSelect.isChecked) }
+        chipSelect.setOnClickListener { adapter?.setSelectMode(chipSelect.isChecked); updateDownloadFab() }
         chipSelect.setOnLongClickListener {
             val ad = adapter ?: return@setOnLongClickListener true
             if (!chipSelect.isChecked) { chipSelect.isChecked = true; ad.setSelectMode(true) }
@@ -1193,6 +1194,22 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 // Belt to the guard's braces: the guard is what actually prevents a second run, this
                 // just stops the button looking tappable while one is in flight.
                 isEnabled = !downloadRunning
+            }
+        updateBulkDeleteFab()
+    }
+
+    /**
+     * The bulk-delete FAB only exists while Select is on with something ticked — an irreversible
+     * button has no business sitting on the ordinary browse screen. Hidden outright rather than
+     * disabled, so there is nothing to fat-finger.
+     */
+    private fun updateBulkDeleteFab() {
+        val n = adapter?.selectedCount() ?: 0
+        val show = n > 0 && ::chipSelect.isInitialized && chipSelect.isChecked && !downloadRunning
+        findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabDelete)
+            ?.apply {
+                visibility = if (show) View.VISIBLE else View.GONE
+                text = getString(R.string.delete_selected, n)
             }
     }
 
@@ -1455,6 +1472,70 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     /**
+     * Confirm + delete everything ticked in Select mode.
+     *
+     * One `0x00/0x28` carries the whole selection — the official app deleting eleven files sends a
+     * single command with eleven handles and gets one `0000` back, so this is not a loop over
+     * [confirmDelete] and must not become one: eleven round trips would each pay the write-window
+     * re-registration, and a partial failure halfway through leaves no way to say what went.
+     *
+     * Files the manifest gave no usable handle for are dropped from the batch rather than guessed at
+     * — [CameraFile.deletable] already covers both a missing handle (a Pocket 3 still) and one shared
+     * with another file, which for an irreversible command must disqualify every claimant.
+     */
+    private fun onBulkDeleteClicked() {
+        val ad = adapter ?: return
+        val dl = datalink ?: return
+        val picked = ad.selectedEntries().map { it.first }
+        if (picked.isEmpty()) return
+        val (deletable, skipped) = picked.partition { it.deletable }
+        if (deletable.isEmpty()) { toast(getString(R.string.bulk_delete_none)); return }
+
+        // Name the first few rather than all of them: the count is in the title, and a dialog listing
+        // forty filenames scrolls the buttons off screen.
+        val shown = deletable.take(BULK_DELETE_NAMES_SHOWN).joinToString("\n") { it.name }
+        val more = deletable.size - BULK_DELETE_NAMES_SHOWN
+        val body = buildString {
+            append(shown)
+            if (more > 0) append("\n").append(getString(R.string.bulk_delete_and_more, more))
+            if (skipped.isNotEmpty()) append("\n\n").append(getString(R.string.bulk_delete_skipping, skipped.size))
+        }
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.bulk_delete_title, deletable.size))
+            .setMessage(getString(R.string.bulk_delete_message, body))
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.delete) { _, _ -> runBulkDelete(deletable, dl) }
+            .show()
+    }
+
+    private fun runBulkDelete(files: List<CameraFile>, dl: MediaSession) {
+        val handles = files.map { it.handle }
+        logLine("DELETE requested: ${files.size} files, handles " +
+            handles.joinToString(" ") { "0x%08x".format(it) })
+        toast(getString(R.string.bulk_deleting, files.size))
+        cmdExec.execute {
+            val status = runCatching { dl.deleteFiles(handles) }.getOrNull()
+            main.post {
+                when (status) {
+                    0 -> {
+                        logLine("DELETE OK (status 0x0000): ${files.size} files")
+                        toast(getString(R.string.bulk_deleted, files.size))
+                        removeFromGrid(files.map { it.path }.toSet())
+                    }
+                    // One command, one answer: there is no partial success to report. A no-reply may
+                    // still have landed, which is why nothing is dropped from the grid here — the next
+                    // list is the truth.
+                    null -> { logLine("DELETE: no response (timeout / no session)."); toast(getString(R.string.delete_no_response)) }
+                    else -> {
+                        logLine("DELETE failed: status 0x%04x for %d files".format(status, files.size))
+                        toast(getString(R.string.delete_failed, status))
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Drop one cell after a confirmed delete by rebuilding the grid without it.
      *
      * The surviving files keep their handles. This used to zero them all, on the worry that a delete
@@ -1464,9 +1545,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * first was destroyed. Mimo does re-list after each delete, but to refresh what it *shows*, not
      * because the handles moved. Zeroing them made every delete after the first look unavailable.
      */
-    private fun removeFromGrid(path: String) {
+    private fun removeFromGrid(path: String) = removeFromGrid(setOf(path))
+
+    private fun removeFromGrid(paths: Set<String>) {
         val ad = adapter ?: return
-        showGrid(ad.allFilesSnapshot().filter { it.path != path }, preserveFilters = true)
+        // Drop them from the queue as well, or the Download FAB keeps counting files that no longer
+        // exist and a later download tries to fetch them.
+        ad.dequeuePaths(paths)
+        showGrid(ad.allFilesSnapshot().filter { it.path !in paths }, preserveFilters = true)
     }
 
     private fun toast(s: String) =
@@ -1818,6 +1904,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
          *  Comfortably above the few hundred MB of thumbnails, logs and settings a camera keeps
          *  on a card it considers empty. */
         private const val EMPTY_LIST_USED_MB = 2_000
+        /** How many filenames the bulk-delete confirmation names before it says "…and N more". */
+        private const val BULK_DELETE_NAMES_SHOWN = 6
     }
 }
 

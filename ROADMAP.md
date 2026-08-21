@@ -179,23 +179,6 @@ approval dialog. `PcapAnalysis` rides along on both for reading a capture with o
 **Blockers:** hardware. Both branches are instrumentation waiting for one run each — nothing more can
 be deduced from what we have.
 
-### 19. Bulk delete
-
-When tapping Select, spawn a second FAB above the Download button for mass delete items.
-
-**Unblocked 2026-08-20 — the capture exists and the wire format is settled.** Deleting eleven files
-in the official app is **one** `0x00/0x28` carrying `count=11` and eleven handles, answered by a
-single `0000` in 100 ms ([MEDIA_PROTOCOL §2](MEDIA_PROTOCOL.md#2-delete-media)). Every handle matched
-what our own decode of the same card produced, so the mapping needs no new work. Two of the eleven
-were interval groups, each sent as its `_001` lead handle alone — a handle addresses the group, so no
-group-expansion is needed first.
-
-That capture also corrected the payload: the u32 after the handles is a constant `1`, not a second
-copy of the count. Our single-file sends were right only because the two are identical at `count=1`.
-
-**What is left is UI and safety**, not protocol: a selection FAB, and deciding what an irreversible
-eleven-file delete has to confirm. The existing collision guard still applies per handle.
-
 ---
 
 ## Done
@@ -374,3 +357,29 @@ Four things that cost real time and are worth not re-deriving:
 Reading a capture with our own decoder: `PcapAnalysis` (test sources, skipped unless `OSMOSIS_PCAP` is
 set) walks a pcap with the app's own `DumlTransport.scanFrames` and prints the pktType mix, command
 histogram, `0x4a` subtypes and a media timeline. Every byte-level claim above came out of it.
+
+### 19. Bulk delete — 2026-08-20
+
+Tap Select, tick cells, and a red `Delete (n)` FAB rises above Download. The whole selection goes out
+as **one** `0x00/0x28` — verified on an Xtra Edge Pro: seven files, seven handles, `0x0000` back in
+1.04 s, inline on the live browse session with no re-registration.
+
+Not a loop over the single-file delete, and it must not become one. Eleven round trips would each pay
+the write-window re-registration, and a failure halfway through leaves nothing able to say which files
+went. The official app agrees — eleven files in its own capture is a single command with one `0000`.
+
+The wire format came from that capture ([MEDIA_PROTOCOL §2](MEDIA_PROTOCOL.md#2-delete-media)) and
+needed no new protocol work: every handle matched our own decode of the same card, and an interval
+group is addressed by its `_001` lead alone, so nothing has to be expanded first. It also corrected
+the payload — the u32 after the handles is a constant `1`, not a second copy of the count, which our
+single-file sends only got right because the two are identical at `count=1`.
+
+Safety is `CameraFile.deletable`: a file with no handle (a Pocket 3 still) or one shared with another
+file is dropped from the batch and counted in the confirmation rather than guessed at. On a no-reply
+nothing leaves the grid — the delete may still have landed, and the next list is the only honest
+answer.
+
+The capture also read one field wrong, and hardware settled it: the u32 after the handles is a
+per-command counter the camera does not police, not a constant `1`. Three deletes in one session sent
+`1`, `2`, `3` and each came back `0000`. Mimo's capture showed `1` because it was its first delete of
+the session — a sample size of one, read as a constant.

@@ -246,6 +246,22 @@
             app:indicatorSize="34dp"
             app:trackThickness="3dp" />
 
+        <!-- Sits above fabDownload (18dp margin + its ~56dp height + 12dp gap). Gone unless Select is
+             on with something ticked, so the ordinary browse screen is unchanged. -->
+        <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+            android:id="@+id/fabDelete"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="18dp"
+            android:layout_marginBottom="86dp"
+            android:text="@string/delete"
+            android:textColor="@color/osmo_on_accent"
+            android:visibility="gone"
+            app:backgroundTint="@color/osmo_danger"
+            app:icon="@drawable/ic_delete"
+            app:iconTint="@color/osmo_on_accent" />
+
         <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
             android:id="@+id/fabDownload"
             android:layout_width="wrap_content"
