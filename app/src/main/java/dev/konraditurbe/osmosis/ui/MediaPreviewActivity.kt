@@ -62,7 +62,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var btnMarkOut: Button
     private lateinit var trimRow: View
     private lateinit var controls: View
-    private lateinit var seekBar: SeekBar
+    private lateinit var seekBar: HighlightSeekBar
     private lateinit var txtCur: TextView
     private lateinit var txtTotal: TextView
     private lateinit var btnPlay: ImageButton
@@ -89,8 +89,6 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var selectedFrame = 0
     private lateinit var burstRow: LinearLayout
     private lateinit var burstStrip: View
-    private lateinit var highlightRow: LinearLayout
-    private lateinit var highlightStrip: View
     private val imageLoader by lazy { ImageLoader(http) { Log.i("Osmosis", it) } }
 
     // Scrub preview: the frame under the thumb, floated above the seek bar during a drag.
@@ -133,6 +131,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         trimRow = findViewById(R.id.trimRow)
         controls = findViewById(R.id.controls)
         seekBar = findViewById(R.id.seekBar)
+        seekBar.setMarkColor(ContextCompat.getColor(this, R.color.osmo_accent))
         txtCur = findViewById(R.id.txtCur)
         txtTotal = findViewById(R.id.txtTotal)
         btnPlay = findViewById(R.id.btnPlay)
@@ -140,8 +139,6 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnFf = findViewById(R.id.btnFf)
         burstRow = findViewById(R.id.burstRow)
         burstStrip = findViewById(R.id.burstStrip)
-        highlightRow = findViewById(R.id.highlightRow)
-        highlightStrip = findViewById(R.id.highlightStrip)
         previewRoot = findViewById(R.id.previewRoot)
         scrubPreview = findViewById(R.id.scrubPreview)
         scrubImage = findViewById(R.id.scrubImage)
@@ -219,7 +216,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         groupPaths = emptyList(); groupThumbs = emptyList()   // strip only for the initially-tapped burst
         burstRow.removeAllViews(); burstStrip.visibility = View.GONE
         main.removeCallbacks(highlightsRunnable)
-        highlightRow.removeAllViews(); highlightStrip.visibility = View.GONE
+        seekBar.marks = emptyList()
         scrubFrames.close()
         hideScrubPreview()
         runCatching { videoView.stopPlayback() }
@@ -541,44 +538,21 @@ class MediaPreviewActivity : AppCompatActivity() {
         topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
     }
 
-    /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge) and show ⚑ m:ss
-     *  chips that seek the player. **Debounced** so swiping through clips doesn't spam the datalink (each
-     *  fetch can be a fresh session on the Xtra); the result is dropped if we've since moved on. */
+    /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge) and draw them
+     *  as ◇ on the seek bar. **Debounced** so swiping through clips doesn't spam the datalink; the result
+     *  is dropped if we've since moved on. */
     private val highlightsRunnable = Runnable {
         val handle = file.handle
         if (handle == 0L) return@Runnable
         val at = navIndex
         Thread {
             val marks = runCatching { Highlights.provider?.invoke(handle) }.getOrNull().orEmpty()
-            if (marks.isNotEmpty()) main.post { if (!isFinishing && navIndex == at) showHighlights(marks) }
+            if (marks.isNotEmpty()) main.post { if (!isFinishing && navIndex == at) seekBar.marks = marks }
         }.start()
     }
     private fun loadHighlights() {
         main.removeCallbacks(highlightsRunnable)
         main.postDelayed(highlightsRunnable, 400)
-    }
-
-    private fun showHighlights(marks: List<Int>) {
-        highlightStrip.visibility = View.VISIBLE
-        val accent = ContextCompat.getColor(this, R.color.osmo_accent)
-        val d = resources.displayMetrics.density
-        for (ms in marks) {
-            val chip = TextView(this).apply {
-                text = "⚑ ${mmss(ms.toLong())}"
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 12f
-                setPadding((10 * d).toInt(), (5 * d).toInt(), (10 * d).toInt(), (5 * d).toInt())
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { setMargins((4 * d).toInt(), 0, (4 * d).toInt(), 0) }
-                setBackgroundColor(accent)
-                setOnClickListener {
-                    seekToMs(ms.toLong())
-                    if (controls.visibility != View.VISIBLE) toggleControls()
-                }
-            }
-            highlightRow.addView(chip)
-        }
     }
 
     /**
@@ -685,6 +659,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             spinner.visibility = ProgressBar.GONE
             videoView.start()
             seekBar.max = videoView.duration.coerceAtLeast(1)
+            seekBar.invalidate()   // redraw ◇ marks that arrived before the duration scale was known
             txtTotal.text = mmss(videoView.duration.toLong())
             updatePlayIcon()
             main.removeCallbacks(tick)

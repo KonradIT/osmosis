@@ -47,7 +47,7 @@ interface MediaSession {
     /** Enumerate a burst/interval group's frames. Path-based cameras only. */
     fun expandBurstGroup(lead: CameraFile): List<CameraFile> = listOf(lead)
 
-    /** Highlight marker positions, in seconds. Path-based cameras only. */
+    /** Highlight marker positions, in **milliseconds**. Path-based cameras only. */
     fun getHighlights(handle: Long): List<Int> = emptyList()
 
     /** Delete by manifest handle; the reply status word (0 = OK), or null. Path-based cameras only. */
