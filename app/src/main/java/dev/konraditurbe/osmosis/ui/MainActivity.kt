@@ -216,6 +216,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     // is the fallback for models that don't answer.
     private var credsRequested = false
 
+    /** DJI's `LctActivateState`, off the camera's own 0x00/0x32 push. -1 until it says. */
+    private var activateState = -1
+
+    /** DJI's `LctActivateState` enum, from Mimo's `LctActivateState.java`. */
+    private fun activateStateName(s: Int) = when (s) {
+        0 -> "not activated"; 1 -> "activated"; 2 -> "uninitialized"; 3 -> "factory activated"
+        0xFFFE -> "not supported"; else -> "unknown ($s)"
+    }
+
+    /** True only when the camera has said, in its own words, that it isn't activated yet. */
+    private fun saysNotActivated() = activateState == 0 || activateState == 2
+
     // The Osmo 360 AP is marked WPA3-SAE, but some phones (e.g. Android 10 tablets) fail to SAE-join
     // it; on that failure we retry the same AP as WPA2 once before giving up. One-shot per offload.
     private var wpa3FallbackDone = false
@@ -584,7 +596,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         wifiUp = false; datalinkStarted = false; wifiRejoins = 0; resumeDownloadOnRejoin = false
         // close() above cancels the gatt callback, so onDisconnected won't fire to reset these — do it
         // here, or the next camera's pairing/REQ replies get mis-deduped against the last camera's state.
-        lastPairStatus = -99; credsRequested = false; reqSeen.clear()
+        lastPairStatus = -99; credsRequested = false; activateState = -1; reqSeen.clear()
         setConnectProgress(0)
     }
 
@@ -652,6 +664,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         offloadMode = true
         offloadTriggered = false
         credsRequested = false
+        activateState = -1
         wpa3FallbackDone = false
         connecting = true
         setConnectProgress(3) // tap → connecting
@@ -672,6 +685,22 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         getSharedPreferences("osmosis", MODE_PRIVATE).getString("pass_$addr", "") ?: ""
 
     /** Per-camera password capture (keyed by MAC). SSID comes from the BLE device name. */
+    /**
+     * Shown instead of the password prompt when the camera reports it has never been activated
+     * ([saysNotActivated]) — it keeps its WiFi off, so there is no network any password would reach.
+     *
+     * There is no Activate button because there is nothing we could put behind it: activation is a
+     * challenge-response the camera answers only to DJI's servers (0x00/0x32, see the protocol map),
+     * so pointing at Mimo is the honest answer rather than a placeholder.
+     */
+    private fun showNotActivated() {
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.camera_not_activated_title, pillName()))
+            .setMessage(R.string.camera_not_activated_message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
     private fun promptPasswordFor(addr: String, onSaved: () -> Unit) {
         val prefs = getSharedPreferences("osmosis", MODE_PRIVATE)
         val input = EditText(this).apply {
@@ -821,6 +850,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         main.postDelayed({
             if (offloadTriggered) return@postDelayed
             val addr = currentAddress
+            // A camera that has never been activated keeps its WiFi off — there is no AP to join and no
+            // password that would help — and it says so itself, in the 0x00/0x32 state push read below.
+            // Show what's actually wrong rather than a password prompt for a network that doesn't exist.
+            if (saysNotActivated()) {
+                logLine("Camera is ${activateStateName(activateState)} — it has never been activated, so it has no WiFi AP to join.")
+                showNotActivated()
+                return@postDelayed
+            }
             when {
                 offloadPass.isNotEmpty() -> { logLine("No BLE creds — using the saved password."); maybeStartOffload() }
                 addr != null -> { logLine("No BLE creds — asking for the password."); promptPasswordFor(addr) { offloadPass = savedPassFor(addr); maybeStartOffload() } }
@@ -1793,6 +1830,21 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 else -> logLine("CMD07 <- 0x07/%02x  [%s]".format(parsed.cmdId, p.toHex()))
             }
             return
+        }
+
+        // The camera volunteers its own activation state, once a second, until it is activated —
+        // 0x00/0x32 (AMT.OneTimeVerify), sub-command 0x33, state byte at 20, then a length-prefixed
+        // serial. Measured against an HCI snoop of a factory-fresh Nano being activated: 155 of these
+        // before, and the push stops dead afterwards. The values are DJI's own LctActivateState.
+        if (parsed != null && parsed.cmdSet == 0x00 && parsed.cmdId == 0x32) {
+            val p = parsed.payload
+            if (p.size >= 21 && p[0].toInt() == 0x33 && p[1].toInt() == 0x33) {
+                val st = p[20].toInt() and 0xFF
+                if (st != activateState) {
+                    activateState = st
+                    logLine("Activation state: ${activateStateName(st)}")
+                }
+            }
         }
 
         // A drone tunnels its identity beacon inside 0x51/0x01 — and sends it over BLE too, long before
