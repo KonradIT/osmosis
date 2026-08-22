@@ -149,6 +149,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             queued = !queued
             commitQueue()
             refreshQueueButton()
+            if (queued) offerSidecar() else dropSidecar()
         }
 
         navItems = dev.konraditurbe.osmosis.net.PreviewNav.items
@@ -259,6 +260,54 @@ class MediaPreviewActivity : AppCompatActivity() {
         else null
         val trim = if (hasTrim()) TrimRange(trimStartMs, trimEndMs) else null
         dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(file.path, queued, trim, member)
+    }
+
+    /** The file the queue button actually acts on: the shown burst frame, else the current item. */
+    private fun queueTarget(): CameraFile =
+        if (groupPaths.isNotEmpty() && selectedFrame > 0)
+            file.copy(path = groupPaths[selectedFrame], thumbPath = groupThumbs.getOrNull(selectedFrame) ?: file.thumbPath)
+        else file
+
+    /**
+     * ROADMAP #19: when a queued still has an unlisted RAW (`.DNG`) beside it, or a queued clip an
+     * audio-backup (`.WAV`), offer to queue that too. The manifest carries no reliable flag for it, so
+     * confirm the companion exists with one HEAD (off the main thread) before prompting. It is queued as
+     * its own entry, carrying its own path through the queue's `member` slot so it downloads with no grid
+     * cell of its own; the HEAD's Content-Length becomes its size for the progress/duplicate checks.
+     */
+    private fun offerSidecar() {
+        val target = queueTarget()
+        val sc = target.sidecarCandidate() ?: return
+        val url = PathAddressing.byPath(target.storage, sc.path)
+        Thread {
+            val len = http.head(url)
+            if (len < 0) return@Thread                    // no companion file on the card
+            main.post {
+                if (!queued) return@post                  // user de-queued while the HEAD was in flight
+                androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle(R.string.sidecar_title)
+                    .setMessage(getString(R.string.sidecar_msg, sc.ext, humanSize(len)))
+                    .setPositiveButton(android.R.string.yes) { _, _ ->
+                        dev.konraditurbe.osmosis.net.PreviewNav.setQueued
+                            ?.invoke(sc.path, true, null, sc.copy(sizeBytes = len))
+                        Toast.makeText(this, getString(R.string.sidecar_added, sc.ext), Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton(android.R.string.no, null)
+                    .show()
+            }
+        }.start()
+    }
+
+    /** Drop a companion when its parent is de-queued — silent, and a no-op if it was never added. */
+    private fun dropSidecar() {
+        val sc = queueTarget().sidecarCandidate() ?: return
+        dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(sc.path, false, null, null)
+    }
+
+    private fun humanSize(b: Long): String = when {
+        b >= 1_000_000_000 -> "%.1f GB".format(b / 1e9)
+        b >= 1_000_000 -> "%.0f MB".format(b / 1e6)
+        else -> "%d KB".format(b / 1000)
     }
 
     /** Build the 1×n burst/interval frame strip: a thumbnail per frame, tap to view it, accent border on

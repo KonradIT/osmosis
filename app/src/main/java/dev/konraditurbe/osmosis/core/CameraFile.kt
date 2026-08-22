@@ -181,6 +181,27 @@ data class CameraFile(
     val isPanorama: Boolean get() = mediaType == MediaFileType.PANORAMA
     val isImage: Boolean get() = ext in setOf("JPG", "JPEG", "DNG", "HEIC", "RAW")
 
+    /**
+     * The unlisted companion file that *might* sit beside this one — a RAW `.DNG` for a still shot in
+     * JPEG+RAW, or an audio-backup `.WAV` for a clip recorded with Built-In Mic Audio Backup. It shares
+     * this file's path with the extension swapped and is served over the same `/v2` mount, but the
+     * manifest carries no flag for it (candidate bytes were disproven — they fire on burst leads too),
+     * so a caller confirms it with one HTTP HEAD before offering it. Null for types that never have one.
+     * [sizeBytes] is 0 until the HEAD fills it in; [handle] is cleared (a sidecar isn't independently
+     * deletable). See ROADMAP #19 / MEDIA_PROTOCOL §19.
+     */
+    fun sidecarCandidate(): CameraFile? {
+        val kind = when (ext) {
+            "JPG", "JPEG" -> "DNG"
+            "MP4", "MOV" -> "WAV"
+            else -> return null
+        }
+        return copy(
+            path = path.substringBeforeLast('.', path) + ".$kind",
+            handle = 0L, handleShared = false, handleCandidate = 0L, sizeBytes = 0L,
+        )
+    }
+
     companion object {
         /**
          * Marks a thumbnail that has to be lifted out of the original's EXIF block rather than fetched
