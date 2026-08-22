@@ -84,6 +84,8 @@
     <string name="loading_burst">Loading burst…</string>
     <string name="not_connected">Not connected</string>
     <string name="no_media_found">%1$s has no media on it</string>
+    <string name="camera_not_activated_title">%1$s is a brand new camera, not activated</string>
+    <string name="camera_not_activated_message">Activate it once in DJI Mimo. Unfortunately this step is mandatory, then you can delete Mimo.</string>
 
     <!-- Date headers -->
     <string name="today">TODAY</string>

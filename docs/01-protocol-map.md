@@ -148,6 +148,52 @@ The AP **sleeps when idle** and must be woken per session this way. IP: camera `
 gets `192.168.2.x` via DHCP. Security: **WPA2-PSK** on Nano and Xtra (WPA3-SAE on the 360, *inferred*),
 5.8 GHz.
 
+### 5b-2. A camera that has never been activated has no AP at all
+
+Out of the box, before anyone activates it, a camera pairs and talks normally over BLE and **keeps its
+WiFi off**. Measured on a factory-fresh Osmo Nano:
+
+| probe | unactivated Nano | activated Xtra |
+|-------|------------------|----------------|
+| `07/07` GetWifiSsid | *no reply* | `"OsmoNano-5A31"` after activation |
+| `07/0e` GetWifiPassword | *no reply* | answers |
+| `07/0c` GetWifiMac | *no reply* | answers |
+| `07/19` GetCountryCode | `00 FF 46 46 00` — ASCII `"FF"` | `00 FF 45 53 00` — `"ES"` |
+| `07/41` Wifi.OpenWifi | **accepted, status `00`, no AP appears** | — |
+| `07/39` WiFi Get Work Mode | `e0` (INVALID_CMD) | `e0` |
+
+So receiver 0x07 is alive and answering on the merits — the AP is what activation gates, not the
+credential getters, and no 0x07 command brings it up. There is nothing to join and no password that
+would help. Do not offer a password prompt in this state.
+
+**Do not** use credential silence alone as the tell: an activated Xtra withheld all three while
+pushing `0x00/0x99` at ~52/s.
+
+### 5b-3. Activation itself — `0x00/0x32` (AMT.OneTimeVerify)
+
+From an HCI snoop of the official app activating a factory-fresh Nano. The sub-command is payload
+byte 0 (repeated in byte 1).
+
+| sub | dir | size | contents |
+|-----|-----|------|----------|
+| `0x33` | ← | 55 B | **state push, 1 Hz** — `[33 33][18×00][state:1][len:1][serial]` |
+| `0x35` | → | 135 B | body serial + a step counter (`0x22` before the write, `0x24` after) |
+| `0x36` | ← | 154 B | per component: type byte (`08`, `0a`), component serial, **16-byte challenge** |
+| `0x37` | → | 256 B | same component + an 18-digit token + the **16-byte response** |
+
+`state` is DJI's `LctActivateState`: `0` not activated, `1` activated, `2` uninitialized, `3` factory
+activated, `0xFFFE` not supported. A factory-fresh Nano pushes `02`; an Xtra in normal use pushes `01`.
+**The push stops the moment the camera is activated** — 155 of them before, 1 after.
+
+The camera issues a random 16-byte challenge and the app returns a 16-byte response, so the material
+is minted by DJI's server (Mimo's `ActivateProto` wraps it as `ActivationResponse.contents[]`, a
+repeated bytes field — two entries here, one per component). **Activation cannot be forged offline.**
+
+Immediately afterwards the app sets the region — `07/18 SetCountryCode`, payload `FF <cc:2> 00`, e.g.
+`ff 45 53 00`, reply `00`. Which of the two actually releases the AP is **still unknown**: both
+happened within a second of each other. Worth one probe on the next factory-fresh body, because
+`07/18` is unsigned and we can send it ourselves.
+
 ### 5c. Join from Android
 
 - API 29+ **`WifiNetworkSpecifier`** → `ConnectivityManager.requestNetwork(...)` with a
