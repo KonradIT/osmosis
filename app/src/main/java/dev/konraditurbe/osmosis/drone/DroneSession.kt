@@ -278,6 +278,63 @@ class DroneSession(
         return j.done
     }
 
+    // ---- favourite / delete (addressed by packed file_index) ---------------------------------------
+    //
+    // Both are the SAME DUML commands the path cameras use — 0x02/0xbf favourite, 0x00/0x28 delete —
+    // with the file_index sitting where a camera puts its manifest handle, and sender 0x02 → receiver
+    // 0x01, type 0x40, exactly as the camera. Reverse-engineered from a Mavic 3 capture (fav 603/604,
+    // delete 600/601/602) and built by [DroneManifest.favouriteCmd] / [deleteCmd]. One counter is
+    // shared across both, matching DJI Fly (fav 1, fav 2, delete 3).
+
+    /** Shared per-command counter for favourite/delete, like DJI Fly's. */
+    private var writeCounter = 1
+
+    /**
+     * Send a write command on the live session and wait for its `0x0000` reply.
+     *
+     * Runs on the session thread via [onDroneThread] — the keep-alive owns the socket, so a write from
+     * any other thread would be starved in the same way an un-queued page fetch was. The reply is a
+     * frame with the same set/cmd carrying a status word (`00` = OK); our own outbound frame never
+     * comes back on the receive side, so a set/cmd match in the RX stream is unambiguously the reply.
+     * Returns the status (0 = OK), or null on no reply / no session.
+     */
+    private fun droneWrite(set: Int, cmd: Int, payload: ByteArray, label: String): Int? {
+        var status: Int? = null
+        val ran = onDroneThread(8_000) {
+            sendDuml(set, cmd, payload, receiverType = 0x01, receiverId = 0)
+            log("datalink: drone $label 0x%02x/0x%02x sent".format(set, cmd))
+            val rx = java.io.ByteArrayOutputStream()
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while (System.nanoTime() < deadline && status == null) {
+                dronePump(200, rx)   // keeps the uplink/beacon alive while we wait
+                sendAck()
+                for ((s, c, pl) in scanFrames(rx.toByteArray())) if (s == set && c == cmd) {
+                    status = if (pl.isEmpty()) 0
+                    else (pl[0].toInt() and 0xFF) or (if (pl.size > 1) (pl[1].toInt() and 0xFF) shl 8 else 0)
+                    break
+                }
+            }
+        }
+        if (!ran) log("datalink: drone $label — no session thread")
+        log("datalink: drone $label status=${status?.let { "0x%04x".format(it) } ?: "no reply"}")
+        return status
+    }
+
+    /** Favourite/unfavourite one file by its packed `file_index`. Returns true on `0x0000`. */
+    override fun setFavorite(handle: Long, on: Boolean): Boolean =
+        droneWrite(0x02, 0xBF, DroneManifest.favouriteCmd(handle, writeCounter++, on),
+            "FAVOURITE idx=$handle on=$on") == 0
+
+    /**
+     * Delete files by packed `file_index` — **irreversible**. One command carries the whole batch, as
+     * DJI Fly does. Returns the reply status (0 = OK), or null on no reply, matching the camera path.
+     */
+    override fun deleteFiles(handles: List<Long>): Int? {
+        if (handles.isEmpty()) return null
+        return droneWrite(0x00, 0x28, DroneManifest.deleteCmd(handles, writeCounter++),
+            "DELETE n=${handles.size}")
+    }
+
     /**
      * A drone needs the uplink stream kept running or it stops talking to us, and it wants none of the
      * camera's playback/status polling — so it gets its own loop, which doubles as the server for

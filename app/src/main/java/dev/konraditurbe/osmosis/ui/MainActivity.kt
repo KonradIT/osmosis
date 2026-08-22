@@ -1463,9 +1463,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      *  the serialized favorite worker and reverts the badge on failure. */
     private fun toggleFavorite(f: CameraFile, dl: MediaSession) {
         val on = !f.starred
-        // Videos carry their own handle; photos don't, so fall back to the manifest-fitted one (a
-        // hardcoded Nano formula is why photo favorites failed on the Xtra). See withCmdHandles.
-        val favHandle = if (f.handle != 0L) f.handle else f.cmdHandle
+        // A drone addresses by file_index; a path camera by its manifest handle, or the manifest-fitted
+        // one for photos (a hardcoded Nano formula is why photo favorites failed on the Xtra — see
+        // withCmdHandles). opHandle covers handle and file_index; cmdHandle is the photo fallback.
+        val favHandle = if (f.opHandle != 0L) f.opHandle else f.cmdHandle
         if (favHandle == 0L) { toast(getString(R.string.favorite_no_handle, f.name)); return }
         // Optimistic badge only — the camera's manifest is the single source of truth for star state, so a
         // reload shows whatever the camera reports (the Xtra reports none; that's fine, we don't fake it).
@@ -1479,7 +1480,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** Confirm + delete [f] from the camera (DUML 0x00/0x28) — irreversible, so it's gated by a dialog. */
     private fun confirmDelete(f: CameraFile, dl: MediaSession) {
-        val hx = "0x%08x".format(f.handle)
+        val hx = "0x%08x".format(f.opHandle)
         AlertDialog.Builder(this)
             .setTitle(R.string.delete_from_camera_title)
             .setMessage(getString(R.string.delete_from_camera_message, f.name, hx))
@@ -1488,7 +1489,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 logLine("DELETE requested: ${f.name} (handle $hx)")
                 toast(getString(R.string.deleting, f.name))
                 cmdExec.execute {
-                    val status = runCatching { dl.deleteFiles(listOf(f.handle)) }.getOrNull()
+                    val status = runCatching { dl.deleteFiles(listOf(f.opHandle)) }.getOrNull()
                     main.post {
                         when (status) {
                             0 -> {
@@ -1546,7 +1547,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     private fun runBulkDelete(files: List<CameraFile>, dl: MediaSession) {
-        val handles = files.map { it.handle }
+        val handles = files.map { it.opHandle }
         logLine("DELETE requested: ${files.size} files, handles " +
             handles.joinToString(" ") { "0x%08x".format(it) })
         toast(getString(R.string.bulk_deleting, files.size))
