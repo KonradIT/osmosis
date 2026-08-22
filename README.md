@@ -145,6 +145,14 @@ Plain Android Views (no Jetpack Compose). Built with AGP 8.5.2 / Gradle 8.7 / JD
 
 Planned work and reverse-engineering notes live in [ROADMAP.md](ROADMAP.md).
 
+## Projects using Osmosis references:
+
+- https://github.com/brianmerchant/Kaze-for-DJI
+- https://github.com/erik-sutton95/OpenPocketCine
+- https://github.com/intermittech/OsmoOffload
+- https://github.com/rover1312/shutterlink
+- https://github.com/brianmerchant/Pocket3Direct-Android
+
 ## Credits
 
 The monumental task of reverse engineering DJI's DUML protocol was initially done by the [DJI OGs](https://github.com/o-gs). DJI never released an SDK for their Osmo camera line, forcing users onto the DJI Mimo app. Thankfully several folks on GitHub open-sourced their reverse-engineering efforts to interact with DJI cameras over BLE and WiFi:

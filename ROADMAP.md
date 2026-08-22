@@ -77,20 +77,6 @@ duration, fps, resolution and size, all manifest fields, and nothing about expos
   decompiled DJI-derived app ([MEDIA_PROTOCOL §29](MEDIA_PROTOCOL.md#29-http-media-api-v1--dcf-indexed))
   but never requested against an aircraft. Subtypes 3–16 were refused on a Neo 2.
 
-### 17. Mavic 3: resolution and fps in the grid
-
-Drone cells show duration and size but no resolution, because the 94-byte DCF record is decoded only as
-far as `+14` ([DcfRecords](app/src/main/java/dev/konraditurbe/osmosis/dcf/DcfRecords.kt): mtime `@0`,
-size `@4`, index `@8`, duration `@12`). The format fields are somewhere in the remaining ~80 bytes.
-
-Do it the way the camera's was done, because that worked: pull a handful of clips shot at deliberately
-different resolutions and frame rates, then diff their records against `ffprobe`.
-
-**Blockers:** needs an aircraft. Two cautions from the camera exercise — **table the enum, never compute
-it** (the camera's codes are sparse and unordered), and **don't assume the camera's table transfers**.
-It may well be the same DJI-wide index, which would make this nearly free, but a wrong shared assumption
-mislabels every clip.
-
 ### 18. Drones beyond the Mavic 3
 
 - **Neo 2 (`0x007e`) stalls at the session-open.** It hands over creds with the `DJI FLY` token and
@@ -125,3 +111,27 @@ approval dialog. `PcapAnalysis` rides along on both for reading a capture with o
 
 **Blockers:** hardware. Both branches are instrumentation waiting for one run each — nothing more can
 be deduced from what we have.
+
+### 19. DNG / sidecar file download:
+
+Allow downloading sidecar files such as DNG photos, audio files, etc...
+
+Need to do research on what sort of files can acompany each video/photo.
+
+- Video: 
+
+"Audio backup" / "Built In Mic Audio Backup" feature on Xtra Edge Pro/Osmo Nano.
+
+- Photo:
+
+DNG sidecar file when shooting in JPEG+DNG mode
+
+UI:
+
+"Add to queue" button remains one button, clicking adding to queue prompts to also append to the queue the sidecar file.
+
+**Sidecar file detected**
+
+Want to add (DNG/AAC/XXX) file to the queue as well?
+
+*Yes / no*
