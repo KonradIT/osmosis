@@ -296,7 +296,7 @@ Each record carries a **marker** the header fields hang off: **videos `03 ff 19 
 | **media byte size** | **`u32-LE`, 14 B before the `19 06` pair** (= video `marker − 12`) | real file size, **video *and* photo** |
 | proxy (`.LRF`) size | `u32-LE @ marker + 30` | the low-res sidecar's size |
 | fps | rational `<u32 num><u32 den>`, in the record's enum block | `a861 0000 e803 0000` = 25000/1000 = **25 fps**; `3075 0000 e903 0000` = 30000/1001 = **29.97**. Written twice in a row; `den` ∈ {1000, 1001}. Search must stop at the next record's head — see below |
-| frameRate | `u8 @ marker − 2` | the `VideoFrameRate` enum for the same value (table below) |
+| frameRate | `u8 @ marker − 2` | frame-rate code for the same value (table below) |
 | resolution *(video)* | `u8 @ marker − 1` | video-format index → pixel size (table below) |
 | **duration *(video)*** | **`u16-LE @ marker − 4`** (= `head + 4`) | whole **seconds**; = `floor(moov ms / 1000)`. |
 | **width, height *(photo)*** | **`u32-LE`, `+58` / `+62` from the `19 06` pair** | photo pixel dimensions (videos have none here — they use the resolution enum) |
@@ -436,8 +436,8 @@ The `0x00/0x27` tagged record above is the **only** media-list wire format:
 | `fileType` | enum `MediaFileType` | **mapped**: `u8` two bytes before the constant `19 06` tag — the same byte the delete-handle marker reads as its "kind". It is the only thing separating an in-camera panorama (`4`) from an ordinary JPEG (`0`), both of which are written as `.JPG`. Reachable at `@ mediaPath − 15` only where the media path follows the marker (Pocket 3); where the filename field sits in between (Action 6) that offset holds other bytes, so read it from the marker or report unknown — never from the offset alone |
 | `fileSize` | **Long** | the real byte size — **mapped**: `u32-LE` 14 bytes before the constant `19 06` tag, i.e. `@ marker − 12` on a record that has a marker. Do **not** find the tag by scanning for the `ff`/`fe` byte in front of it: that byte is `f6` on a Pocket 3 still and `c7` on a panorama, so the scan misses the record and reads the **next** one's size. Anchor on the marker, or — for stills that carry no marker — on the fixed `@ mediaPath − 13` |
 | `duration` | **Long** | video length (ms) |
-| `frameRate` | enum `VideoFrameRate` | **mapped**: `u8 @ marker − 2`; the fps rational carries the same value |
-| `resolution` | enum `VideoResolution` | **mapped**: `u8 @ marker − 1` (table below) |
+| `frameRate` | frame-rate code | **mapped**: `u8 @ marker − 2`; the fps rational carries the same value |
+| `resolution` | resolution code | **mapped**: `u8 @ marker − 1` (table below) |
 | `date` | `DateTime` | capture time |
 | `starTag` | enum | favourite / marked flag — **mapped**: `u8 @ [ff\|fe] 19 06 + 9` |
 | `orientation`, `cameraOrientation` | enum | rotation |
@@ -485,7 +485,7 @@ full twelve bytes; a shortened signature matches on bodies where the following b
 reports everything as unfavourited. Writing a favourite works on every body regardless
 ([§3](#3-favorite--star-media)).
 
-**frameRate** (`marker−2`) — `VideoFrameRate`:
+**frameRate** (`marker−2`) — frame-rate codes:
 
 | code | fps |
 |------|-----|
@@ -774,9 +774,9 @@ sequence window is *not* enforced — that measurement is from an aircraft. Came
 
 | name | contents |
 |------|----------|
-| `cam_video_param_v2` | **`[resolution:u8][fps_idx:u8]…`** — the live video setting. `67 02` = res 103 (4K 4:3) @ fps idx 2 (25 fps). Codes match [§1](#1-get-media-list)'s `VideoResolution`/`VideoFrameRate` tables. |
+| `cam_video_param_v2` | **`[resolution:u8][fps_idx:u8]…`** — the live video setting. `67 02` = res 103 (4K 4:3) @ fps idx 2 (25 fps). Codes match [§1](#1-get-media-list)'s resolution / frame-rate tables. |
 | `camcap_video_format` | **capability list**: `01 \| len:u16-LE \| count:u8 \| count × [res:u8][fps_idx:u8][flags:u8]`. Self-validating (`3×35+1 = 106` = declared len). Nano returns 35 pairs — 4K 16:9, 2.7K 16:9, 2.7K 4:3, 1080p and res `0x0c` at 24–60; **4K 4:3 caps at 50**. `0x0c` (12) = **1920×1440 (1080p 4:3)** per [§1](#1-get-media-list)'s Resolution table — the same enum, so the capability list and the manifest read through one another. |
-| `cam_photo_param_new` | **the live PHOTO setting** (24 B) — `[?][0x15][00][size:u8][aspect:u8]…`, i.e. **size @ byte 3, aspect ratio @ byte 4**. `02 15 00 04 00 …` = L, 4:3. Sizes are the camera's own **letter** labels, *not* megapixels (the pixel count differs per body), and they do **not** use [§1](#1-get-media-list)'s `VideoResolution` enum. Size `0x03` = M, `0x04` = L — **a Nano offers only these two, there is no S**, so the size enum is complete for this body; expect other bodies to add codes rather than reuse these. Aspect `0x00` = 4:3, `0x01` = 16:9. Needed because `cam_video_param_v2` keeps reporting the *video* resolution while the camera sits in photo mode, so a UI that reads it in photo mode shows a wrong spec. |
+| `cam_photo_param_new` | **the live PHOTO setting** (24 B) — `[?][0x15][00][size:u8][aspect:u8]…`, i.e. **size @ byte 3, aspect ratio @ byte 4**. `02 15 00 04 00 …` = L, 4:3. Sizes are the camera's own **letter** labels, *not* megapixels (the pixel count differs per body), and they do **not** use [§1](#1-get-media-list)'s resolution codes. Size `0x03` = M, `0x04` = L — **a Nano offers only these two, there is no S**, so the size enum is complete for this body; expect other bodies to add codes rather than reuse these. Aspect `0x00` = 4:3, `0x01` = 16:9. Needed because `cam_video_param_v2` keeps reporting the *video* resolution while the camera sits in photo mode, so a UI that reads it in photo mode shows a wrong spec. |
 | `cam_storage` 40 B · `cam_status` 9 B · `cam_record_time` 6 B · `cam_image_effect` 16 B · `cam_lens_state` 66 B · `cam_custom_mode_params` 161 B | present, not yet decoded |
 
 - **All 53 names Mimo subscribes** (the complete settings surface): `camcap_base camcap_video_format camcap_fov camcap_iso camcap_photo_storage_format camcap_color_mode camcap_wb camcap_photo_size camcap_video_codec camcap_shutter camcap_photo_timer_interval camcap_exposure_mode camcap_zoom camcap_antiflicker camcap_sharpness camcap_denoise camcap_aperture camcap_shutter_max camcap_eis camcap_iso_auto_max camcap_loop_video_duration camcap_hyperlapse_ratio camcap_slowmotion_ratio camcap_timelapse_duration camcap_countdown camcap_photo_time_limited_burst_param camcap_capture_aspect_type camcap_style_filter_mode cam_storage cam_status cam_record_time cam_expo_param shutter_param cam_photo_param_new cam_lapse_param cam_video_param_v2 cam_image_effect v_quality_enhance_status cam_fov cam_lens_state cam_audio_status_v2 audio_timecode_status temp_curve camcap_common cam_imu_calib_info timecode_info cam_custom_mode_params cam_super_slowmotion_status media_file_sync upgrade_status cam_capture_aspect_type gui_autorecord_param cam_style_filter_status`
@@ -1287,8 +1287,64 @@ before concatenating, or every straddling chunk fails CRC and disappears.
 | +4 | u32 | file size, bytes |
 | +8 | u32 | **`file_index`** — packed, see [§29](#29-http-media-api-v1--dcf-indexed) |
 | +12 | u16 | duration, whole seconds (`0` = still) |
+| +14 | u8 | **fps code** — see the frame-rate table below |
+| +15 | u8 | **resolution code** — see the resolution table below |
+| +19 | u8 | **favourite** — `1` = starred (the byte right after the constant `4c 03` pair) |
 
-No filename is transmitted; it is reconstructed from the index. Fields past `+14` are unmapped.
+No filename is transmitted; it is reconstructed from the index. Fields past `+19` are unmapped. The
+favourite flag is hardware-verified on a Mavic 3 (files 580/585/590 read `1`, their neighbours `0`).
+
+The fps and resolution codes here are their **own** set, distinct from the Osmo cameras' CompositePack
+format byte ([§ "What a record means"](#what-a-record-means): `95`=2.7K 4:3, `103`=4K 4:3, …) — a code
+that means 4K in one does not in the other. The values marked ✓ below were **verified on a Mavic 3**
+(the fps it shoots, and 1080p / 4K / C4K / 5.1K); the rest are the codes the drone reports for modes a
+Mavic 3 cannot shoot but other aircraft can, and are unverified until one of those aircraft answers.
+
+#### Frame-rate codes (`+14`)
+
+| code | fps | | code | fps | | code | fps |
+|---|---|---|---|---|---|---|---|
+| `0x01` | 24 ✓ | | `0x0A` | 100 | | `0x14` | 400 |
+| `0x02` | 25 ✓ | | `0x0B` | 96 | | `0x15` | 8 |
+| `0x03` | 30 ✓ | | `0x0C` | 180 | | `0x16` | 20 |
+| `0x04` | 48 ✓ | | `0x0D` | 24 | | `0x18` | 120 |
+| `0x05` | 50 ✓ | | `0x0E` | 30 | | `0x19` | 96 |
+| `0x06` | 60 ✓ | | `0x0F` | 48 | | `0x1A` | 72 |
+| `0x07` | 120 | | `0x10` | 60 | | `0x1B` | 72 |
+| `0x08` | 240 | | `0x11` | 90 | | `0x1C` | 75 |
+| `0x09` | 480 | | `0x12` | 192 | | `0x1D` | 15 |
+| | | | `0x13` | 200 | | | |
+
+`0x0D`–`0x10` and `0x18`–`0x1B` are decimal-corrected rates (23.976, 29.97, …) reported as their whole
+number. Code `0x17` (a fractional 8.7 fps) is left unmapped rather than rounded. Any code not listed →
+no rate shown.
+
+#### Resolution codes (`+15`)
+
+| code | px | | code | px | | code | px |
+|---|---|---|---|---|---|---|---|
+| `0x00` | 640×480 | | `0x22` | 3840×1572 | | `0x3B` | 4096×1712 |
+| `0x02` | 1280×640 | | `0x23` | 5760×3240 | | `0x3C` | 8192×5456 |
+| `0x04` | 1280×720 | | `0x24` | 6016×3200 | | `0x3D` | 5576×2952 |
+| `0x06` | 1280×960 | | `0x25` | 2048×1080 | | `0x3E` | 5248×2952 |
+| `0x08` | 1920×960 | | `0x26` | 336×256 | | `0x3F` | 2560×1440 |
+| `0x0A` | 1920×1080 ✓ | | `0x27` | 5120×2880 | | `0x40` | 2560×1920 |
+| `0x0C` | 1920×1440 | | `0x2C` | 5440×2880 | | `0x41` | 4096×3072 |
+| `0x0E` | 3840×1920 | | `0x2D` | 2688×1512 | | `0x42` | 1080×1920 |
+| `0x10` | 3840×2160 ✓ | | `0x2E` | 640×360 | | `0x43` | 1512×2688 |
+| `0x12` | 3840×2880 | | `0x30` | 4000×3000 | | `0x44` | 5472×3648 |
+| `0x14` | 4096×2048 | | `0x32` | 2880×1620 | | `0x45` | 864×480 |
+| `0x16` | 4096×2160 ✓ | | `0x34` | 2720×2040 | | `0x46` | 720×1280 |
+| `0x18` | 2704×1520 | | `0x36` | 720×576 | | `0x5F` | 2688×2016 |
+| `0x1A` | 640×512 | | `0x37` | 7680×4320 | | `0x60` | 8192×3424 |
+| `0x1B` | 4608×2160 | | `0x38` | 5472×3078 | | `0x61` | 5120×2700 ✓ |
+| `0x1C` | 4608×2592 | | `0x39` | 8192×4320 | | `0x62` | 1440×1080 |
+| `0x1F` | 2720×1530 | | `0x3A` | 8192×3456 | | | |
+| `0x20` | 5280×2160 | | | | | | |
+| `0x21` | 5280×2972 | | | | | | |
+
+Interlaced, RAW and aspect-ratio-only codes exist in between but carry no plain pixel size, so they are
+left unmapped → no resolution shown.
 
 ```python
 import struct, datetime

@@ -1561,9 +1561,9 @@ class CameraSession(
     /**
      * The manifest resolution byte (`marker-1`) is a **DJI-wide video-format index** (the Nano and
      * the Xtra/Action-5 emit the same codes for the same sizes — 95=2.7K 4:3, 103=4K 4:3), *not* the
-     * SDK's `VideoResolution` enum (whose codes only partially/coincidentally overlap). The app enums
-     * are inconsistent downstream copies; this map is built empirically from clips cross-referenced
-     * against the SD card. Unknown → null → the app falls back to the MP4 `moov`.
+     * drone record's resolution code (whose codes only partially/coincidentally overlap — see
+     * `DcfRecords.droneResolution`). This map is built empirically from clips cross-referenced against
+     * the SD card. Unknown → null → the app falls back to the MP4 `moov`.
      */
     /**
      * ⭐ favourite flag: the byte 9 past the record's `[ff|fe] 19 06` marker, 1 when starred.
