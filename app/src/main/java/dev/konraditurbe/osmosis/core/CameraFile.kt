@@ -89,6 +89,25 @@ data class CameraFile(
      * seen, and an unmapped one should stay visible instead of decoding as "not a panorama".
      */
     val mediaType: Int = -1,
+
+    /**
+     * A delete handle read at the record's **fixed** marker position, `u32-LE` at `(19 06) − 10`,
+     * before anything has vouched for it.
+     *
+     * Not the same thing as [handle], and deliberately not used in its place. [handle] comes from the
+     * guard-byte scan, which only matches the marker shapes we have confirmed — and so misses stills on
+     * a body that writes a different guard byte (a Pocket 3 writes `f6` for a still and `c7` for a
+     * panorama where a Nano writes `ff`/`fe`), leaving them undeletable.
+     *
+     * This is the value that *would* be the handle if the fixed position is right. It is promoted to
+     * [handle] only when the independent `base + seq*step` fit over the manifest's own confirmed
+     * handles agrees with it exactly — see `CameraSession.withCmdHandles`. Two sources agreeing is the
+     * bar for an irreversible command; one source is not.
+     *
+     * Last in the parameter list, like the fields before it, because several call sites construct a
+     * CameraFile positionally.
+     */
+    val handleCandidate: Long = 0L,
 ) {
     /** DCF-index-addressed media, fetched over `/v1` rather than by path over `/v2`. */
     val isIndexed: Boolean get() = fileIndex != 0L

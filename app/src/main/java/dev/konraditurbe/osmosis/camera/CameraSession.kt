@@ -1336,10 +1336,37 @@ class CameraSession(
             log("datalink: handle fit (list $group): base=0x${base.toString(16)} step=0x${step.toString(16)}")
         }
         if (fits.isEmpty()) return files
-        return files.map { f ->
+        var promoted = 0
+        var revoked = 0
+        val out = files.map { f ->
             val fit = fits[f.group]
-            if (fit == null || f.seq <= 0) f else f.copy(cmdHandle = fit.first + f.seq * fit.second)
+            if (fit == null || f.seq <= 0) return@map f
+            val fitted = fit.first + f.seq * fit.second
+            when {
+                // Two independent sources agree: the bytes at the record's fixed marker position, and
+                // a formula fitted to the handles OTHER records exposed. That is the bar for a
+                // command that destroys a file — and it is how a Pocket 3's stills become deletable
+                // without inventing anything, since their handle was always in the record and only the
+                // guard-byte scan refused to read it.
+                f.handle == 0L && f.handleCandidate != 0L && f.handleCandidate == fitted -> {
+                    promoted++
+                    f.copy(handle = f.handleCandidate, cmdHandle = fitted)
+                }
+                // The scan produced a handle the fit contradicts. Something is being read out of the
+                // wrong place — a record boundary overrun did exactly this once, handing a photo the
+                // neighbouring video's handle — and there is no way to tell which of the two is right.
+                // Drop it: the file loses delete, which is recoverable, rather than deleting whatever
+                // else lives at that handle, which is not.
+                f.handle != 0L && f.handle != fitted -> {
+                    revoked++
+                    f.copy(handle = 0L, cmdHandle = fitted)
+                }
+                else -> f.copy(cmdHandle = fitted)
+            }
         }
+        if (promoted > 0) log("datalink: $promoted record(s) took their handle from the fixed marker (fit agrees)")
+        if (revoked > 0) log("datalink: $revoked handle(s) disagreed with the fit — not deletable")
+        return out
     }
 
     /**
@@ -1514,11 +1541,20 @@ class CameraSession(
         val mediaType = if (selfPos >= 9 && selfPos <= bytes.size &&
             bytes[selfPos - 7] == 0x19.toByte() && bytes[selfPos - 6] == 0x06.toByte()
         ) bytes[selfPos - 9].toInt() and 0xFF else -1
+        // The handle at the marker's FIXED position — `u32-LE` at `(19 06) − 10`, the same tag
+        // [mediaType] reads. Unlike the scan above this needs no guard byte to match and cannot run
+        // into the next record, so it finds the stills a Pocket 3 writes with `f6`/`c7` guard bytes
+        // that the scan rejects. Untrusted here: [withCmdHandles] promotes it only where the
+        // independent base+step fit agrees.
+        val handleCandidate =
+            if (selfPos >= 17 && selfPos <= bytes.size &&
+                bytes[selfPos - 7] == 0x19.toByte() && bytes[selfPos - 6] == 0x06.toByte()
+            ) u32le(bytes, selfPos - 17) else 0L
         return CameraFile(
             path = path, thumbPath = thumbPath, storage = 0,
             resLabel = fps?.let { "${it}fps" }, proxyPath = proxyExt?.let { "$mediaDir.$it" },
             handle = handle, sizeBytes = size, starred = starred, resolution = resolution,
-            durationSec = durationSec, mediaType = mediaType,
+            durationSec = durationSec, mediaType = mediaType, handleCandidate = handleCandidate,
         )
     }
 

@@ -63,12 +63,19 @@ class Op3MixedCardTest {
      * seven.
      */
     @Test
-    fun `no still carries a delete handle`() {
+    fun `a still carries its OWN handle, never a neighbour's`() {
         val files = decode()
-        assertTrue("a still must never carry a handle on this body",
-            files.filter { it.ext == "JPG" }.all { it.handle == 0L })
-        assertEquals("and therefore none is deletable", 0, files.count { it.ext == "JPG" && it.deletable })
-        assertEquals(20, files.count { it.handle == 0L })
+        val stills = files.filter { it.ext == "JPG" }
+        assertEquals("18 stills on this card", 18, stills.size)
+        // Superseded finding. This used to assert that a still carries no handle at all, which is what
+        // the guard-byte scan saw: a Pocket 3 writes `f6` before the `19 06` tag on a still (`c7` on a
+        // panorama) where a Nano writes `ff`/`fe`, so the scan skipped straight past. The handle was in
+        // the record the whole time — reading the tag's FIXED position finds it, and the base+seq*step
+        // fit over the videos' handles confirms every one of them.
+        assertTrue("every still now has a handle", stills.all { it.handle != 0L })
+        assertTrue("and it is the one its own sequence number implies",
+            stills.all { it.handle == it.cmdHandle })
+        assertEquals("nothing is left handleless", 0, files.count { it.handle == 0L })
     }
 
     /**
@@ -86,11 +93,17 @@ class Op3MixedCardTest {
         assertTrue("expected no collisions, got ${shared.keys.map { "0x%08x".format(it) }}", shared.isEmpty())
     }
 
-    /** Every video has a handle of its own, and only videos are deletable. */
+    /**
+     * Every record on this card is deletable, and by a handle two independent sources agree on.
+     *
+     * Was `9` — the videos only. The stills were never undeletable on the camera's side; we simply
+     * could not read their handles. See [a still carries its OWN handle, never a neighbour's].
+     */
     @Test
-    fun `every deletable file is a video with its own handle`() {
+    fun `every file is deletable by a handle the fit agrees with`() {
         val files = decode()
-        assertEquals(9, files.count { it.deletable })
-        assertTrue(files.filter { it.deletable }.all { it.ext == "MP4" })
+        assertEquals(29, files.count { it.deletable })
+        assertTrue("no record may hold a handle its sequence number contradicts",
+            files.all { it.handle == 0L || it.cmdHandle == 0L || it.handle == it.cmdHandle })
     }
 }

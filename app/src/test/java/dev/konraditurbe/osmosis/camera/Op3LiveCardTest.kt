@@ -37,38 +37,45 @@ class Op3LiveCardTest {
     /**
      * Four stills in a row, and not one of them borrows a handle.
      *
-     * This is the shape that would break if the handle scan ran past a record again: each of these
-     * photos has another photo on both sides, so an overrun has nothing to stop it until it reaches a
-     * video several records away. Every still must read 0, and the three videos must keep their own.
+     * This is the shape that would break if the handle read ran past a record: each of these photos has
+     * another photo on both sides, so an overrun has nothing to stop it until it reaches a video several
+     * records away. It used to be checked by requiring every still to read 0 — true at the time, because
+     * the guard-byte scan could not see a Pocket 3 still's marker at all, but it tested the symptom.
+     *
+     * The real invariant is that a record's handle is its OWN, and that is now directly checkable: it
+     * must equal the value this file's sequence number implies under the fit taken from the other
+     * records. A borrowed handle fails that immediately, whichever neighbour it was borrowed from.
      */
     @Test
     fun `adjacent stills never borrow a handle`() {
         val files = decode("op3_9_pano.bin")
         assertEquals(9, files.size)
-        assertTrue("no still may carry a handle",
-            files.filter { it.ext == "JPG" }.all { it.handle == 0L })
-        assertEquals("the three videos, and only those", 3, files.count { it.handle != 0L })
-        val handles = files.filter { it.handle != 0L }.map { it.handle }
-        assertEquals("no video may share a handle", handles.size, handles.toHashSet().size)
+        assertTrue("every record must hold the handle its own sequence implies",
+            files.all { it.handle != 0L && it.handle == it.cmdHandle })
+        val handles = files.map { it.handle }
+        assertEquals("and no two may be the same", handles.size, handles.toHashSet().size)
     }
 
-    /** Only videos are deletable on this body, for the same reason: a still has no handle to delete by. */
+    /** Stills are deletable here too — their handle was always in the record, just unread. */
     @Test
-    fun `only videos are deletable`() {
+    fun `stills are deletable, not only videos`() {
         for (f in listOf("op3_5_starred.bin", "op3_9_pano.bin")) {
             val files = decode(f)
-            assertTrue(f, files.filter { it.deletable }.all { it.ext == "MP4" })
-            assertEquals(f, 3, files.count { it.deletable })
+            assertTrue("$f: nothing may be left undeletable", files.all { it.deletable })
+            assertTrue("$f: stills included", files.any { it.ext == "JPG" && it.deletable })
         }
     }
 
-    /** The panorama is written as a plain `.JPG` and carries no handle, like any other still. */
+    /** The panorama is written as a plain `.JPG`, and deletes by handle like anything else. */
     @Test
-    fun `a panorama is still a handleless JPG`() {
+    fun `a panorama is a JPG with a handle of its own`() {
         val pano = decode("op3_9_pano.bin").first { it.name.contains("_0010_D") }
         assertEquals("JPG", pano.ext)
-        assertEquals(0L, pano.handle)
         assertTrue("and is recognised as a panorama", pano.isPanorama)
+        // `c7` before the tag, where a still has `f6` and a video `ff` — a third guard byte, and the
+        // reason matching on that byte was the wrong idea rather than an incomplete list.
+        assertTrue("a panorama has a handle", pano.handle != 0L)
+        assertEquals(pano.cmdHandle, pano.handle)
     }
 
     /**
