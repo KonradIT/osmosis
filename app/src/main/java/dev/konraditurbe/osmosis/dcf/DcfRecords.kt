@@ -16,6 +16,10 @@ data class DcfRecord(
     val durationSec: Int,
     val mtimeEpoch: Long,
     val starred: Boolean = false,
+    /** "3840x2160" etc. from the record's resolution code, or null for an unmapped code / a still. */
+    val resolution: String? = null,
+    /** Frames per second from the record's fps code, or 0 when unmapped / a still. */
+    val fps: Int = 0,
 ) {
     val storage: Int get() = DcfIndex.storage(fileIndex)
 
@@ -36,6 +40,8 @@ data class DcfRecord(
             mtimeEpoch = mtimeEpoch,
             storage = storage,
             starred = starred,
+            resolution = resolution,
+            resLabel = if (fps > 0) "${fps}fps" else null,
         )
     }
 }
@@ -95,13 +101,18 @@ object DcfRecords {
      * +4  u32  file size in bytes    — verified byte-exact against two HTTP Content-Lengths
      * +8  u32  file_index, packed    — see [DcfIndex]
      * +12 u16  duration in seconds; 0 => still photo
+     * +14 u8   fps code  — see [droneFps]  (a still reads 0 here → no rate)
+     * +15 u8   resolution code — see [droneResolution]
      * +19 u8   favourite flag: 1 = starred — the byte right after the constant `4c 03` pair
      * ```
-     * The favourite flag is **hardware-verified on the Mavic 3**: three files favourited in DJI Fly
-     * (580, 585, 590) read `01` here and the seven around them `00`, videos and stills alike. Other
-     * fields past `+14` (resolution/fps) are not yet mapped and are left null rather than guessed. The
-     * flag is read wherever the stride reaches it; on a body that puts it elsewhere the worst case is a
-     * cosmetic wrong heart, never a wrong file — so it is not gated to the Mavic.
+     * The res/fps codes are their own set, distinct from the Osmo cameras' CompositePack format byte —
+     * a code meaning 4K in one does not in the other. Hardware-verified on a Mavic 3 across twelve clips
+     * spanning 1080p/4K/C4K/5.1K at 24–60 fps; an unmapped code is left null rather than guessed.
+     *
+     * The favourite flag is **hardware-verified on the Mavic 3** too: three files favourited (580, 585,
+     * 590) read `01` here and the seven around them `00`, videos and stills alike. It is read wherever
+     * the stride reaches it; on a body that puts it elsewhere the worst case is a cosmetic wrong heart,
+     * never a wrong file. Fields past `+19` are still unmapped.
      *
      * Trailing partial records are dropped, as is any record whose index fails [DcfIndex.isPlausible] —
      * a missing middle chunk shifts the stream out of phase, and returning the records we can trust
@@ -117,9 +128,57 @@ object DcfRecords {
             val duration = u16(blob, off + 12)
             if (!DcfIndex.isPlausible(index) || size == 0L) continue
             val starred = stride > 19 && u8(blob, off + 19) == 1
-            out.add(DcfRecord(index, size, duration, DcfIndex.fatToEpoch(mtime), starred))
+            val fps = if (stride > 14) droneFps(u8(blob, off + 14)) else 0
+            val resolution = if (stride > 15) droneResolution(u8(blob, off + 15)) else null
+            out.add(DcfRecord(index, size, duration, DcfIndex.fatToEpoch(mtime), starred, resolution, fps))
         }
         return out
+    }
+
+    /**
+     * Drone record fps code (`+14`) → whole frames per second. Full table: MEDIA_PROTOCOL.md § drone
+     * record layout.
+     *
+     * **Anchored to hardware**: a Mavic 3 produced codes 1–6 for 24/25/30/48/50/60, which is what lets
+     * the rest — the slow-motion rates a Mavic 3 can't shoot but other aircraft can — be trusted from
+     * the official app's own value codes rather than guessed. Codes 0x0D–0x10 / 0x18–0x1B are
+     * decimal-corrected rates (23.976/29.97/…) folded to their base integer; the one genuinely
+     * fractional rate (8.7 fps, code 0x17) is omitted rather than rounded.
+     */
+    private fun droneFps(code: Int): Int = when (code) {
+        1 -> 24; 2 -> 25; 3 -> 30; 4 -> 48; 5 -> 50; 6 -> 60
+        7 -> 120; 8 -> 240; 9 -> 480; 10 -> 100; 11 -> 96; 12 -> 180
+        13 -> 24; 14 -> 30; 15 -> 48; 16 -> 60          // PRECISE_ variants
+        17 -> 90; 18 -> 192; 19 -> 200; 20 -> 400; 21 -> 8; 22 -> 20
+        24 -> 120; 25 -> 96; 26 -> 72; 27 -> 72; 28 -> 75; 29 -> 15
+        else -> 0
+    }
+
+    /**
+     * Drone record resolution code (`+15`) → "WIDTHxHEIGHT". Full table: MEDIA_PROTOCOL.md § drone
+     * record layout.
+     *
+     * **Anchored to hardware**: a Mavic 3 produced `0x0A`/`0x10`/`0x16`/`0x61` for 1080p / 4K / C4K /
+     * 5.1K, which is what lets the rest — 2.7K, 1440p, the larger cine and 360 modes other aircraft
+     * shoot but a Mavic 3 does not — be trusted from the official app's own value codes rather than
+     * guessed. Only codes that name a concrete pixel size are mapped; interlaced, RAW and
+     * aspect-ratio-only codes are left null → the app falls back to the moov.
+     */
+    private fun droneResolution(code: Int): String? = when (code) {
+        0x00 -> "640x480"; 0x02 -> "1280x640"; 0x04 -> "1280x720"; 0x06 -> "1280x960"
+        0x08 -> "1920x960"; 0x0A -> "1920x1080"; 0x0C -> "1920x1440"; 0x0E -> "3840x1920"
+        0x10 -> "3840x2160"; 0x12 -> "3840x2880"; 0x14 -> "4096x2048"; 0x16 -> "4096x2160"
+        0x18 -> "2704x1520"; 0x1A -> "640x512"; 0x1B -> "4608x2160"; 0x1C -> "4608x2592"
+        0x1F -> "2720x1530"; 0x20 -> "5280x2160"; 0x21 -> "5280x2972"; 0x22 -> "3840x1572"
+        0x23 -> "5760x3240"; 0x24 -> "6016x3200"; 0x25 -> "2048x1080"; 0x26 -> "336x256"
+        0x27 -> "5120x2880"; 0x2C -> "5440x2880"; 0x2D -> "2688x1512"; 0x2E -> "640x360"
+        0x30 -> "4000x3000"; 0x32 -> "2880x1620"; 0x34 -> "2720x2040"; 0x36 -> "720x576"
+        0x37 -> "7680x4320"; 0x38 -> "5472x3078"; 0x39 -> "8192x4320"; 0x3A -> "8192x3456"
+        0x3B -> "4096x1712"; 0x3C -> "8192x5456"; 0x3D -> "5576x2952"; 0x3E -> "5248x2952"
+        0x3F -> "2560x1440"; 0x40 -> "2560x1920"; 0x41 -> "4096x3072"; 0x42 -> "1080x1920"
+        0x43 -> "1512x2688"; 0x44 -> "5472x3648"; 0x45 -> "864x480"; 0x46 -> "720x1280"
+        0x5F -> "2688x2016"; 0x60 -> "8192x3424"; 0x61 -> "5120x2700"; 0x62 -> "1440x1080"
+        else -> null
     }
 
     private fun u8(b: ByteArray, i: Int) = b[i].toInt() and 0xFF
