@@ -15,6 +15,7 @@ data class DcfRecord(
     val sizeBytes: Long,
     val durationSec: Int,
     val mtimeEpoch: Long,
+    val starred: Boolean = false,
 ) {
     val storage: Int get() = DcfIndex.storage(fileIndex)
 
@@ -34,6 +35,7 @@ data class DcfRecord(
             durationSec = durationSec,
             mtimeEpoch = mtimeEpoch,
             storage = storage,
+            starred = starred,
         )
     }
 }
@@ -93,9 +95,13 @@ object DcfRecords {
      * +4  u32  file size in bytes    — verified byte-exact against two HTTP Content-Lengths
      * +8  u32  file_index, packed    — see [DcfIndex]
      * +12 u16  duration in seconds; 0 => still photo
+     * +19 u8   favourite flag: 1 = starred — the byte right after the constant `4c 03` pair
      * ```
-     * Fields past `+14` are not yet mapped (resolution/fps live in there somewhere) and are left null
-     * rather than guessed.
+     * The favourite flag is **hardware-verified on the Mavic 3**: three files favourited in DJI Fly
+     * (580, 585, 590) read `01` here and the seven around them `00`, videos and stills alike. Other
+     * fields past `+14` (resolution/fps) are not yet mapped and are left null rather than guessed. The
+     * flag is read wherever the stride reaches it; on a body that puts it elsewhere the worst case is a
+     * cosmetic wrong heart, never a wrong file — so it is not gated to the Mavic.
      *
      * Trailing partial records are dropped, as is any record whose index fails [DcfIndex.isPlausible] —
      * a missing middle chunk shifts the stream out of phase, and returning the records we can trust
@@ -110,7 +116,8 @@ object DcfRecords {
             val index = u32(blob, off + 8)
             val duration = u16(blob, off + 12)
             if (!DcfIndex.isPlausible(index) || size == 0L) continue
-            out.add(DcfRecord(index, size, duration, DcfIndex.fatToEpoch(mtime)))
+            val starred = stride > 19 && u8(blob, off + 19) == 1
+            out.add(DcfRecord(index, size, duration, DcfIndex.fatToEpoch(mtime), starred))
         }
         return out
     }

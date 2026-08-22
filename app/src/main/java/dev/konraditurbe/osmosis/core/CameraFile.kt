@@ -112,8 +112,21 @@ data class CameraFile(
     /** DCF-index-addressed media, fetched over `/v1` rather than by path over `/v2`. */
     val isIndexed: Boolean get() = fileIndex != 0L
 
-    /** True once the manifest yielded a delete handle for this file (see DatalinkClient.deleteFiles). */
-    val deletable: Boolean get() = handle != 0L && !handleShared
+    /**
+     * The value a delete/favourite command addresses this file by: a path camera's manifest [handle],
+     * or a DCF device's packed [fileIndex]. The two share a command (`0x00/0x28`, `0x02/0xbf`) and a
+     * payload slot — only the number in it differs — so the UI treats them uniformly. 0 when neither
+     * exists: a Pocket 3 still with no marker, which stays non-deletable.
+     */
+    val opHandle: Long get() = if (handle != 0L) handle else if (isIndexed) fileIndex else 0L
+
+    /**
+     * Deletable when it has an address the delete command can name and nothing disqualifies it. For a
+     * path camera that is a manifest [handle] not shared with another file; for a DCF device it is the
+     * always-present, always-unique [fileIndex]. A favourite-only fitted [cmdHandle] never makes a file
+     * deletable — delete stays on verified addresses.
+     */
+    val deletable: Boolean get() = opHandle != 0L && !handleShared
 
     val name: String get() = path.substringAfterLast('/')
     val ext: String get() = name.substringAfterLast('.', "").uppercase()

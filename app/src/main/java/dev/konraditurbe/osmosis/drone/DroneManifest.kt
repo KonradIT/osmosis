@@ -192,4 +192,37 @@ object DroneManifest {
         p[4] = (seq and 0xFF).toByte(); p[5] = ((seq shr 8) and 0xFF).toByte()
         return p
     }
+
+    private fun le32(out: java.io.ByteArrayOutputStream, v: Long) {
+        out.write((v and 0xFF).toInt()); out.write(((v shr 8) and 0xFF).toInt())
+        out.write(((v shr 16) and 0xFF).toInt()); out.write(((v shr 24) and 0xFF).toInt())
+    }
+
+    /**
+     * Favourite / unfavourite one file — DUML **`0x02/0xbf`**, addressed by packed **`file_index`**.
+     *
+     * Byte-identical to the camera's favourite payload ([CameraSession.favoritePayload]) with the index
+     * in the handle slot: `01 01 [index:u32-LE][counter:u32-LE] 00 [on] 00 00 00`. Verified byte-exact
+     * against a Mavic 3 capture (files 603 and 604 favourited in DJI Fly, 2026-08-22).
+     */
+    fun favouriteCmd(fileIndex: Long, counter: Int, on: Boolean): ByteArray =
+        java.io.ByteArrayOutputStream().apply {
+            write(0x01); write(0x01); le32(this, fileIndex); le32(this, counter.toLong())
+            write(0x00); write(if (on) 0x01 else 0x00); write(0x00); write(0x00); write(0x00)
+        }.toByteArray()
+
+    /**
+     * Delete files by packed **`file_index`** — DUML **`0x00/0x28`**, batch-capable.
+     *
+     * The camera's delete payload ([CameraSession.deletePayload]) **minus the trailing `01 01 00 00`**
+     * storage selector, which the aircraft does not send: `[count:u8][index:u32-LE × count]
+     * [counter:u32-LE] 00 [count:u32-LE]`. Verified byte-exact against a Mavic 3 capture that deleted
+     * three files (600, 601, 602) in one command. **Irreversible.**
+     */
+    fun deleteCmd(indices: List<Long>, counter: Int): ByteArray =
+        java.io.ByteArrayOutputStream().apply {
+            write(indices.size and 0xFF)
+            for (idx in indices) le32(this, idx)
+            le32(this, counter.toLong()); write(0x00); le32(this, indices.size.toLong())
+        }.toByteArray()
 }
