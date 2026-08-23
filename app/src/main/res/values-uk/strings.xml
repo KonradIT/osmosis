@@ -1,0 +1,186 @@
+<resources>
+    <!-- app_name intentionally not translated: Osmosis is the product name. -->
+    <string name="action_share">Поділитися завантаженим файлом</string>
+    <string name="action_edit">Редагувати завантажений файл в іншому застосунку</string>
+    <string name="drone_power_button_desc">Кнопка живлення дрона, на задній частині апарата</string>
+
+    <!-- Common buttons -->
+    <string name="cancel">Скасувати</string>
+    <string name="save">Зберегти</string>
+    <string name="delete">Видалити</string>
+    <string name="share">Поділитися</string>
+    <string name="no">Ні</string>
+    <string name="stop">Зупинити</string>
+
+    <!-- Camera selector -->
+    <string name="cameras">Камери</string>
+    <string name="save_logs">Зберігати журнали</string>
+    <string name="rescan">Сканувати знову</string>
+    <string name="scanning">Сканування…</string>
+    <string name="no_cameras_hint">Камер поки немає — увімкніть одну й торкніться «Сканувати знову».</string>
+    <string name="cameras_in_range">%1$d/%2$d збережених у зоні дії · %3$d нових</string>
+    <string name="new_tag">НОВА</string>
+    <string name="no_bluetooth">На цьому пристрої немає Bluetooth.</string>
+    <string name="camera_not_in_range">%1$s не в зоні дії — увімкніть її, потім скануйте знову</string>
+
+    <!-- Bluetooth off dialog -->
+    <string name="bluetooth_off_title">Bluetooth вимкнено</string>
+    <string name="bluetooth_off_message">Osmosis знаходить і з’єднується з камерою через Bluetooth. Увімкніть його, щоб шукати камери.</string>
+    <string name="turn_on">Увімкнути</string>
+
+    <!-- Pairing approval dialog -->
+    <string name="pairing_approval_title">Підтвердьте з’єднання на %1$s</string>
+    <string name="pairing_approval_message">Підтвердьте з’єднання на екрані камери.</string>
+    <string name="drone_approval_message">Індикатори дрона зараз мають блимати / бігти по колу — це означає, що він отримав запит.\n\nНатисніть і утримуйте кнопку живлення 2–3 секунди, щоб підтвердити з’єднання.</string>
+
+    <!-- Camera long-press menu -->
+    <string name="reenter_wifi_password">Ввести пароль Wi-Fi ще раз</string>
+    <string name="forget_camera">Забути камеру</string>
+
+    <!-- Wi-Fi password dialog -->
+    <string name="wifi_password_hint">Пароль Wi-Fi</string>
+    <string name="wifi_password_for">Пароль Wi-Fi для %1$s</string>
+    <string name="wifi_password_message">Показується на екрані камери в розділі «Налаштування підключення». Зберігається окремо для кожної камери.</string>
+
+    <!-- Wi-Fi off dialog -->
+    <string name="wifi_off_title">Wi-Fi вимкнено</string>
+    <string name="wifi_off_message">Osmosis під’єднується до власної мережі Wi-Fi камери, щоб переглядати й завантажувати медіа. Увімкніть Wi-Fi і продовжте.</string>
+    <string name="turn_on_wifi">Увімкнути Wi-Fi</string>
+
+    <!-- Wi-Fi join failed dialog -->
+    <string name="couldnt_join_wifi">Не вдалося під’єднатися до %1$s</string>
+    <string name="wifi_join_failed_message">Не вдалося під’єднатися до Wi-Fi камери. Зазвичай це означає, що збережений пароль застарів — наприклад, після скидання камери до заводських налаштувань. Ввести його ще раз і спробувати знову?</string>
+    <string name="wifi_join_failed_wpa_message">Цей телефон не зміг під’єднатися до %1$s ні через WPA3, ні через WPA2 — імовірно, це обмеження сумісності Wi-Fi телефону, а не пароль. Ви все одно можете ввести пароль ще раз, щоб це виключити.</string>
+    <string name="reenter_password">Ввести пароль ще раз</string>
+    <string name="back_to_cameras">Назад до камер</string>
+
+    <!-- GPS sync -->
+    <string name="the_camera">камера</string>
+    <string name="gps_sync_active_banner">🛰️ Синхронізація GPS активна з %1$s\nПерегляд медіа вимкнено, доки триває передавання GPS. Торкніться 🛰️, щоб зупинити.</string>
+    <string name="gps_sync_connecting_banner">🛰️ Підключення синхронізації GPS до %1$s… підтвердьте на камері, якщо з’явиться запит. Торкніться 🛰️, щоб скасувати.</string>
+    <string name="gps_sync_starting">Синхронізація GPS запускається для %1$s — підтвердьте на камері, якщо з’явиться запит</string>
+    <string name="gps_active_select_blocked">Синхронізація GPS активна — торкніться 🛰️, щоб зупинити її перед вибором камери.</string>
+    <string name="gps_stop_before_browse">Зупиніть синхронізацію GPS (торкніться 🛰️) перед переглядом медіа.</string>
+
+    <!-- GPS sync notification -->
+    <string name="notif_channel_gps">Синхронізація GPS</string>
+    <string name="gps_notif_title">Синхронізація GPS · %1$s</string>
+    <string name="gps_notif_text">Режим - %1$s - Запис - %2$s - gps: %3$s</string>
+    <string name="gps_notif_connecting">підключення…</string>
+    <string name="gps_notif_rec_yes">так</string>
+    <string name="gps_notif_rec_no">ні</string>
+    <string name="gps_notif_healthy">у нормі</string>
+    <string name="gps_notif_not_healthy">не в нормі</string>
+
+    <!-- Gallery -->
+    <string name="filter_photos">Фото</string>
+    <string name="filter_videos">Відео</string>
+    <string name="filter_faved">Улюблені</string>
+    <string name="select">Вибрати</string>
+    <string name="download">Завантажити</string>
+    <string name="download_count">Завантажити (%1$d)</string>
+    <string name="download_running">Завантаження…</string>
+    <string name="connected_wifi">Підключено · WiFi</string>
+    <string name="loading_burst">Завантаження серії…</string>
+    <string name="not_connected">Не підключено</string>
+    <string name="no_media_found">На %1$s немає медіа</string>
+    <string name="camera_not_activated_title">%1$s — абсолютно нова камера, не активована</string>
+    <string name="camera_not_activated_message">Активуйте її один раз у DJI Mimo. На жаль, цей крок обов’язковий; після цього Mimo можна видалити.</string>
+
+    <!-- Date headers -->
+    <string name="today">СЬОГОДНІ</string>
+    <string name="yesterday">ВЧОРА</string>
+    <string name="date_unknown">НЕВІДОМА ДАТА</string>
+    <string name="date_header">%1$s %2$s %3$s</string>
+    <string-array name="month_abbreviations">
+        <item>СІЧ</item>
+        <item>ЛЮТ</item>
+        <item>БЕР</item>
+        <item>КВІ</item>
+        <item>ТРА</item>
+        <item>ЧЕР</item>
+        <item>ЛИП</item>
+        <item>СЕР</item>
+        <item>ВЕР</item>
+        <item>ЖОВ</item>
+        <item>ЛИС</item>
+        <item>ГРУ</item>
+    </string-array>
+
+    <!-- Favorite / delete -->
+    <string name="favorite">Улюблене</string>
+    <string name="unfavorite">Прибрати з улюблених</string>
+    <string name="favoriting">Додавання %1$s до улюблених…</string>
+    <string name="unfavoriting">Прибирання %1$s з улюблених…</string>
+    <string name="favorite_failed">Не вдалося додати до улюблених</string>
+    <string name="favorite_no_handle">Не вдалося додати %1$s до улюблених — немає handle</string>
+    <string name="delete_from_camera_title">Видалити з камери?</string>
+    <string name="delete_from_camera_message">%1$s\nhandle %2$s\n\nЦе назавжди видалить файл із картки камери. Скасувати неможливо.</string>
+    <string name="deleting">Видалення %1$s…</string>
+    <string name="deleted">%1$s видалено</string>
+    <string name="delete_no_response">Видалення: немає відповіді</string>
+    <string name="delete_selected">Видалити (%1$d)</string>
+    <string name="bulk_delete_title">Видалити %1$d файлів з камери?</string>
+    <string name="bulk_delete_message">%1$s\n\nЦе назавжди видалить їх із картки камери. Скасувати неможливо.</string>
+    <string name="bulk_delete_and_more">…і ще %1$d</string>
+    <string name="bulk_delete_skipping">%1$d з вибраних файлів без handle буде пропущено.</string>
+    <string name="bulk_deleting">Видалення %1$d файлів…</string>
+    <string name="bulk_deleted">Видалено %1$d файлів</string>
+    <string name="bulk_delete_none">Жоден із вибраних файлів не можна видалити — камера не надала для них handle.</string>
+    <string name="delete_failed">Не вдалося видалити (0x%1$04x)</string>
+
+    <!-- Download progress -->
+    <string name="overall_progress_bytes">Загалом: 0/%1$d — %2$s</string>
+    <string name="overall_progress_files">Загалом: %1$d/%2$d файлів</string>
+    <string name="file_progress">%1$d%% — %2$s/%3$s</string>
+    <string name="download_done">Готово: %1$d збережено, %2$d пропущено, %3$d з помилкою</string>
+    <string name="fmt_bytes_gb">%.1f GB</string>
+    <string name="fmt_bytes_mb">%.0f MB</string>
+    <string name="fmt_bytes_kb">%.0f KB</string>
+    <string name="fmt_bytes_b">%1$d B</string>
+
+    <!-- Log sharing -->
+    <string name="share_logs_title">Поділитися журналами з Konrad?</string>
+    <string name="share_logs_chooser">Поділитися журналами з Konrad</string>
+    <string name="share_logs_failed">Не вдалося поділитися журналами: %1$s</string>
+    <string name="logs_email_subject">Журнали Osmosis — %1$s</string>
+
+    <!-- Media preview -->
+    <string name="add_to_queue">Додати до черги</string>
+    <string name="add_to_queue_trimmed">Додати до черги (обрізано)</string>
+    <string name="remove_from_queue">Прибрати з черги</string>
+    <string name="already_downloaded">Уже завантажено</string>
+    <string name="no_preview">Немає попереднього перегляду для .%1$s</string>
+    <string name="sidecar_title">Виявлено супутній файл</string>
+    <string name="sidecar_msg">Цей елемент має супутній файл %1$s (%2$s). Додати його до черги теж?</string>
+    <string name="sidecar_added">%1$s додано до черги</string>
+    <string name="cant_play_clip">Не вдається відтворити цей кліп (%1$d/%2$d)</string>
+    <string name="preview_unavailable">Попередній перегляд недоступний</string>
+    <string name="pause_then_set_start">Призупиніть, потім задайте початок</string>
+    <string name="pause_then_set_end">Призупиніть, потім задайте кінець</string>
+    <string name="set_start_first">Спочатку задайте початок [</string>
+    <string name="end_after_start">Кінець має бути після початку</string>
+    <string name="edit_with">Редагувати за допомогою</string>
+    <string name="no_app_available_share">Немає застосунку для надсилання цього файлу</string>
+    <string name="no_app_available_edit">Немає застосунку для редагування цього файлу</string>
+
+    <!-- Content descriptions -->
+    <string name="cd_preview">попередній перегляд</string>
+    <string name="cd_thumbnail">мініатюра</string>
+    <string name="cd_rewind">назад</string>
+    <string name="cd_play_pause">відтворення/пауза</string>
+    <string name="cd_fast_forward">вперед</string>
+    <string name="cd_scrub_preview">перемотування попереднього перегляду</string>
+
+    <!-- Status pill -->
+    <string name="sd_card">SD-картка</string>
+    <string name="internal_storage">Внутрішня</string>
+    <string name="storage">Сховище</string>
+    <string name="storage_line_unknown">%1$s · —</string>
+    <string name="storage_line_total">%1$s · %2$.1f / %3$.1f GB</string>
+    <string name="storage_line_free">%1$s · %2$.1f GB вільно</string>
+    <string name="power_charging">заряджання %1$d mA</string>
+    <string name="power_drawing">споживання %1$d mA</string>
+    <string name="power_idle">очікування</string>
+    <string name="power_docked_suffix"> · у док-станції</string>
+</resources>

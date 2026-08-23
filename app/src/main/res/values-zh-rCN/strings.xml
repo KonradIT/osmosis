@@ -83,6 +83,9 @@
     <string name="connected_wifi">已连接 · Wi-Fi</string>
     <string name="loading_burst">正在加载连拍…</string>
     <string name="not_connected">未连接</string>
+    <string name="no_media_found">%1$s 上没有媒体文件</string>
+    <string name="camera_not_activated_title">%1$s 是一台全新相机，尚未激活</string>
+    <string name="camera_not_activated_message">请先在 DJI Mimo 中激活一次。很遗憾，这一步是必须的；激活后即可卸载 Mimo。</string>
 
     <!-- Date headers -->
     <string name="today">今天</string>
@@ -118,6 +121,16 @@
     <string name="delete_no_response">删除：无响应</string>
     <string name="delete_failed">删除失败（0x%1$04x）</string>
 
+    <!-- Bulk delete -->
+    <string name="delete_selected">删除（%1$d）</string>
+    <string name="bulk_delete_title">从相机中删除 %1$d 个文件？</string>
+    <string name="bulk_delete_message">%1$s\n\n此操作将永久删除相机存储卡上的这些文件，无法撤销。</string>
+    <string name="bulk_delete_and_more">……以及其他 %1$d 个</string>
+    <string name="bulk_delete_skipping">所选文件中有 %1$d 个没有删除 handle，将被跳过。</string>
+    <string name="bulk_deleting">正在删除 %1$d 个文件…</string>
+    <string name="bulk_deleted">已删除 %1$d 个文件</string>
+    <string name="bulk_delete_none">所选文件均无法删除——相机未为它们提供 handle。</string>
+
     <!-- Download progress -->
     <string name="overall_progress_bytes">总进度：0/%1$d — %2$s</string>
     <string name="overall_progress_files">总进度：%1$d/%2$d 个文件</string>
@@ -149,6 +162,9 @@
     <string name="edit_with">编辑</string>
     <string name="no_app_available_share">没有可用于分享此文件的应用</string>
     <string name="no_app_available_edit">没有可用于编辑此文件的应用</string>
+    <string name="sidecar_title">检测到附属文件</string>
+    <string name="sidecar_msg">此项目附带一个 %1$s 文件（%2$s）。是否也加入下载队列？</string>
+    <string name="sidecar_added">%1$s 已加入下载队列</string>
 
     <!-- Content descriptions -->
     <string name="cd_preview">预览</string>
