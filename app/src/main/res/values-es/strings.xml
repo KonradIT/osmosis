@@ -1,0 +1,186 @@
+<resources>
+    <!-- app_name intentionally not translated: Osmosis is the product name. -->
+    <string name="action_share">Compartir el archivo descargado</string>
+    <string name="action_edit">Editar el archivo descargado en otra app</string>
+    <string name="drone_power_button_desc">El botón de encendido del dron, en la parte trasera</string>
+
+    <!-- Common buttons -->
+    <string name="cancel">Cancelar</string>
+    <string name="save">Guardar</string>
+    <string name="delete">Eliminar</string>
+    <string name="share">Compartir</string>
+    <string name="no">No</string>
+    <string name="stop">Detener</string>
+
+    <!-- Camera selector -->
+    <string name="cameras">Cámaras</string>
+    <string name="save_logs">Guardar logs</string>
+    <string name="rescan">Volver a escanear</string>
+    <string name="scanning">Escaneando…</string>
+    <string name="no_cameras_hint">Aún no hay cámaras: enciende una y vuelve a escanear.</string>
+    <string name="cameras_in_range">%1$d/%2$d guardadas en rango · %3$d nuevas</string>
+    <string name="new_tag">NUEVA</string>
+    <string name="no_bluetooth">Este dispositivo no tiene Bluetooth.</string>
+    <string name="camera_not_in_range">%1$s no está en rango: enciéndela y vuelve a escanear</string>
+
+    <!-- Bluetooth off dialog -->
+    <string name="bluetooth_off_title">El Bluetooth está desactivado</string>
+    <string name="bluetooth_off_message">Osmosis encuentra y se empareja con tu cámara por Bluetooth. Actívalo para buscar cámaras.</string>
+    <string name="turn_on">Activar</string>
+
+    <!-- Pairing approval dialog -->
+    <string name="pairing_approval_title">Confirma el emparejamiento en %1$s</string>
+    <string name="pairing_approval_message">Aprueba el emparejamiento en la pantalla de la cámara.</string>
+    <string name="drone_approval_message">Las luces del dron deberían estar parpadeando / girando ahora: eso significa que recibió la solicitud.\n\nMantén pulsado su botón de encendido 2–3 segundos para confirmar la conexión.</string>
+
+    <!-- Camera long-press menu -->
+    <string name="reenter_wifi_password">Volver a introducir la contraseña Wi-Fi</string>
+    <string name="forget_camera">Olvidar cámara</string>
+
+    <!-- Wi-Fi password dialog -->
+    <string name="wifi_password_hint">Contraseña Wi-Fi</string>
+    <string name="wifi_password_for">Contraseña Wi-Fi de %1$s</string>
+    <string name="wifi_password_message">Se muestra en la pantalla de la cámara, en Ajustes de conexión. Se guarda por cámara.</string>
+
+    <!-- Wi-Fi off dialog -->
+    <string name="wifi_off_title">El Wi-Fi está desactivado</string>
+    <string name="wifi_off_message">Osmosis se une a la red Wi-Fi propia de la cámara para explorar y descargar contenido. Activa el Wi-Fi y continúa.</string>
+    <string name="turn_on_wifi">Activar Wi-Fi</string>
+
+    <!-- Wi-Fi join failed dialog -->
+    <string name="couldnt_join_wifi">No se pudo conectar a %1$s</string>
+    <string name="wifi_join_failed_message">No se pudo conectar al Wi-Fi de la cámara. Suele deberse a que la contraseña guardada está desactualizada, p. ej. tras restablecer la cámara de fábrica. ¿Volver a introducirla e intentarlo de nuevo?</string>
+    <string name="wifi_join_failed_wpa_message">Este teléfono no pudo conectarse a %1$s ni por WPA3 ni por WPA2: probablemente sea una limitación de compatibilidad Wi-Fi del teléfono, no de la contraseña. Aun así puedes volver a introducir la contraseña para descartarlo.</string>
+    <string name="reenter_password">Volver a introducir la contraseña</string>
+    <string name="back_to_cameras">Volver a las cámaras</string>
+
+    <!-- GPS sync -->
+    <string name="the_camera">la cámara</string>
+    <string name="gps_sync_active_banner">🛰️ Sincronización GPS activa con %1$s\nLa exploración de contenido está desactivada mientras el GPS transmite. Haz click en 🛰️ para detener.</string>
+    <string name="gps_sync_connecting_banner">🛰️ Conectando la sincronización GPS con %1$s… aprueba en la cámara si lo pide. Haz click en 🛰️ para cancelar.</string>
+    <string name="gps_sync_starting">Iniciando la sincronización GPS con %1$s: aprueba en la cámara si lo pide</string>
+    <string name="gps_active_select_blocked">La sincronización GPS está activa: haz click en 🛰️ para detenerla antes de seleccionar una cámara.</string>
+    <string name="gps_stop_before_browse">Detén la sincronización GPS (haz click en 🛰️) antes de explorar el contenido.</string>
+
+    <!-- GPS sync notification -->
+    <string name="notif_channel_gps">Sincronización GPS</string>
+    <string name="gps_notif_title">Sincronización GPS · %1$s</string>
+    <string name="gps_notif_text">Modo - %1$s - Grab - %2$s - gps: %3$s</string>
+    <string name="gps_notif_connecting">conectando…</string>
+    <string name="gps_notif_rec_yes">sí</string>
+    <string name="gps_notif_rec_no">no</string>
+    <string name="gps_notif_healthy">correcto</string>
+    <string name="gps_notif_not_healthy">con problemas</string>
+
+    <!-- Gallery -->
+    <string name="filter_photos">Fotos</string>
+    <string name="filter_videos">Vídeos</string>
+    <string name="filter_faved">Favoritos</string>
+    <string name="select">Seleccionar</string>
+    <string name="download">Descargar</string>
+    <string name="download_count">Descargar (%1$d)</string>
+    <string name="download_running">Descargando…</string>
+    <string name="connected_wifi">Conectado · WiFi</string>
+    <string name="loading_burst">Cargando ráfaga…</string>
+    <string name="not_connected">Sin conexión</string>
+    <string name="no_media_found">%1$s no tiene contenido</string>
+    <string name="camera_not_activated_title">%1$s es una cámara nueva, sin activar</string>
+    <string name="camera_not_activated_message">Actívala una vez en DJI Mimo. Por desgracia este paso es obligatorio; después puedes desinstalar Mimo.</string>
+
+    <!-- Date headers -->
+    <string name="today">HOY</string>
+    <string name="yesterday">AYER</string>
+    <string name="date_unknown">FECHA DESCONOCIDA</string>
+    <string name="date_header">%1$s %2$s %3$s</string>
+    <string-array name="month_abbreviations">
+        <item>ENE</item>
+        <item>FEB</item>
+        <item>MAR</item>
+        <item>ABR</item>
+        <item>MAY</item>
+        <item>JUN</item>
+        <item>JUL</item>
+        <item>AGO</item>
+        <item>SEP</item>
+        <item>OCT</item>
+        <item>NOV</item>
+        <item>DIC</item>
+    </string-array>
+
+    <!-- Favorite / delete -->
+    <string name="favorite">Favorito</string>
+    <string name="unfavorite">Quitar de favoritos</string>
+    <string name="favoriting">Marcando %1$s como favorito…</string>
+    <string name="unfavoriting">Quitando %1$s de favoritos…</string>
+    <string name="favorite_failed">Error al marcar favorito</string>
+    <string name="favorite_no_handle">No se puede marcar %1$s como favorito: sin handle</string>
+    <string name="delete_from_camera_title">¿Eliminar de la cámara?</string>
+    <string name="delete_from_camera_message">%1$s\nhandle %2$s\n\nEsto elimina permanentemente el archivo de la tarjeta de la cámara. No se puede deshacer.</string>
+    <string name="deleting">Eliminando %1$s…</string>
+    <string name="deleted">%1$s eliminado</string>
+    <string name="delete_no_response">Eliminar: sin respuesta</string>
+    <string name="delete_selected">Eliminar (%1$d)</string>
+    <string name="bulk_delete_title">¿Eliminar %1$d archivos de la cámara?</string>
+    <string name="bulk_delete_message">%1$s\n\nEsto elimina permanentemente esos archivos de la tarjeta de la cámara. No se puede deshacer.</string>
+    <string name="bulk_delete_and_more">…y %1$d más</string>
+    <string name="bulk_delete_skipping">%1$d de los archivos seleccionados no tienen handle de eliminación y se omitirán.</string>
+    <string name="bulk_deleting">Eliminando %1$d archivos…</string>
+    <string name="bulk_deleted">%1$d archivos eliminados</string>
+    <string name="bulk_delete_none">Ninguno de los archivos seleccionados se puede eliminar: la cámara no proporcionó un handle para ellos.</string>
+    <string name="delete_failed">Error al eliminar (0x%1$04x)</string>
+
+    <!-- Download progress -->
+    <string name="overall_progress_bytes">Total: 0/%1$d — %2$s</string>
+    <string name="overall_progress_files">Total: %1$d/%2$d archivos</string>
+    <string name="file_progress">%1$d%% — %2$s/%3$s</string>
+    <string name="download_done">Listo: %1$d guardados, %2$d omitidos, %3$d fallidos</string>
+    <string name="fmt_bytes_gb">%.1f GB</string>
+    <string name="fmt_bytes_mb">%.0f MB</string>
+    <string name="fmt_bytes_kb">%.0f KB</string>
+    <string name="fmt_bytes_b">%1$d B</string>
+
+    <!-- Log sharing -->
+    <string name="share_logs_title">¿Compartir registros con Konrad?</string>
+    <string name="share_logs_chooser">Compartir registros con Konrad</string>
+    <string name="share_logs_failed">No se pudieron compartir los registros: %1$s</string>
+    <string name="logs_email_subject">Registros de Osmosis — %1$s</string>
+
+    <!-- Media preview -->
+    <string name="add_to_queue">Añadir a la cola</string>
+    <string name="add_to_queue_trimmed">Añadir a la cola (recortado)</string>
+    <string name="remove_from_queue">Quitar de la cola</string>
+    <string name="already_downloaded">Ya descargado</string>
+    <string name="no_preview">Sin vista previa para .%1$s</string>
+    <string name="sidecar_title">Archivo adjunto detectado</string>
+    <string name="sidecar_msg">Este elemento tiene un archivo %1$s asociado (%2$s). ¿Añadirlo también a la cola?</string>
+    <string name="sidecar_added">%1$s añadido a la cola</string>
+    <string name="cant_play_clip">No se puede reproducir este clip (%1$d/%2$d)</string>
+    <string name="preview_unavailable">Vista previa no disponible</string>
+    <string name="pause_then_set_start">Pausa y luego marca el punto de inicio</string>
+    <string name="pause_then_set_end">Pausa y luego marca el punto final</string>
+    <string name="set_start_first">Marca primero el punto de inicio [</string>
+    <string name="end_after_start">El final debe ir después del punto de inicio</string>
+    <string name="edit_with">Editar con</string>
+    <string name="no_app_available_share">No hay ninguna app disponible para compartir este archivo</string>
+    <string name="no_app_available_edit">No hay ninguna app disponible para editar este archivo</string>
+
+    <!-- Content descriptions -->
+    <string name="cd_preview">vista previa</string>
+    <string name="cd_thumbnail">miniatura</string>
+    <string name="cd_rewind">retroceder</string>
+    <string name="cd_play_pause">reproducir/pausar</string>
+    <string name="cd_fast_forward">avanzar</string>
+    <string name="cd_scrub_preview">vista previa de desplazamiento</string>
+
+    <!-- Status pill -->
+    <string name="sd_card">Tarjeta SD</string>
+    <string name="internal_storage">Interno</string>
+    <string name="storage">Almacenamiento</string>
+    <string name="storage_line_unknown">%1$s · —</string>
+    <string name="storage_line_total">%1$s · %2$.1f / %3$.1f GB</string>
+    <string name="storage_line_free">%1$s · %2$.1f GB libres</string>
+    <string name="power_charging">cargando %1$d mA</string>
+    <string name="power_drawing">consumiendo %1$d mA</string>
+    <string name="power_idle">inactivo</string>
+    <string name="power_docked_suffix"> · acoplado</string>
+</resources>
