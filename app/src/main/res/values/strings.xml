@@ -151,6 +151,9 @@
     <string name="remove_from_queue">Remove from Queue</string>
     <string name="already_downloaded">Already downloaded</string>
     <string name="no_preview">No preview for .%1$s</string>
+    <string name="sidecar_title">Sidecar file detected</string>
+    <string name="sidecar_msg">This item has a %1$s file beside it (%2$s). Add it to the queue as well?</string>
+    <string name="sidecar_added">%1$s added to the queue</string>
     <string name="cant_play_clip">Can\'t play this clip (%1$d/%2$d)</string>
     <string name="preview_unavailable">Preview unavailable</string>
     <string name="pause_then_set_start">Pause, then set the start point</string>

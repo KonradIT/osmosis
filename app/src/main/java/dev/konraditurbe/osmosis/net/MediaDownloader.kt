@@ -250,10 +250,15 @@ class MediaDownloader(
 
     // ---- MediaStore plumbing ------------------------------------------------
 
+    // Collection + folder are keyed on isVideo/isImage (a DNG raw counts as an image, so it lands in
+    // Pictures next to its JPEG); only the MIME is refined per extension so a raw or an audio-backup
+    // sidecar is stored as what it actually is. downloadedUri mirrors the collection/folder choice.
     private fun collectionFor(f: CameraFile): Triple<Uri, String, String> = when {
         f.isVideo -> Triple(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "Movies/Osmosis", "video/mp4")
-        f.isImage -> Triple(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "Pictures/Osmosis", "image/jpeg")
-        else -> Triple(MediaStore.Downloads.EXTERNAL_CONTENT_URI, "Download/Osmosis", "application/octet-stream")
+        f.isImage -> Triple(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "Pictures/Osmosis",
+            if (f.ext == "DNG") "image/x-adobe-dng" else "image/jpeg")
+        else -> Triple(MediaStore.Downloads.EXTERNAL_CONTENT_URI, "Download/Osmosis",
+            if (f.ext == "WAV") "audio/x-wav" else "application/octet-stream")
     }
 
     private fun createPending(f: CameraFile, displayName: String): Uri? {
@@ -344,10 +349,11 @@ class MediaDownloader(
             }.getOrNull()
         }
 
-        /** MIME for a saved copy, matching what the download wrote. */
+        /** MIME for a saved copy, matching what the download wrote (see [collectionFor]). */
         fun mimeOf(file: CameraFile): String = when {
             file.isVideo -> "video/mp4"
-            file.isImage -> "image/jpeg"
+            file.isImage -> if (file.ext == "DNG") "image/x-adobe-dng" else "image/jpeg"
+            file.ext == "WAV" -> "audio/x-wav"
             else -> "application/octet-stream"
         }
     }

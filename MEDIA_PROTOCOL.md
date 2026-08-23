@@ -569,6 +569,20 @@ the neighbouring modes: ~96 Mbit/s, 127 MB for 10 s, against 42 MB for 9 s of 4K
 | `[19:23]` | u32-LE   | video UUID (Amba `DjiMovDmx`) |
 | `[38:42]` | u32-LE   | size-ish (~KB; a photo record reads ~0.6 MB) |
 
+### 1a. Unlisted sidecar files (RAW `.DNG` / audio-backup `.WAV`)
+
+Two shooting modes leave a **second file on the card that the manifest never lists**: a RAW `.DNG`
+beside a still shot in JPEG+RAW, and a `.WAV` audio backup beside a clip recorded with Built-In Mic
+Audio Backup. Both sit at the **same path as their parent with the extension swapped**, on the same
+store, and are served over `/v2` exactly like any other file:
+
+```
+GET /v2?storage=1&path=DCIM/CAM_001/CAM_20260822234658_0073_D.DNG   -> 200, 80,332,744 B
+GET /v2?storage=1&path=DCIM/CAM_001/CAM_20260822234724_0075_D.WAV   -> 200,    925,740 B
+```
+
+**There is no manifest flag for either.**
+
 ### 2. Delete media
 - Cmd Set / ID: `0x00` / `0x28`  ·  App → Camera(`0x01`), datalink  ·  **irreversible on the card**
 - Payload: `[count:u8][handle:u32-LE × count][seq:u32-LE] · 00 · [count:u32-LE] 01 01 00 00`

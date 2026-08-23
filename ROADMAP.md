@@ -111,27 +111,3 @@ approval dialog. `PcapAnalysis` rides along on both for reading a capture with o
 
 **Blockers:** hardware. Both branches are instrumentation waiting for one run each — nothing more can
 be deduced from what we have.
-
-### 19. DNG / sidecar file download:
-
-Allow downloading sidecar files such as DNG photos, audio files, etc...
-
-Need to do research on what sort of files can acompany each video/photo.
-
-- Video: 
-
-"Audio backup" / "Built In Mic Audio Backup" feature on Xtra Edge Pro/Osmo Nano.
-
-- Photo:
-
-DNG sidecar file when shooting in JPEG+DNG mode
-
-UI:
-
-"Add to queue" button remains one button, clicking adding to queue prompts to also append to the queue the sidecar file.
-
-**Sidecar file detected**
-
-Want to add (DNG/AAC/XXX) file to the queue as well?
-
-*Yes / no*
