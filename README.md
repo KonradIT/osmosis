@@ -6,15 +6,19 @@
 
 </div>
 
-Third-party Android client to download videos and photos from DJI Osmo action / gimbal cameras. **No DJI SDK dependencies, no logins, no bloatware, no activation.**
+Third-party Android client to download videos and photos from DJI Osmo action / gimbal cameras, as well as some DJI drones. **No DJI SDK dependencies, no logins, no bloatware, no activation.**
 
 <p align="center">
   <img src="./screenshots/Screenshot_20260714-201612_1.png" width="500"/>
 </p>
 
-Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK or the DJI R-SDK, and should also work with the rest of the DJI Osmo lineup (see [Supported cameras](#supported-cameras)). Also tested with the **Xtra Edge Pro**, a rebadged **DJI Osmo Action 5 Pro** made by DJI front company Xtra.
+Works with the **DJI Osmo Nano**, **Osmo Pocket 3 / 4 and DJI Action 5 Pro / 6**, ongoing work happening to support the rest of the DJI Osmo lineup (see [Supported cameras](#supported-cameras)). Also tested with the **Xtra Edge Pro**, a rebadged **DJI Osmo Action 5 Pro** made by DJI front company Xtra.
 
-**Drones:** offload over QuickTransfer is **verified on the DJI Mavic 3**. **Every other DJI drone is unverified and not expected to work**; an aircraft this app has never met will be attempted rather than refused, but nothing about it is known to work. Work on the **Neo 2** and **Mini 3** lives on the `support-neo2` and `support-mini3` branches — they pair and reach the datalink but do not serve a media list yet.
+**Drones:** offload over QuickTransfer is **verified working only on the DJI Mavic 3**. Work is ongoing to support more DJI airframes.
+
+Read The Verge's review of an early version of the app:
+
+[![image](https://platform.theverge.com/wp-content/uploads/sites/2/2026/08/verge-osmo-pocket-4p-sean-hollister-1-5.jpg?quality=90&strip=all&w=500)](https://www.theverge.com/tech/981852/osmosis-app-download-dji-osmo-camera-video-mimo-replacement)
 
 ## Features
 
@@ -23,40 +27,33 @@ Works with the **DJI Osmo Nano**, which isn't supported by the official DJI SDK 
 - **In-preview trimming** — set in/out points and download just that slice of the **high-res** clip. Keyframe-accurate stream copy in original quality.
 - **Resumable download queue** — high-res downloads straight into your phone's gallery.
 - **Live status** — battery, shooting mode, and storage (internal / SD) shown in a status pill. More to come (recording indicator, resolution, fps, etc...)
+- **DNG** file download if JPEG+DNG mode is enabled, Mimo doesn't do this.
 - **Multi-camera** — remembers your cameras and shows which are currently in range.
-- **Favorite** your videos/photos from the app, and view previously hearted media
+- **Favorite/delete** your videos/photos from the app, and view previously hearted media
 - **Sync GPS with your Osmo**: Uses R-SDK [Osmo GPS controller](https://github.com/dji-sdk/Osmo-GPS-Controller-Demo) commands to send GPS from the phone to your camera. Useful to add stats later using [Telemetry Overlay](https://goprotelemetryextractor.com/telemetry-overlay-gps-video-sensors).
 
 <img src="./screenshots/Screenshot_20260714-210742_1.png" width="500"/>
-
-## Planned for short term:
-
-- Camera control: start/stop recording, take photo, change settings
-- Live preview
-- USB-C offload
-- DJI drone offload via QuickTransfer — **working on a Mavic 3**; Neo 2 and Mini 3 in progress
-  ([ROADMAP #14 and #18](ROADMAP.md))
 
 ## Supported cameras
 
 | Camera | Status |
 |---|---|
-| Osmo Nano | Verified on hardware |
-| Osmo Action 5 Pro / Xtra Edge Pro | Verified on hardware |
-| Osmo Action 6 | Verified on hardware |
-| Osmo Pocket 3 | Verified on hardware |
-| Osmo Pocket 4 / 4 Pro | Works, although I haven't tested it myself |
+| Osmo Nano | **Verified on hardware** |
+| Osmo Action 5 Pro / Xtra Edge Pro | **Verified on hardware** |
+| Osmo Action 6 | **Verified on hardware** |
+| Osmo Pocket 3 | **Verified on hardware** |
+| Osmo Pocket 4 / 4 Pro | **Verified on hardware** |
 | Xtra Atto / Edge / Muse | Untested, should work |
-| Osmo Action 1 | Started, parked |
-| Osmo Action 4 | Started |
+| Osmo Action 1 | _Started_ want this camera supported? raise an issue |
+| Osmo Action 4 | _Started_ want this camera supported? raise an issue |
 | Osmo 360 | Unplanned (needs Mimo to render 360 content) |
-| Osmo Action 2/3 | Best-effort default, untested, not expected to work |
-| DJI Mavic 3 (QuickTransfer) | Verified on hardware — grid, thumbnails, preview, download, battery + storage |
-| DJI Neo 2 (QuickTransfer) | In progress on `support-neo2` |
-| DJI Mini 3 (QuickTransfer) | In progress on `support-mini3` |
-| Any other DJI drone | Unverified, and **not expected to work** |
+| Osmo Action 2/3 | _Started_ want this camera supported? raise an issue |
+| DJI Mavic 3 (QuickTransfer) | **Verified on hardware** |
+| DJI Neo 2 (QuickTransfer) | _Started_ |
+| DJI Mini 3 (QuickTransfer) | _Started_ |
+| Any other DJI drone | Unverified, might work |
 
-Want to help adding support for an unsupported camera? [Open an issue](../../issues) so it can be listed as fully supported.
+Want to help adding support for an unsupported camera? [Open an issue](../../issues) to begin help me add support for it.
 
 **Xtra rebadges.** Xtra is a [DJI front company that sells rebadged Osmo cameras US-only to sidestep the DJI ban](https://github.com/KonradIT/dji-front-companies):
 
@@ -67,9 +64,11 @@ Want to help adding support for an unsupported camera? [Open an issue](../../iss
 
 Actively trying to support, raise an issue if you have these cams and would like to help:
 
-- Osmo Pocket 4/4P
 - Osmo Action 4
-- Osmo Action 3.
+- Osmo Action 3
+- Osmo Action 2
+- Osmo Action (1)
+- DJI Neo 2.
 
 ## Debugging / supporting new cameras:
 
@@ -113,12 +112,16 @@ Contrast the official apps, which require a login and phone home to activation a
 
 - **Android 10+** (API 29).
 - **Bluetooth LE**.
-- Permissions: Nearby devices (Bluetooth scan/connect) on Android 12+, or Location on older versions, plus WiFi state/change. No internet permission is needed for anything but the camera's local AP.
+- Permissions: 
+  - Nearby devices (Bluetooth scan/connect) on Android 12+, or Location on older versions
+  - WiFi state/change. 
+  - No internet permission is needed for anything but the camera's local AP.
+  - No storage permission needed due to the use of Android's media APIs to save content.
 
 ## Getting started
 
 1. Turn on Bluetooth and WiFi, and open Osmosis; grant the permission prompts.
-2. Power on the camera and tap it in the **Cameras** list. Should show as "NEW".
+2. Power on the camera, wait a few seconds and tap it in the **Cameras** list. Should show as "NEW".
 3. **Approve the pairing prompt on the camera screen** (will read: `OSMO`).
 4. **Approve the Android "join WiFi" dialog** when it appears.
 5. Browse the grid. Tap a clip to preview, trim, and add it to the queue.
@@ -126,7 +129,7 @@ Contrast the official apps, which require a login and phone home to activation a
 
 ## Download
 
-- Play Store:
+- Play Store: In progress
 - GitHub releases: https://github.com/KonradIT/osmosis/releases
 - Unobtanium: https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/KonradIT/osmosis
 - F-Droid: submitted, awaiting review — [fdroiddata!45005](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/45005)
