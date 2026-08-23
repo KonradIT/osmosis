@@ -359,10 +359,37 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // Camera selector is the launch screen: show saved cameras, then scan to mark which are in
         // range and surface new ones (unless a test hook is already driving a scan/flow).
         rebuildCameraList()
+        // Keep the launcher App Shortcuts in sync with the current paired-camera set on every launch.
+        CameraShortcuts.refresh(this)
+        // App Shortcut launch: the user long-pressed the app icon and picked a paired camera. Assume
+        // it's powered on and advertising, so scan and auto-connect to that MAC — same path as a tap.
+        val shortcutMac = intent?.getStringExtra(CameraShortcuts.EXTRA_MAC)
+        if (shortcutMac != null) { autoPickMac = shortcutMac; logLine("shortcut: connect to $shortcutMac") }
         val hookDriving = intent?.getBooleanExtra("autoscan", false) == true ||
             intent?.getBooleanExtra("offload", false) == true ||
             intent?.getBooleanExtra("wifi", false) == true
-        if (!hookDriving) startCameraScan(select = true)
+        when {
+            shortcutMac != null -> main.postDelayed({ startCameraScan(select = true) }, 300)
+            !hookDriving -> startCameraScan(select = true)
+        }
+    }
+
+    /**
+     * A launcher App Shortcut was tapped while we were already running (singleTop). Tear down any live
+     * session, return to the selector, and connect to the chosen camera by MAC — see [CameraShortcuts].
+     */
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val mac = intent.getStringExtra(CameraShortcuts.EXTRA_MAC) ?: return
+        if (dev.konraditurbe.osmosis.rsdk.GpsSyncState.locked) {
+            toast(getString(R.string.gps_active_select_blocked)); return
+        }
+        logLine("shortcut (running): connect to $mac")
+        teardownOffload()
+        switchToSelector()
+        autoPickMac = mac
+        startCameraScan(select = true)
     }
 
     override fun onDestroy() {
@@ -466,6 +493,9 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private data class Cam(val device: BluetoothDevice, val name: String?, val brand: Brand, val rssi: Int, val modelId: Int?, val model: CameraModel)
     private val discovered = LinkedHashMap<String, Cam>()
     private var autoPick: String? = null
+    // MAC of a camera launched from a launcher App Shortcut: connect the moment it advertises, no tap
+    // (see CameraShortcuts / onHit). Cleared once consumed.
+    private var autoPickMac: String? = null
 
     /** Scan ~4s for DJI/Xtra cameras (bonds aren't reliable for these), then feed the selector list. */
     private fun startCameraScan(select: Boolean, pick: String? = null) {
@@ -613,6 +643,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         getSharedPreferences("osmosis", MODE_PRIVATE).edit().remove("pass_${r.mac}").apply()
                         logLine("Forgot ${r.name ?: r.mac}")
                         rebuildCameraList()
+                        CameraShortcuts.refresh(this)   // drop it from the launcher shortcuts too
                     }
                 }
             }.show()
@@ -1110,7 +1141,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun showGrid(files: List<CameraFile>, preserveFilters: Boolean = false) {
         // Reaching here = pairing + WiFi + datalink all worked → remember this camera, show the grid.
         setConnectProgress(100) // first media in — connection complete
-        currentAddress?.let { savedCameras.save(it, offloadSsid, currentModelId) }
+        currentAddress?.let {
+            savedCameras.save(it, offloadSsid, currentModelId)
+            CameraShortcuts.refresh(this)   // just connected → float this camera to the top of the shortcuts
+        }
         switchToGrid()
         statusPill.render(pillName(), getString(R.string.connected_wifi), currentStatus, showPower = isNano())
         applyOrientationChrome()   // hide the pill if we're (re)entering the grid in landscape
@@ -1722,6 +1756,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             logLine("found ${model.name} [$brand] (${name ?: addr}) rssi=$rssi" +
                 if (!model.verified) "  🧪" else "")
             main.post { rebuildCameraList() }
+            // App Shortcut target just appeared — connect immediately, no tap, as onCamRowClick would.
+            if (!connecting && !btnGps.isChecked && addr.equals(autoPickMac, ignoreCase = true)) {
+                autoPickMac = null
+                main.post { onCameraChosen(device) }
+            }
         }
     }
 
