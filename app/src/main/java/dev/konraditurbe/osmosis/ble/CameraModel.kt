@@ -47,7 +47,8 @@ data class CameraModel(
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0010 to CameraModel("Osmo Action 2"),
             0x0012 to CameraModel("Osmo Action 3"),
-            0x0014 to CameraModel("Osmo Action 4"), // pairs + BLE creds, but its AP never comes up (open)
+            // Tester-confirmed 2026-08-24: pair, BLE creds, a WPA2 AP, datalink on 9004.
+            0x0014 to CameraModel("Osmo Action 4"),
             // Genuine Action 5 Pro on 9004 — tester-confirmed (grid + download). The Xtra rebrand
             // gets flipped to 10004 by resolve(); see the Xtra note below.
             0x0015 to CameraModel("Osmo Action 5 Pro", verified = true),
