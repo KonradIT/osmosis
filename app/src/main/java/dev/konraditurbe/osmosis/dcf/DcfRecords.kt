@@ -164,7 +164,7 @@ object DcfRecords {
      * guessed. Only codes that name a concrete pixel size are mapped; interlaced, RAW and
      * aspect-ratio-only codes are left null → the app falls back to the moov.
      */
-    private fun droneResolution(code: Int): String? = when (code) {
+    internal fun droneResolution(code: Int): String? = when (code) {
         0x00 -> "640x480"; 0x02 -> "1280x640"; 0x04 -> "1280x720"; 0x06 -> "1280x960"
         0x08 -> "1920x960"; 0x0A -> "1920x1080"; 0x0C -> "1920x1440"; 0x0E -> "3840x1920"
         0x10 -> "3840x2160"; 0x12 -> "3840x2880"; 0x14 -> "4096x2048"; 0x16 -> "4096x2160"

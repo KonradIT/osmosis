@@ -543,15 +543,24 @@ reports everything as unfavourited. Writing a favourite works on every body rega
 
 **Resolution** (`marker−1`):
 
-| code | resolution |
-|------|-----------|
-| `10` | 1920×1080 (1080p 16:9) |
-| `12` | 1920×1440 (1080p 4:3) |
-| `16` | 3840×2160 (4K 16:9) |
-| `45` | 2688×1512 (2.7K 16:9) |
-| `95` | 2688×2016 (2.7K 4:3) |
-| `103` | 3840×2880 (4K 4:3) |
-| `125` | 3840×3840 (**4K OpenGate**, 1:1 full sensor) |
+| code | hex | resolution |
+|------|-----|-----------|
+| `10` | `0A` | 1920×1080 (1080p 16:9) |
+| `12` | `0C` | 1920×1440 (1080p 4:3) |
+| `16` | `10` | 3840×2160 (4K 16:9) |
+| `45` | `2D` | 2688×1512 (2.7K 16:9) |
+| `66` | `42` | 1080×1920 (1080p 9:16, vertical) |
+| `67` | `43` | 1512×2688 (2.7K 9:16, vertical) |
+| `95` | `5F` | 2688×2016 (2.7K 4:3) |
+| `103` | `67` | 3840×2880 (4K 4:3) |
+| `105` | `69` | 1080×1080 (1080p 1:1) |
+| `106` | `6A` | 2160×2160 (2160p 1:1)  |
+| `107` | `6B` | 3072×3072 (3K 1:1) |
+| `108` | `6C` | 1728×3072 (3K 9:16, vertical) |
+| `125` | `7D` | 3840×3840 (**4K OpenGate**, 1:1 full sensor) |
+
+> [!NOTE]
+> Thanks to [Kaze-for-DJI](https://github.com/brianmerchant/Kaze-for-DJI/commit/341a35de18493ff61f97c93b8b10161a7512aa36) project for outlining Pocket 3 1:1 / vertical 9:16 resolutions
 
 `125` is the only **square** entry — 3840×3840, measured off the file (HEVC @ 29.97), which is the full
 sensor read out at 1:1 and what DJI's UI calls "OpenGate". Its `.LRF` proxy is square too (720×720,

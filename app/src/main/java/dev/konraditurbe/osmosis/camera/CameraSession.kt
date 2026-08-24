@@ -1621,14 +1621,20 @@ class CameraSession(
         0x1b, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x02, 0x01, 0x14, 0x02, 0x15, 0x03,
     )
 
-    private fun resolutionForIndex(code: Int): String? = when (code) {
-        10 -> "1920x1080"  // 1080p 16:9  (Xtra-verified)
-        12 -> "1920x1440"  // 1080p 4:3
-        16 -> "3840x2160"  // 4K 16:9
-        45 -> "2688x1512"  // 2.7K 16:9
-        95 -> "2688x2016"  // 2.7K 4:3
-        103 -> "3840x2880" // 4K 4:3
-        125 -> "3840x3840" // 4K 1:1 aka OpenGate
+    internal fun resolutionForIndex(code: Int): String? = when (code) {
+        10 -> "1920x1080"  // 0x0A  1080p 16:9  (Xtra-verified)
+        12 -> "1920x1440"  // 0x0C  1080p 4:3
+        16 -> "3840x2160"  // 0x10  4K 16:9
+        45 -> "2688x1512"  // 0x2D  2.7K 16:9
+        66 -> "1080x1920"  // 0x42  1080p 9:16 vertical
+        67 -> "1512x2688"  // 0x43  2.7K 9:16 vertical
+        95 -> "2688x2016"  // 0x5F  2.7K 4:3
+        103 -> "3840x2880" // 0x67  4K 4:3
+        105 -> "1080x1080" // 0x69  1080p 1:1
+        106 -> "2160x2160" // 0x6A  2160p 1:1
+        107 -> "3072x3072" // 0x6B  3K 1:1
+        108 -> "1728x3072" // 0x6C  3K 9:16 vertical
+        125 -> "3840x3840" // 0x7D  4K 1:1 aka OpenGate
         else -> null
     }
 
