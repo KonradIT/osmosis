@@ -610,10 +610,11 @@ class MediaPreviewActivity : AppCompatActivity() {
     }
 
     private fun loadVideo() {
-        // Resolution comes straight from the manifest (res-index enum, marker-1) — no moov. An unmapped
-        // code just leaves it blank (the clip still plays); add the code to resolutionForIndex when seen.
-        file.resolution?.split('x')?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 2 }
-            ?.let { resTag = coarseRes(it[0], it[1]); renderTop() }   // onCreate already drew the top bar
+        // Resolution comes straight from the manifest (res-index enum, marker-1) — no moov, and the name
+        // is a lookup, never arithmetic (see VideoFormats). A size with no name shows "?"; add the code
+        // to resolutionForIndex, and its name to VideoFormats, when a new one is seen.
+        resTag = dev.konraditurbe.osmosis.core.VideoFormats.label(file.resolution)
+        renderTop()                                       // onCreate already drew the top bar
         // Try the low-res proxy first (listed .LRF/.LRV, or a derived .XRF sidecar the Xtra/Action 5
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
         streamCandidates = file.previewCandidates()
@@ -693,18 +694,6 @@ class MediaPreviewActivity : AppCompatActivity() {
                 } else showStatus(getString(R.string.preview_unavailable))
             }
         }.start()
-    }
-
-    private fun coarseRes(w: Int, h: Int): String {
-        val big = maxOf(w, h)
-        return when {
-            big >= 7000 -> "8K"
-            big >= 3600 -> "4K"
-            big >= 2560 -> "2.7K"
-            big >= 1900 -> "1080p"
-            big >= 1200 -> "720p"
-            else -> "${w}×${h}"
-        }
     }
 
     private fun showStatus(msg: String) {
