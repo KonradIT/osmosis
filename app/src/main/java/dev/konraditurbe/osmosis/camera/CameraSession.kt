@@ -1,6 +1,7 @@
 package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.core.StorageRules
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.net.DumlSession
 import dev.konraditurbe.osmosis.net.DumlTransport
@@ -120,11 +121,30 @@ class CameraSession(
     @Volatile private var releasePlaybackOnExit = false
     @Volatile private var playbackReleased = false
 
-    // Lazy grid pagination: [pageCursor] = oldest video handle seen (the next page's selector),
-    // [seenPaths] dedups across pages, [moreAvailable] = another older page is likely to exist. Video
-    // record handles live at/above VIDEO_HANDLE_BASE (0x4010xxxx on the Nano); the paging cursor only
-    // steps through those, so stray low-namespace handles don't derail it.
-    private val VIDEO_HANDLE_BASE = 0x40000000L
+    // Lazy grid pagination — ONE CURSOR PER STORE, because a page request is a PAIR of queries and
+    // each one selects a store: counter 1 carries an SD handle, counter 2 an internal handle (the
+    // cursor's 0x40000000 bit is the store selector, which is why the newest-page selectors are
+    // 0x00000001 and 0x40000001). [seenKeys] dedups across pages, [moreAvailable] = at least one store
+    // has an older page.
+    //
+    // This used to be a single cursor, seeded as the oldest handle at/above 0x40000000 and sent on
+    // counter 2, while counter 1 stayed pinned at 0x00000001 forever. So paging walked the INTERNAL
+    // store only: SD was re-asked for its newest page every time and the identical answer was deduped
+    // away. Two consequences, the second silent —
+    //
+    //   * on any camera, SD content past the newest page was unreachable;
+    //   * on an SD-only body (Action 4, Pocket 3) every handle clears the bit, so the cursor seeded to
+    //     0, `moreAvailable` was false however full the card, and the grid simply stopped at 45.
+    //
+    // The 0x40000000 floor that fitted the old cursor is gone with it. It existed to keep SD handles
+    // from derailing a walk through the internal namespace; now each cursor is confined to its own
+    // store's slice, so the namespaces cannot mix and nothing needs a hardcoded base. That is also what
+    // makes this work on a camera whose handles are 0x0004xxxx — the same code, no per-model constant.
+    private val SD_STORE = 0
+    private val INTERNAL_STORE = 1
+    /** Newest-page selector per store: the value the camera reads as "start from the top". */
+    private val NEWEST_SD = 0x00000001L
+    private val NEWEST_INTERNAL = 0x40000001L
 
     /**
      * Records requested per file-list query — the `2d` at byte 14 of every `0x00/0x26` we build.
@@ -136,15 +156,16 @@ class CameraSession(
     private val PAGE_SIZE = 45
 
     // Request counters we put at byte 4 of each 0x00/0x26, echoed back at sub-header byte 4 of every
-    // 0x00/0x27 chunk answering it. Counter 1 always carries cursor 0x00000001 (SD), counter 2 either
-    // 0x40000001 (internal, initial load) or an internal page handle — both the internal store.
+    // 0x00/0x27 chunk answering it. Counter 1 is the SD query, counter 2 the internal one; each carries
+    // its store's newest-page selector on the first load and that store's page cursor thereafter.
     private val SD_QUERY_CTR = 1
     private val INTERNAL_QUERY_CTR = 2
     // Frame limit for a burst/interval group-expand query (byte 14). Generous — covers long interval
     // timelapses; any spill into older files is filtered out by the group base name. See expandBurstGroup.
     private val GROUP_EXPAND_LIMIT = 120
-    private var pageCursor = 0x40000001L
-    private val seenPaths = HashSet<String>()
+    private var sdCursor = NEWEST_SD
+    private var internalCursor = NEWEST_INTERNAL
+    private val seenKeys = HashSet<String>()
 
 
     /**
@@ -212,11 +233,17 @@ class CameraSession(
         // retry that hides it — the sequence-channel mismatch is still reported by [openDatalink].
         val files = queryNewestPage()
 
-        // Seed lazy-pagination state: dedup set + cursor = oldest video handle on this page.
-        seenPaths.clear(); seenPaths.addAll(files.map { it.path })
-        pageCursor = files.map { it.handle }.filter { it >= VIDEO_HANDLE_BASE }.minOrNull() ?: 0L
-        moreAvailable = hasOlderPage(files.size, pageCursor)
-        log("datalink: parsed ${files.size} media files (newest page; more=$moreAvailable)")
+        // Seed lazy-pagination state: dedup set + one cursor per store, each the oldest handle in that
+        // store's slice of this page. A store with nothing on it keeps its newest-page selector and
+        // simply never advances; the other store still pages.
+        seenKeys.clear(); seenKeys.addAll(files.map { pageKey(it) })
+        val sdOldest = oldestHandle(files, SD_STORE, below = Long.MAX_VALUE)
+        val intOldest = oldestHandle(files, INTERNAL_STORE, below = Long.MAX_VALUE)
+        sdCursor = sdOldest ?: NEWEST_SD
+        internalCursor = intOldest ?: NEWEST_INTERNAL
+        moreAvailable = hasOlderPage(storeSlice(files, SD_STORE).size, sdOldest ?: 0L) ||
+            hasOlderPage(storeSlice(files, INTERNAL_STORE).size, intOldest ?: 0L)
+        log("datalink: parsed ${files.size} media files (newest page; ${cursorLog()}; more=$moreAvailable)")
         onFetchProgress?.invoke(100)
         return files
     }
@@ -271,17 +298,20 @@ class CameraSession(
         if (!moreAvailable) return emptyList()
 
         // Inline on the live session first (playback held) — the win that makes scroll instant (#12).
-        // Same frame sequence as the fresh path: query(cursor=1) → trigger → query(pageCursor). Run
-        // stepPagination (which advances the cursor) ONLY on a non-empty decode, so a failed inline query
+        // Same frame sequence as the fresh path: query(sdCursor) → trigger → query(internalCursor). Run
+        // stepPagination (which advances the cursors) ONLY on a non-empty decode, so a failed inline query
         // falls through to the fresh path without double-advancing.
         if (keepAliveOn) {
             val blob = runManifestQuery(
-                listCmd(1, 1L), hex("4a040e1001000000000001000000"), listCmd(2, pageCursor))
+                listCmd(SD_QUERY_CTR, sdCursor),
+                hex("4a040e1001000000000001000000"),
+                listCmd(INTERNAL_QUERY_CTR, internalCursor))
             val page = blob?.let { collectStores(it) } ?: emptyList()
             if (page.isNotEmpty()) {
-                val step = stepPagination(pageCursor, page, seenPaths)
-                pageCursor = step.nextCursor; moreAvailable = step.moreAvailable
-                log("datalink: next page(inline) cursor=0x${pageCursor.toString(16)} +${step.fresh.size} new (more=$moreAvailable)")
+                val step = stepPagination(sdCursor, internalCursor, page, seenKeys)
+                sdCursor = step.sdCursor; internalCursor = step.internalCursor
+                moreAvailable = step.moreAvailable
+                log("datalink: next page(inline) ${cursorLog()} +${step.fresh.size} new (more=$moreAvailable)")
                 return step.fresh
             }
             log("datalink: next page(inline) empty — fresh-session fallback")
@@ -298,27 +328,29 @@ class CameraSession(
         return fresh
     }
 
-    /** One older page in a fresh playback session; advances [pageCursor]/[moreAvailable]; returns new files. */
+    /** One older page in a fresh playback session; advances both cursors + [moreAvailable]; returns new files. */
     private fun freshSessionPage(ip: String): List<CameraFile> {
         if (!openAndRegister(ip, subscribe = false)) { log("datalink: next-page open FAILED"); return emptyList() }
         sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)     // enter playback
         for (b in 0 until 2) { recvAll(250); sendAck() }
         val blob = java.io.ByteArrayOutputStream()
-        sendDuml(0x00, 0x26, listCmd(1, 1L), receiverType = 0x01, receiverId = 0)       // query cursor=1
+        sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, sdCursor), receiverType = 0x01, receiverId = 0)
         var lastCount = -1; var stable = 0
         for (batch in 0 until 12) {
             for (r in recvAll(800)) blob.write(r); sendAck()
             if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"), receiverType = 0x01, receiverId = 0)
-            if (batch == 2) sendDuml(0x00, 0x26, listCmd(2, pageCursor), receiverType = 0x01, receiverId = 0)  // page selector
+            if (batch == 2) sendDuml(0x00, 0x26, listCmd(INTERNAL_QUERY_CTR, internalCursor),
+                receiverType = 0x01, receiverId = 0)                                    // page selector
             val c = distinctPaths(blob)
             if (batch >= 4 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = c
         }
         val page = collectStores(blob.toByteArray())
-        val step = stepPagination(pageCursor, page, seenPaths)
-        pageCursor = step.nextCursor
+        val step = stepPagination(sdCursor, internalCursor, page, seenKeys)
+        sdCursor = step.sdCursor
+        internalCursor = step.internalCursor
         moreAvailable = step.moreAvailable
-        log("datalink: next page cursor=0x${pageCursor.toString(16)} +${step.fresh.size} new (more=$moreAvailable)")
+        log("datalink: next page ${cursorLog()} +${step.fresh.size} new (more=$moreAvailable)")
         return step.fresh
     }
 
@@ -486,21 +518,74 @@ class CameraSession(
         return marks.sorted()
     }
 
-    internal data class PageStep(val fresh: List<CameraFile>, val nextCursor: Long, val moreAvailable: Boolean)
+    internal data class PageStep(
+        val fresh: List<CameraFile>,
+        val sdCursor: Long,
+        val internalCursor: Long,
+        val moreAvailable: Boolean,
+    )
 
     /**
-     * Pure pagination step for the grid's infinite scroll. Given the current [cursor] (a 4-byte file
-     * handle) and a freshly-decoded [page], returns: the files not already in [seen] (which it updates);
-     * the next cursor = the OLDEST video handle (>= [VIDEO_HANDLE_BASE]) on the page that is strictly
-     * older (smaller) than [cursor]; and whether another older page is likely (new files AND the cursor
-     * actually advanced). Only handles in `[VIDEO_HANDLE_BASE, cursor)` qualify, so a stray low-namespace
-     * handle (e.g. a 0x0010xxxx photo like seq 0022) can't drag the cursor to the bottom and stall paging.
+     * Which store a record pages under.
+     *
+     * [CameraFile.storageKnown] is the fact — set when the record came back from a store-specific query,
+     * which is the normal path. The fallbacks are for the camera that doesn't echo the request counter,
+     * where [collectStores] returns one merged list: the handle's store bit answers it (the same rule
+     * [StorageRules] uses for the HTTP mount), and only if there is no handle at all does the manifest's
+     * own list boundary stand in.
      */
-    internal fun stepPagination(cursor: Long, page: List<CameraFile>, seen: MutableSet<String>): PageStep {
-        val fresh = page.filter { seen.add(it.path) }
-        val oldestVideo = page.map { it.handle }.filter { it in VIDEO_HANDLE_BASE until cursor }.minOrNull()
-        return if (oldestVideo != null && fresh.isNotEmpty()) PageStep(fresh, oldestVideo, true)
-        else PageStep(fresh, cursor, false)
+    internal fun storeOf(f: CameraFile): Int =
+        if (f.storageKnown) f.storage
+        else StorageRules.mountGuess(singleSdStorage = false, handle = f.handle, cmdHandle = f.cmdHandle)
+            ?: f.group
+
+    private fun storeSlice(page: List<CameraFile>, store: Int) = page.filter { storeOf(it) == store }
+
+    /**
+     * The oldest usable handle in [store]'s slice of [page] that is strictly older (smaller) than [below],
+     * or null when that store has nothing older left.
+     *
+     * No namespace floor: the slice is already one store, so every handle in it shares a base by
+     * construction — that is the whole reason the old `>= 0x40000000` test is gone. Handle 0 is skipped
+     * because it means "no handle" (a record whose scan disagreed with the fit, see [withCmdHandles]),
+     * not a very old file, and taking it would park the cursor at the bottom forever.
+     */
+    private fun oldestHandle(page: List<CameraFile>, store: Int, below: Long): Long? =
+        storeSlice(page, store).map { it.handle }.filter { it != 0L && it < below }.minOrNull()
+
+    /** Both cursors in hex, for the log — the line that tells you which store is still advancing. */
+    private fun cursorLog() = "sd=0x%08x int=0x%08x".format(sdCursor, internalCursor)
+
+    /** Dedup key across pages. Store-qualified because the same filename can exist on BOTH stores. */
+    private fun pageKey(f: CameraFile) = "${storeOf(f)}:${f.path}"
+
+    /**
+     * Pure pagination step for the grid's infinite scroll — **one cursor per store**, advanced
+     * independently, because a page request is two queries and each selects a store.
+     *
+     * Given the current cursors and a freshly-decoded [page]: returns the files not already in [seen]
+     * (which it updates, keyed by store + path); each store's next cursor = the oldest handle in that
+     * store's slice strictly older than that store's current cursor, or the cursor unchanged when the
+     * store is out; and whether another page is likely — new files on this one AND at least one store
+     * both advanced and came back full ([hasOlderPage]).
+     *
+     * A store that runs out simply stops advancing while the other keeps going, and a camera with only
+     * one store populated pages on that one. Under the old single cursor an SD-only body could not page
+     * at all, and every camera's SD content stopped at the newest page.
+     */
+    internal fun stepPagination(
+        sdCursor: Long,
+        internalCursor: Long,
+        page: List<CameraFile>,
+        seen: MutableSet<String>,
+    ): PageStep {
+        val fresh = page.filter { seen.add(pageKey(it)) }
+        val sdOldest = oldestHandle(page, SD_STORE, below = sdCursor)
+        val intOldest = oldestHandle(page, INTERNAL_STORE, below = internalCursor)
+        val more = fresh.isNotEmpty() && (
+            hasOlderPage(storeSlice(page, SD_STORE).size, sdOldest ?: 0L) ||
+                hasOlderPage(storeSlice(page, INTERNAL_STORE).size, intOldest ?: 0L))
+        return PageStep(fresh, sdOldest ?: sdCursor, intOldest ?: internalCursor, more)
     }
 
     // ---- inline commands on the live session (#12) --------------------------------------------------
@@ -1181,9 +1266,14 @@ class CameraSession(
         // that went unanswered. Decoding it anyway logs "no CompositePack records — falling back to
         // flat scrape" and runs a scrape over zero bytes, which reads in the log exactly like a decode
         // failure on a real manifest. Seen on a Nano whose SD query came back empty.
-        fun sliceOf(ctr: Int): List<CameraFile> =
-            manifestBytes(raw, requestCtr = ctr).takeIf { it.isNotEmpty() }?.let { decodeManifest(it) }
-                ?: emptyList()
+        // The label is only for the log: each store's slice is decoded on its own, so every record in it
+        // is group 0 and both stores would otherwise report "list 0" with different bases — which reads
+        // like one list being fitted twice rather than two stores each being fitted once.
+        fun sliceOf(ctr: Int): List<CameraFile> {
+            val store = if (ctr == SD_QUERY_CTR) "SD" else "internal"
+            return manifestBytes(raw, requestCtr = ctr).takeIf { it.isNotEmpty() }
+                ?.let { decodeManifest(it, store) } ?: emptyList()
+        }
         val sd = sliceOf(SD_QUERY_CTR)
         val internal = sliceOf(INTERNAL_QUERY_CTR)
         // A store that answers with nothing and a store that was never answered look identical once the
@@ -1305,10 +1395,10 @@ class CameraSession(
         return files.map { if (it.handle in shared) it.copy(handleShared = true) else it }
     }
 
-    private fun decodeManifest(bytes: ByteArray): List<CameraFile> {
-        val comp = decodeComposite(bytes)
+    private fun decodeManifest(bytes: ByteArray, store: String = ""): List<CameraFile> {
+        val comp = decodeComposite(bytes, store)
         if (comp.isNotEmpty()) {
-            log("datalink: decoded ${comp.size} CompositePack records " +
+            log("datalink: decoded ${comp.size} CompositePack records${storeTag(store)} " +
                 "(${comp.count { it.resLabel != null }} fps, ${comp.count { it.proxyPath != null }} proxies, " +
                 "${comp.count { it.starred }} starred, " +
                 "${comp.count { it.deletable }} deletable, ${comp.count { it.sizeBytes > 0 }} sized)")
@@ -1360,7 +1450,7 @@ class CameraSession(
      * (photos → handle 0 / size 0). Reproduces all 45 Nano and 13 Xtra files, photos included, and the
      * Pocket 3 / OA5 / OA6 lists. Empty when no media-path field is present → [decodeManifest] scrapes.
      */
-    private fun decodeComposite(bytes: ByteArray): List<CameraFile> {
+    private fun decodeComposite(bytes: ByteArray, store: String = ""): List<CameraFile> {
         // Locate every media-path field (one per record). Read by length; the 6-byte `1a … 00 00 00 01`
         // signature plus the `DCIM/` prefix makes a false hit in binary essentially impossible.
         data class Media(val pos: Int, val end: Int, val path: String)
@@ -1383,7 +1473,24 @@ class CameraSession(
             val group = if (boundary > 0 && k >= boundary) 1 else 0
             byPath.putIfAbsent(m.path, resolveRecord(bytes, m.path, lo, hi, m.pos).copy(group = group))
         }
-        return withCmdHandles(byPath.values.toList())
+        return withCmdHandles(byPath.values.toList(), store)
+    }
+
+    /** " [internal]" when the caller knows which store these bytes came from; "" when it doesn't. */
+    private fun storeTag(store: String) = if (store.isEmpty()) "" else " [$store]"
+
+    /**
+     * How a handle fit names the list it fitted.
+     *
+     * A store-specific query's answer is decoded on its own, so every record in it is group 0 — two
+     * stores would both report "list 0" with different bases, reading like one list fitted twice. When
+     * the caller knows the store, say so; the merged decode (no counter echo) still has real groups and
+     * keeps naming them.
+     */
+    private fun fitLabel(store: String, group: Int) = when {
+        store.isEmpty() -> "list $group"
+        group == 0 -> store
+        else -> "$store list $group"
     }
 
     /**
@@ -1397,7 +1504,7 @@ class CameraSession(
      * failed). [step] is the most common positive delta over seq-adjacent pairs and [base] the most common
      * `handle - seq*step`, so a stray record can't skew the fit; an unfittable list just leaves 0.
      */
-    private fun withCmdHandles(files: List<CameraFile>): List<CameraFile> {
+    private fun withCmdHandles(files: List<CameraFile>, store: String = ""): List<CameraFile> {
         val fits = HashMap<Int, Pair<Long, Long>>()          // storage list -> (base, step)
         for ((group, list) in files.groupBy { it.group }) {
             val pts = list.filter { it.handle != 0L && it.seq > 0 }
@@ -1409,7 +1516,8 @@ class CameraSession(
             val base = pts.map { it.second - it.first * step }
                 .groupingBy { it }.eachCount().maxByOrNull { it.value }?.key ?: continue
             fits[group] = base to step
-            log("datalink: handle fit (list $group): base=0x${base.toString(16)} step=0x${step.toString(16)}")
+            log("datalink: handle fit (${fitLabel(store, group)}): " +
+                "base=0x${base.toString(16)} step=0x${step.toString(16)}")
         }
         if (fits.isEmpty()) return files
         var promoted = 0
