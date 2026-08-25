@@ -7,7 +7,7 @@ import dev.konraditurbe.osmosis.net.DumlTransport
 
 /**
  * A media session with an **Osmo camera** — registration, the CompositePack media list (`0x00/0x26`)
- * and every per-file command (delete, favourite, burst expand).
+ * and every per-file command (delete, favourite, burst expand, highlights).
  *
  * This is the path `main` has always taken and the one every camera in the app uses. A drone shares
  * only the handshake in [DumlSession] and diverges completely after it — see
@@ -111,7 +111,7 @@ class CameraSession(
     // and on re-entry sent the enter TWICE 0.6 s apart — i.e. Mimo retries until the camera answers.
     //
     // We used to fire the enter once and never look at the reply, then send LEAVE at the end of every
-    // fresh-session fallback (favorite). So the mode flapped on/off underneath operations
+    // fresh-session fallback (favorite, highlights). So the mode flapped on/off underneath operations
     // that assume it is held, which is what made favourites and deletes race and let a Pocket 3 sit in
     // capture mode — recording — throughout a transfer. Now: confirm on entry, retry, hold for the
     // whole session, and release only on teardown.
@@ -409,6 +409,82 @@ class CameraSession(
      */
     internal fun hasOlderPage(pageSize: Int, cursor: Long): Boolean =
         cursor > 0L && pageSize >= PAGE_SIZE
+
+    /**
+     * Pull a video's highlight / moment marks (side-button presses) — DUML **0x02/0xff**, RE'd from an
+     * Xtra pcap (ROADMAP #7). Inline on the live session first (the faithful seq window from #12 makes
+     * that work); if the camera doesn't answer, **give up** rather than tear the session down. The marks
+     * are decorative scrubber chapters, usually empty — not worth an 8 s fresh-session rebuild per
+     * preview (which on a Nano returned `0 []` and re-entered playback) the way delete/pagination are.
+     * Returns each mark's start time in **ms**, ascending; empty if none / no session. [handle] = the
+     * video's manifest delete-handle. Off-UI.
+     */
+    @Synchronized
+    override fun getHighlights(handle: Long): List<Int> {
+        if (handle == 0L) return emptyList()
+        if (keepAliveOn) {
+            val reply = runCommand(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0,
+                timeoutMs = 4000)
+            if (reply != null) {
+                val marks = parseHighlights(reply)
+                log("datalink: highlights(inline) 0x${handle.toString(16)} → ${marks.size} $marks")
+                return marks
+            }
+            // Give up rather than rebuild the session. Highlights are chapter marks on the scrubber —
+            // decorative, and usually empty. The fallback below tears the live session down and re-opens
+            // it, which on a Nano cost 8 s of churn per preview and re-entered playback mode, all to
+            // return `0 []`. Pagination and delete earn that cost because nothing else can do their job;
+            // this does not. A missing mark list just means no marks are drawn.
+            log("datalink: highlights(inline) 0x${handle.toString(16)} — no reply; skipping " +
+                "(not rebuilding a live session for chapter marks)")
+            return emptyList()
+        }
+        val ip = tx.peerIp ?: return emptyList()
+        keepAliveOn = false
+        Thread.sleep(600)                // let the keep-alive loop finish its recv and exit
+        tx.close()                       // free udp/$port for the fresh session
+        val marks = runCatching { freshSessionHighlights(ip, handle) }
+            .getOrElse { log("datalink: highlights session error: ${it.message}"); emptyList() }
+        if (tx.isOpen) runCatching { startKeepAlive() }
+        return marks
+    }
+
+    private fun freshSessionHighlights(ip: String, handle: Long): List<Int> {
+        if (!openAndRegister(ip, subscribe = false)) { log("datalink: highlights — fresh session open FAILED"); return emptyList() }
+        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)   // enter playback mode
+        recvAll(200)
+        sendDuml(0x02, 0xFF, highlightCmd(handle), receiverType = 0x01, receiverId = 0)
+        var reply: ByteArray? = null
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (reply == null && System.nanoTime() < deadline) {
+            reply = findReply(recvAll(200), 0x02, 0xFF)
+            if (reply == null) sendAck()
+        }
+        // No leave here on purpose: the browse continues after this fresh session and the keep-alive is
+        // about to resume. Dropping the camera out of playback between operations is what made
+        // favourite/delete race and let a Pocket 3 fall back into capture mid-transfer.
+        val marks = reply?.let { parseHighlights(it) } ?: emptyList()
+        log("datalink: highlights(fresh) 0x${handle.toString(16)} → ${marks.size} $marks")
+        return marks
+    }
+
+    /** 0x02/0xff request: `40 2f 00 01 0b 00 00 00 [handle:u32-LE] 00 00`. */
+    private fun highlightCmd(handle: Long): ByteArray =
+        byteArrayOf(0x40, 0x2f, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00) + le32(handle.toInt()) + byteArrayOf(0, 0)
+
+    /** Decode the 0x02/0xff reply: `00 · 40 2f 00 01 · [len:u32] · [handle:u32] · [count:u8] · 00 ·
+     *  { 00 [startMs:u32-LE] } × count`. Count at payload byte 13, first mark at 16, stride 5. */
+    private fun parseHighlights(p: ByteArray): List<Int> {
+        if (p.size < 14 || p[0].toInt() != 0) return emptyList()
+        val count = p[13].toInt() and 0xFF
+        val marks = ArrayList<Int>(count)
+        for (k in 0 until count) {
+            val o = 16 + k * 5
+            if (o + 4 > p.size) break
+            marks.add(u32le(p, o).toInt())
+        }
+        return marks.sorted()
+    }
 
     internal data class PageStep(val fresh: List<CameraFile>, val nextCursor: Long, val moreAvailable: Boolean)
 
@@ -1010,7 +1086,7 @@ class CameraSession(
             for (d in recvAll(200)) { status = findRespStatus(d, 0x02, 0xbf); if (status != null) break }
             if (status == null) sendAck()
         }
-        // No leave here on purpose: the browse continues and the keep-alive resumes holding playback.
+        // No leave here — see freshSessionHighlights. The keep-alive resumes and keeps holding playback.
         log("datalink: FAVORITE reply status=${status?.let { "0x%04x".format(it) } ?: "none"}")
         return status == 0
     }

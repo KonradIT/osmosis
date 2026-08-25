@@ -27,15 +27,14 @@ list), and the `/v2` storage detect should be skipped for index cameras (it fire
 
 ### 7. Highlight / moment markers
 
-We want ⚑ chips under the preview scrubber that seek to each side-button mark. Built, verified on the
-Xtra, then **cut from main** — the whole feature lives on branch `highlights`, and the protocol is
-[MEDIA_PROTOCOL §3a](MEDIA_PROTOCOL.md#3a-highlight--moment-marks). Marks are not in the MP4 at all;
-they are pulled from the camera on demand.
+We want ◇ marks **on the preview scrubber** at each side-button moment, that seek the player. Lives on
+branch `highlights`; the protocol is [MEDIA_PROTOCOL §3a](MEDIA_PROTOCOL.md#3a-highlight--moment-marks) —
+marks are not in the MP4 at all, they are pulled from the camera on demand (DUML `0x02/0xff`).
 
-**Blockers:** the inline query misses often enough to matter, and a miss falls back to a fresh session —
-which tears the live session down and rebuilds it. On a Nano that cost ~8 s per preview to return `0 []`,
-and two previews in quick succession killed playback mode outright. Revive it when the inline path never
-needs the fallback.
+Revived on top of the faithful long-lived session (#12): the query now runs **inline only** — a miss
+just draws no marks rather than tearing the live session down for an 8 s rebuild that used to return
+`0 []` and drop playback mode. The earlier ⚑-chip row is replaced by ◇ glyphs drawn on the seekbar
+track at each mark's timestamp.
 
 ### 11. Direct USB-C ↔ USB-C media read
 

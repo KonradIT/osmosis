@@ -29,6 +29,7 @@ import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.core.previewCandidates
 import dev.konraditurbe.osmosis.core.urlPath
+import dev.konraditurbe.osmosis.net.Highlights
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.net.ImageLoader
 
@@ -61,7 +62,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var btnMarkOut: Button
     private lateinit var trimRow: View
     private lateinit var controls: View
-    private lateinit var seekBar: SeekBar
+    private lateinit var seekBar: HighlightSeekBar
     private lateinit var txtCur: TextView
     private lateinit var txtTotal: TextView
     private lateinit var btnPlay: ImageButton
@@ -130,6 +131,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         trimRow = findViewById(R.id.trimRow)
         controls = findViewById(R.id.controls)
         seekBar = findViewById(R.id.seekBar)
+        seekBar.setMarkColor(ContextCompat.getColor(this, R.color.osmo_accent))
         txtCur = findViewById(R.id.txtCur)
         txtTotal = findViewById(R.id.txtTotal)
         btnPlay = findViewById(R.id.btnPlay)
@@ -213,6 +215,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         selectedFrame = 0
         groupPaths = emptyList(); groupThumbs = emptyList()   // strip only for the initially-tapped burst
         burstRow.removeAllViews(); burstStrip.visibility = View.GONE
+        main.removeCallbacks(highlightsRunnable)
+        seekBar.marks = emptyList()
         scrubFrames.close()
         hideScrubPreview()
         runCatching { videoView.stopPlayback() }
@@ -243,7 +247,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         refreshQueueButton()
 
         when {
-            file.isVideo -> loadVideo()
+            file.isVideo -> { loadVideo(); loadHighlights() }
             file.isImage -> {
                 resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
                 if (groupPaths.size > 1) setupBurstStrip()     // frames came from the DUML group-expand
@@ -534,6 +538,23 @@ class MediaPreviewActivity : AppCompatActivity() {
         topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
     }
 
+    /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge) and draw them
+     *  as ◇ on the seek bar. **Debounced** so swiping through clips doesn't spam the datalink; the result
+     *  is dropped if we've since moved on. */
+    private val highlightsRunnable = Runnable {
+        val handle = file.handle
+        if (handle == 0L) return@Runnable
+        val at = navIndex
+        Thread {
+            val marks = runCatching { Highlights.provider?.invoke(handle) }.getOrNull().orEmpty()
+            if (marks.isNotEmpty()) main.post { if (!isFinishing && navIndex == at) seekBar.marks = marks }
+        }.start()
+    }
+    private fun loadHighlights() {
+        main.removeCallbacks(highlightsRunnable)
+        main.postDelayed(highlightsRunnable, 400)
+    }
+
     /**
      * Start decoding preview frames for the clip we're actually streaming (see [ScrubFrames]): a
      * coarse grid up front so the bubble is never empty, then sharper frames on demand as the thumb
@@ -638,6 +659,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             spinner.visibility = ProgressBar.GONE
             videoView.start()
             seekBar.max = videoView.duration.coerceAtLeast(1)
+            seekBar.invalidate()   // redraw ◇ marks that arrived before the duration scale was known
             txtTotal.text = mmss(videoView.duration.toLong())
             updatePlayIcon()
             main.removeCallbacks(tick)
@@ -710,6 +732,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         main.removeCallbacks(tick)
+        main.removeCallbacks(highlightsRunnable)
         runCatching { videoView.stopPlayback() }
         scrubFrames.close()
         imageLoader.shutdown()
@@ -725,7 +748,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         const val EXTRA_PATH = "path"
         private const val EXTRA_STORAGE = "storage"
         private const val EXTRA_SIZE = "size"    // full manifest byte size → already-downloaded check
-        private const val EXTRA_HANDLE = "handle"    // manifest handle → delete / favourite
+        private const val EXTRA_HANDLE = "handle"    // video handle → highlight pull (0x02/0xff)
         private const val EXTRA_RES = "res"          // fps label ("25fps")
         private const val EXTRA_RESOLUTION = "resolution"  // pixel W×H ("3840x2160") from the manifest
         private const val EXTRA_PROXY = "proxy"
