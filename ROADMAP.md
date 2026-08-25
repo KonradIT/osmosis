@@ -2,9 +2,22 @@
 
 ### 2. The rest of the Osmo line:
 
-- **Action 4 (`0x14`)** — BLE pair and WiFi creds both succeed, but the AP never comes up (Android sees
-  no SSID). Older BLE generation: MTU 510, no `fff7` characteristic. It has never been sent
-  `0x07/0x39`; an OA4-gated probe waits on branch `osmo-action-4-debugging`.
+- **Action 4**: WIP, seems mostly everything works.
+
+See:
+
+[Harden Osmo Action 4 support](https://github.com/KonradIT/osmosis/pull/34)
+
+https://github.com/KonradIT/osmosis/issues/31
+
+- [x] Camera is detected and can be connected to
+- [x] Grid loads
+- [x] Media downloads work
+- [ ] Delete a file
+- [ ] Pagination: scroll past 45 files
+- [ ] Favorite a file
+- [ ] Load previous favorites in the grid
+- [ ] Disconnection handling
 
 ### 6. Older Osmo Action generation (index-based list)
 
@@ -24,17 +37,6 @@ core question; it has never been run against an Action.
 to be index-based as well, so the download path can be read off rather than guessed at. Two smaller
 fixes ride along: the AP keepalive does not hold an Action's AP (`onLost` ~40 s after the
 list), and the `/v2` storage detect should be skipped for index cameras (it fires two failing HEADs).
-
-### 7. Highlight / moment markers
-
-We want ◇ marks **on the preview scrubber** at each side-button moment, that seek the player. Lives on
-branch `highlights`; the protocol is [MEDIA_PROTOCOL §3a](MEDIA_PROTOCOL.md#3a-highlight--moment-marks) —
-marks are not in the MP4 at all, they are pulled from the camera on demand (DUML `0x02/0xff`).
-
-Revived on top of the faithful long-lived session (#12): the query now runs **inline only** — a miss
-just draws no marks rather than tearing the live session down for an 8 s rebuild that used to return
-`0 []` and drop playback mode. The earlier ⚑-chip row is replaced by ◇ glyphs drawn on the seekbar
-track at each mark's timestamp.
 
 ### 11. Direct USB-C ↔ USB-C media read
 
@@ -110,3 +112,7 @@ approval dialog. `PcapAnalysis` rides along on both for reading a capture with o
 
 **Blockers:** hardware. Both branches are instrumentation waiting for one run each — nothing more can
 be deduced from what we have.
+
+### 19. Migrate to CompanionDeviceManager API
+
+CompanionDeviceManager will give us features such as auto-detect, less permissions, better handling for BLE, etc...
