@@ -36,6 +36,18 @@ class BleAdvertTest {
     /** Nano shape: model 0x0019 at [0:2], then MAC, then a trailing byte. */
     private val nano = hex("190000c25a8abdc2d803")
 
+    /**
+     * An Osmo Action 4 advert, from a tester's scan on 2026-08-24 — the session that first carried an
+     * Action 4 all the way to a downloaded file.
+     *
+     *     14 00 fa aa bb cc dd ee ff     classic 0x0014, then the MAC in advertised order
+     *
+     * Byte 2 is `0xfa` where the Nano's is `0x00`, which is the point of keeping it: the classic model
+     * id is a u16 LE at `[0:2]`, so anything that widened the read past two bytes to accommodate a new
+     * body would resolve this advert as garbage rather than as an Action 4.
+     */
+    private val action4 = hex("1400faaabbccddeeff")
+
     @Test
     fun `pocket 4 pro resolves through the new format`() {
         val d = BleAdvert.decode(pocket4Pro)
@@ -118,6 +130,29 @@ class BleAdvertTest {
         assertEquals(pocket4.size, pocket4Pro.size)
         assertEquals(0x0021, BleAdvert.modelId(pocket4))
         assertEquals(0x0022, BleAdvert.modelId(pocket4Pro))
+    }
+
+    /**
+     * The Action 4 resolves through the classic path to a camera profile that reaches the grid.
+     *
+     * `datalinkPort` 9004 with the TCP poke is exactly what the working session used, and
+     * `singleSdStorage` must stay clear: the mount is decided by the handle's internal bit here, not
+     * pinned the way the Pocket 3's is. See [dev.konraditurbe.osmosis.camera.Oa4ManifestTest].
+     */
+    @Test
+    fun `action 4 resolves through the classic format to a 9004 profile`() {
+        val d = BleAdvert.decode(action4)
+        assertFalse("classic format: the flag bit at payload[5] is clear", d.newFormat)
+        assertEquals(0x0014, d.modelId)
+        assertEquals("OsmoAction4", BleConstants.MODEL_NAMES[d.modelId])
+
+        val m = CameraModel.resolve(d.modelId, "OsmoAction4-ABCD")
+        assertEquals("Osmo Action 4", m.name)
+        assertEquals(9004, m.datalinkPort)
+        assertTrue(m.tcpPoke)
+        assertFalse("its AP is WPA2, not WPA3", m.wpa3)
+        assertFalse("the handle bit picks the mount; nothing is pinned", m.singleSdStorage)
+        assertFalse("an Action 4 is not a drone", m.isDrone)
     }
 
     @Test
