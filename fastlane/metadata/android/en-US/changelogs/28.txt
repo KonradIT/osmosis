@@ -1,0 +1,17 @@
+Scrolling a full camera now reaches everything. Files on the microSD card past the newest 45 were unreachable — the grid simply stopped, with no error — and on a card-only camera scrolling did not work at all. Both stores now page independently, so a library of any size loads to the end.
+
+Videos show the highlight marks you made with the camera's side button, as icons on the preview scrubber.
+
+Long-press the app icon for a shortcut straight to a camera.
+
+Photos shot in JPEG+RAW and clips recorded with audio backup now offer their .DNG and .WAV sidecar files, which the camera never lists.
+
+Confirmed working on the Osmo Action 4, end to end — pairing, Wi-Fi, browsing and download — after a tester ran it through. Nothing needed changing for it; the app had simply never been shown to work on one.
+
+Mavic 3: delete and favourite now work, and clips show their resolution and frame rate.
+
+Vertical and square video formats are labelled correctly — a 2160x2160 clip used to read "1080p". Unrecognised sizes show their pixel dimensions instead of guessing.
+
+A camera that has never been activated is now recognised as such, with a prompt to activate it once in DJI Mimo, instead of failing to connect for no visible reason.
+
+Spanish, German, Ukrainian and Chinese translations.
