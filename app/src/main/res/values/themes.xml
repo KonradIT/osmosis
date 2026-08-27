@@ -17,7 +17,10 @@
         <item name="colorOnSurfaceVariant">@color/osmo_muted</item>
         <item name="colorOutline">@color/osmo_track</item>
 
-        <!-- Bars follow the (possibly dynamic) window background; icon polarity flips with the theme. -->
+        <!-- Bars follow the (possibly dynamic) window background; icon polarity flips with the theme.
+             statusBarColor/navigationBarColor are honoured on API 29-34 only: from targetSdk 35 the
+             window is edge-to-edge and the bars are transparent, so MainActivity pads the root by the
+             bar insets instead and the window background shows through. -->
         <item name="android:statusBarColor">?android:attr/colorBackground</item>
         <item name="android:navigationBarColor">?android:attr/colorBackground</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">@bool/osmo_light_system_bars</item>

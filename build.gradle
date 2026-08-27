@@ -1,8 +1,8 @@
-// Top-level build file. Pinned toolchain: AGP 8.5.2 / Gradle 8.7 / Kotlin 1.9.24, JDK 17+.
-// The floor is JDK 17 (AGP 8) and the ceiling is whatever Gradle 8.7 accepts (Java 22); F-Droid's
+// Top-level build file. Pinned toolchain: AGP 8.13.2 / Gradle 8.14.5 / Kotlin 1.9.24, JDK 17+.
+// The floor is JDK 17 (AGP 8) and the ceiling is whatever Gradle 8.14.5 accepts (Java 24); F-Droid's
 // buildserver runs JDK 21, which is why the old Gradle 7.5.1 toolchain had to go — it refused to
 // start on anything past JDK 19 and Debian trixie no longer packages an older JDK.
 plugins {
-    id 'com.android.application' version '8.5.2' apply false
+    id 'com.android.application' version '8.13.2' apply false
     id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
 }

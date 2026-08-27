@@ -15,18 +15,18 @@ if (keystorePropsFile.exists()) {
 
 android {
     namespace 'dev.konraditurbe.osmosis'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         applicationId "dev.konraditurbe.osmosis"
         minSdk 29
-        targetSdk 34
+        targetSdk 36
         // Must exceed every code already in a tester's hands: 20 went out as
         // 1.3.3-action1-playback, 22 as 1.3.1-rc1, 23 was tagged v1.3.1 but never published, 24 is
-        // the published v1.3.2, 25 the published v1.4.0, 26 the published v1.4.1 and 27 the
-        // published v1.4.2.
-        versionCode 28
-        versionName "1.4.3"
+        // the published v1.3.2, 25 the published v1.4.0, 26 the published v1.4.1, 27 the published
+        // v1.4.2 and 28 the published v1.4.3.
+        versionCode 29
+        versionName "1.4.4"
     }
 
     signingConfigs {
