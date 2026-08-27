@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -102,13 +103,43 @@ class MediaPreviewActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_preview)
 
-        // Full-screen media viewer: black system bars with light icons (the app's cream theme sets the
-        // opposite), so the status/nav bars blend into the dark preview instead of the cream chrome.
-        window.statusBarColor = android.graphics.Color.BLACK
-        window.navigationBarColor = android.graphics.Color.BLACK
+        // Full-screen media viewer: light bar icons (the app's cream theme sets the opposite), so they
+        // stay readable over the dark preview.
+        //
+        // The bars go black by two different routes depending on the platform, and BOTH are needed
+        // because minSdk is 29. From targetSdk 35 the window is edge-to-edge, statusBarColor and
+        // navigationBarColor are ignored, and the bars are transparent over the layout's black root.
+        // On API 29-34 there is no edge-to-edge: the bars are opaque and painted from these setters,
+        // so dropping them leaves the theme's cream showing behind white icons.
+        if (Build.VERSION.SDK_INT < 35) {
+            @Suppress("DEPRECATION")
+            window.statusBarColor = android.graphics.Color.BLACK
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = android.graphics.Color.BLACK
+        }
         androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
+        }
+        // The media itself is meant to run full-bleed under the bars; only the overlays get inset. The
+        // insets are ADDED to each overlay's own layout padding, and the base padding is captured once
+        // so re-dispatches (rotation, IME, bar show/hide) don't accumulate.
+        val topOverlays = listOf<View>(findViewById(R.id.topInfo), findViewById(R.id.savedActions))
+        val bottomOverlays = listOf<View>(findViewById(R.id.controls))
+        val basePadding = (topOverlays + bottomOverlays).associateWith {
+            intArrayOf(it.paddingLeft, it.paddingTop, it.paddingRight, it.paddingBottom)
+        }
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.previewRoot)) { _, insets ->
+            val bars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+            )
+            for ((v, base) in basePadding) {
+                val top = if (v in topOverlays) bars.top else 0
+                val bottom = if (v in bottomOverlays) bars.bottom else 0
+                v.setPadding(base[0] + bars.left, base[1] + top, base[2] + bars.right, base[3] + bottom)
+            }
+            insets
         }
 
         ip = intent.getStringExtra(EXTRA_IP) ?: "192.168.2.1"

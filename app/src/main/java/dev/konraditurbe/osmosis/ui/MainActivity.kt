@@ -22,8 +22,11 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import android.net.LinkProperties
 import android.net.Network
+import androidx.activity.OnBackPressedCallback
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.ble.Brand
 import dev.konraditurbe.osmosis.ble.CameraModel
@@ -269,6 +272,28 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        // targetSdk 35+ forces edge-to-edge: android:statusBarColor/navigationBarColor in the theme are
+        // ignored and the window draws under the bars. Pad the root by the bar + cutout insets so the
+        // selector header and the bottom progress area stay clear of them.
+        val root = findViewById<View>(R.id.mainRoot)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+        // targetSdk 36 turns predictive back on by default, and onBackPressed() is no longer called.
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (gridGroup.visibility == View.VISIBLE) {
+                    switchToSelector()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
         // Keep the screen on: the WifiNetworkSpecifier consent dialog is dismissed if the display
         // sleeps, which aborts the join.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -662,10 +687,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         gridGroup.visibility = View.GONE
         selectorGroup.visibility = View.VISIBLE
         startCameraScan(select = true)
-    }
-
-    override fun onBackPressed() {
-        if (gridGroup.visibility == View.VISIBLE) switchToSelector() else super.onBackPressed()
     }
 
     private fun safeName(d: BluetoothDevice): String? = try { d.name } catch (_: SecurityException) { null }
