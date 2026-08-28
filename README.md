@@ -20,6 +20,22 @@ Read The Verge's review of an early version of the app:
 
 [![image](https://platform.theverge.com/wp-content/uploads/sites/2/2026/08/verge-osmo-pocket-4p-sean-hollister-1-5.jpg?quality=90&strip=all&w=500)](https://www.theverge.com/tech/981852/osmosis-app-download-dji-osmo-camera-video-mimo-replacement)
 
+## Getting started
+
+1. Turn on Bluetooth and WiFi, and open Osmosis; grant the permission prompts.
+2. Power on the camera, wait a few seconds and tap it in the **Cameras** list. Should show as "NEW".
+3. **Approve the pairing prompt on the camera screen** (will read: `OSMO`).
+4. **Approve the Android "join WiFi" dialog** when it appears.
+5. Browse the grid. Tap a clip to preview, trim, and add it to the queue.
+6. Tap **Download** — files land in your phone's gallery.
+
+## Download
+
+- Play Store: In progress - due to absurd EU rules, not going to say which and why, Google Play release might not happen at all!
+- GitHub releases: https://github.com/KonradIT/osmosis/releases
+- Unobtanium: https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/KonradIT/osmosis
+- F-Droid: submitted, awaiting review — [fdroiddata!45005](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/45005)
+
 ## Features
 
 - **Media grid** with thumbnails, pulled straight off the camera.
@@ -45,7 +61,7 @@ Read The Verge's review of an early version of the app:
 | Osmo Pocket 4 / 4 Pro | **Verified on hardware** |
 | Xtra Atto / Edge / Muse | Untested, should work |
 | Osmo Action 1 | _Started_ want this camera supported? raise an issue |
-| Osmo Action 4 | _Started_ want this camera supported? raise an issue |
+| Osmo Action 4 | _Started_ Tracking progress in https://github.com/KonradIT/osmosis/issues/31 - seems to work well already |
 | Osmo 360 | Unplanned (needs Mimo to render 360 content) |
 | Osmo Action 2/3 | _Started_ want this camera supported? raise an issue |
 | DJI Mavic 3 (QuickTransfer) | **Verified on hardware** |
@@ -90,18 +106,6 @@ Commands reverse engineered not found anywhere else:
 - Pagination for querying older media
 - Highlights, delete file
 
-## How it works
-
-No DJI SDK — Osmosis speaks DJI's **DUML** protocol directly. Each session:
-
-1. **BLE pair** with the camera (requires approving on the camera itself once).
-2. **Read the WiFi credentials over BLE** (SSID + passphrase).
-3. **Wake and join** the camera's WiFi access point.
-4. **List the media** via the DUML file-list command over UDP.
-5. **Download** the high-res files over HTTP from the camera's `192.168.2.1` server.
-
-The full reverse-engineered protocol — BLE pairing, WiFi handoff, the DUML file-list format, and more — is documented in [docs/01-protocol-map.md](docs/01-protocol-map.md).
-
 ## Privacy
 
 Osmosis talks to **only your camera** (`192.168.2.1`). No analytics, no accounts, no activation servers, no cloud. Your media never leaves your phone and camera.
@@ -118,22 +122,6 @@ Contrast the official apps, which require a login and phone home to activation a
   - No internet permission is needed for anything but the camera's local AP.
   - No storage permission needed due to the use of Android's media APIs to save content.
 
-## Getting started
-
-1. Turn on Bluetooth and WiFi, and open Osmosis; grant the permission prompts.
-2. Power on the camera, wait a few seconds and tap it in the **Cameras** list. Should show as "NEW".
-3. **Approve the pairing prompt on the camera screen** (will read: `OSMO`).
-4. **Approve the Android "join WiFi" dialog** when it appears.
-5. Browse the grid. Tap a clip to preview, trim, and add it to the queue.
-6. Tap **Download** — files land in your phone's gallery.
-
-## Download
-
-- Play Store: In progress
-- GitHub releases: https://github.com/KonradIT/osmosis/releases
-- Unobtanium: https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/KonradIT/osmosis
-- F-Droid: submitted, awaiting review — [fdroiddata!45005](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/45005)
-
 ## Build from source
 
 Standard Gradle Android build:
@@ -148,6 +136,8 @@ Plain Android Views (no Jetpack Compose). Built with AGP 8.5.2 / Gradle 8.7 / JD
 
 Planned work and reverse-engineering notes live in [ROADMAP.md](ROADMAP.md).
 
+As of v1.4.3, the app is basically at it's plateau feature-wise. I do wish to add support for older cameras and more drones, but the app will remain the same, no groundbreaking additions or new capabilities are foreseen to be added. I do not want [feature creep](https://en.wikipedia.org/wiki/Feature_creep) to make the app worse, given the complexity of supporting many different action cameras and handheld cameras, as well as drones. Enumerating and downloading media is hard enough as it is. Updates will largely consist of supporting new hardware, fixing bugs and UX/UI polishing.
+
 ## Projects using Osmosis references:
 
 - https://github.com/brianmerchant/Kaze-for-DJI
@@ -155,6 +145,7 @@ Planned work and reverse-engineering notes live in [ROADMAP.md](ROADMAP.md).
 - https://github.com/intermittech/OsmoOffload
 - https://github.com/rover1312/shutterlink
 - https://github.com/brianmerchant/Pocket3Direct-Android
+- https://github.com/dstrat28/action-multicam-remote
 
 ## Credits
 

@@ -116,3 +116,19 @@ be deduced from what we have.
 ### 19. Migrate to CompanionDeviceManager API
 
 CompanionDeviceManager will give us features such as auto-detect, less permissions, better handling for BLE, etc...
+
+### 20. Send HiLights while in playback
+
+Xtra specific, need to check if possible to send hilights
+
+### 21. UI icons overhaul
+
+Design an iconset, stop using emojis
+
+### 22. Show a tick for downloaded media
+
+Just after media is downloaded, stateless. When app is restarted, and camera connects again, tick won't be there. Just visual insight into what was just downloaded.
+
+### 23. Better camera disconnection flow
+
+Works great on osmo nano but xtra just prompts to go back to cameras or input password
