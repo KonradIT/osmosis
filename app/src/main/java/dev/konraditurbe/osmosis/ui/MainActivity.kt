@@ -23,6 +23,7 @@ import androidx.appcompat.app.AppCompatActivity
 import android.net.LinkProperties
 import android.net.Network
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -271,6 +272,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Opt in explicitly instead of inheriting the targetSdk-35 default, so every supported release
+        // behaves the same way. Without it, API 29-34 keeps opaque system bars while 35+ goes
+        // edge-to-edge, which is two layouts to reason about and only one of them gets tested on the
+        // device in front of you. The bar icon polarity auto()-picks off the system dark mode, matching
+        // what @bool/osmo_light_system_bars does for the pre-35 theme.
+        enableEdgeToEdge()
         setContentView(R.layout.activity_main)
         // targetSdk 35+ forces edge-to-edge: android:statusBarColor/navigationBarColor in the theme are
         // ignored and the window draws under the bars. Pad the root by the bar + cutout insets so the

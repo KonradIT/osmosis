@@ -68,6 +68,9 @@ android {
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.9.0'
+    // Pinned rather than taken transitively from appcompat: enableEdgeToEdge() (used by both
+    // activities) landed in 1.8.0 and the edge-to-edge backport was refined for SDK 35 after it.
+    implementation 'androidx.activity:activity:1.9.3'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.10.0'
     implementation 'androidx.recyclerview:recyclerview:1.3.2'

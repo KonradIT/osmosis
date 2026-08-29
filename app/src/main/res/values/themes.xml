@@ -17,10 +17,13 @@
         <item name="colorOnSurfaceVariant">@color/osmo_muted</item>
         <item name="colorOutline">@color/osmo_track</item>
 
-        <!-- Bars follow the (possibly dynamic) window background; icon polarity flips with the theme.
-             statusBarColor/navigationBarColor are honoured on API 29-34 only: from targetSdk 35 the
-             window is edge-to-edge and the bars are transparent, so MainActivity pads the root by the
-             bar insets instead and the window background shows through. -->
+        <!-- Both activities call enableEdgeToEdge(), which installs its own bar scrims and icon
+             polarity, so these four items no longer decide what the bars look like on any supported
+             release — enableEdgeToEdge wins on API 29-34, and from targetSdk 35 the platform ignores
+             the two colours outright. They stay as the pre-inflation appearance (the window shows the
+             theme background behind the bars for the frame before the activity runs) and as the
+             fallback for any window that does not go through those two activities. Content is kept
+             clear of the bars by inset padding in the activities, never by these. -->
         <item name="android:statusBarColor">?android:attr/colorBackground</item>
         <item name="android:navigationBarColor">?android:attr/colorBackground</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">@bool/osmo_light_system_bars</item>

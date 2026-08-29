@@ -5,7 +5,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.Build
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -99,28 +100,22 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var scrubTime: TextView
     private val scrubFrames by lazy { ScrubFrames { Log.i("Osmosis", it) } }
 
+    /** Newest status-bar/cutout inset, kept so the floating scrub bubble can clamp against it. */
+    private var topInsetPx = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Full-screen media viewer: black bars with light icons on every supported release (the app's
+        // cream theme sets the opposite, which is unreadable over a dark preview). SystemBarStyle.dark
+        // is what makes this one call cover both platform routes — it paints the scrim on the API 29-34
+        // devices, where the bars are opaque and used to need window.statusBarColor, and goes fully
+        // transparent over the layout's black root from 35 on, where those setters are ignored.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
+        )
         setContentView(R.layout.activity_preview)
 
-        // Full-screen media viewer: light bar icons (the app's cream theme sets the opposite), so they
-        // stay readable over the dark preview.
-        //
-        // The bars go black by two different routes depending on the platform, and BOTH are needed
-        // because minSdk is 29. From targetSdk 35 the window is edge-to-edge, statusBarColor and
-        // navigationBarColor are ignored, and the bars are transparent over the layout's black root.
-        // On API 29-34 there is no edge-to-edge: the bars are opaque and painted from these setters,
-        // so dropping them leaves the theme's cream showing behind white icons.
-        if (Build.VERSION.SDK_INT < 35) {
-            @Suppress("DEPRECATION")
-            window.statusBarColor = android.graphics.Color.BLACK
-            @Suppress("DEPRECATION")
-            window.navigationBarColor = android.graphics.Color.BLACK
-        }
-        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
-        }
         // The media itself is meant to run full-bleed under the bars; only the overlays get inset. The
         // insets are ADDED to each overlay's own layout padding, and the base padding is captured once
         // so re-dispatches (rotation, IME, bar show/hide) don't accumulate.
@@ -134,6 +129,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 androidx.core.view.WindowInsetsCompat.Type.systemBars() or
                     androidx.core.view.WindowInsetsCompat.Type.displayCutout()
             )
+            topInsetPx = bars.top
             for ((v, base) in basePadding) {
                 val top = if (v in topOverlays) bars.top else 0
                 val bottom = if (v in bottomOverlays) bars.bottom else 0
@@ -648,7 +644,10 @@ class MediaPreviewActivity : AppCompatActivity() {
         val margin = 8 * resources.displayMetrics.density
         val maxX = (previewRoot.width - w - margin).coerceAtLeast(margin)
         scrubPreview.translationX = (thumbX - w / 2f).coerceIn(margin, maxX)
-        scrubPreview.translationY = (bar[1] - root[1] - h - margin).coerceAtLeast(0f)
+        // Floor at the status-bar inset, not at 0: the root runs edge-to-edge, so a bubble pushed to
+        // the top of the window (short screen, tall bubble) would otherwise land under the clock.
+        scrubPreview.translationY =
+            (bar[1] - root[1] - h - margin).coerceAtLeast(topInsetPx.toFloat())
     }
 
     /** Once the thumb stops moving, pull the keyframe actually under it (debounced from the drag). */
