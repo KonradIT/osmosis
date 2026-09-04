@@ -31,9 +31,10 @@ Read The Verge's review of an early version of the app:
 
 ## Download
 
-- Play Store: In progress - due to absurd EU rules, not going to say which and why, Google Play release might not happen at all!
+- Play Store: Maybe in the future. Sorting it out.
 - GitHub releases: https://github.com/KonradIT/osmosis/releases
 - Unobtanium: https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/KonradIT/osmosis
+- RSS feed: `github.com/KonradIT/osmosis/releases.atom` - Add this to your RSS reader of choice, eg: [Feeder](https://github.com/spacecowboy/feeder)
 - F-Droid: submitted, awaiting review — [fdroiddata!45005](https://gitlab.com/fdroid/fdroiddata/-/merge_requests/45005)
 
 ## Features
