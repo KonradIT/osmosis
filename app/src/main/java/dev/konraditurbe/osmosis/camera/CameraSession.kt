@@ -1760,9 +1760,10 @@ class CameraSession(
      * appear on every file at once. Anything other than 0 or 1 means the layout is not the one this
      * offset was derived from, so say "not starred" rather than guess.
      *
-     * ⚠️ Consequence: favourites still do not survive a re-list on the Xtra. Reading them there needs
-     * that record layout worked out — a manifest dumped with known favourites will show it, which
-     * `dumpManifest` now makes a one-run job.
+     * ⚠️ This offset alone would mean no favourite survives a re-list on that family. It does not,
+     * because [starFlagBySignature] runs first and an Xtra record does carry [STAR_SIG] — see there.
+     * This function is the fallback for the bodies that have no signature (Nano, Action 6), where
+     * the marker read is the correct one.
      */
     private fun starFlag(bytes: ByteArray, lo: Int, hi: Int): Boolean {
         var q = lo
@@ -1787,6 +1788,16 @@ class CameraSession(
      * nine files, differing in exactly three bytes, and all three were the favourites that had been
      * changed between them — one video cleared, one video and one **photo** set. Eighteen records
      * across the two dumps, every one agreeing with the camera's own gallery.
+     *
+     * **Not Pocket 3 only — this is what reads an Xtra's favourites too.** The signature is present
+     * once per record in both Xtra fixtures (13 in `xtra_13.bin`, 44 in `xtra_delete.bin`, matching
+     * their record counts), and the byte after it is strictly `00`/`01` there — never the 44/48 path
+     * length that makes the marker offset in [starFlag] unusable on that family. `xtra_delete.bin`
+     * carries five favourites that read cleanly. Confirmed on an Xtra Edge Pro in hand (2026-08-30):
+     * hearts set on the camera survive a re-list.
+     *
+     * The Nano and Action 6 carry no signature at all (zero hits across `nano_45.bin`, `nano_delete.bin`
+     * and `oa6_sd_3.bin`), which is why the [starFlag] fallback stays.
      */
     private fun starFlagBySignature(bytes: ByteArray, lo: Int, hi: Int): Boolean? {
         var q = lo
