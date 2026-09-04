@@ -117,10 +117,6 @@ be deduced from what we have.
 
 CompanionDeviceManager will give us features such as auto-detect, less permissions, better handling for BLE, etc...
 
-### 20. Send HiLights while in playback
-
-Xtra specific, need to check if possible to send hilights
-
 ### 21. UI icons overhaul
 
 Design an iconset, stop using emojis
