@@ -78,7 +78,7 @@ id, not name — bodies get renamed.
 | DJI Neo 2 | `0x007e` | *(varies)* | **9003** | **no** | WPA2 |
 
 - **Osmo Action (1)** uses the index-based list ([§1](#1-get-media-list), "Parsed — index-based") and addresses media by numeric index.
-- **Osmo Action 4** and **Osmo 360** pair and hand over credentials but their AP never comes up; neither reaches the datalink. The 360 advertises an extra `fff7` characteristic.
+- **Osmo 360** pairs and hands over credentials but its AP never comes up; it does not reach the datalink. It advertises an extra `fff7` characteristic.
 - **Mavic 3 / Neo 2** are aircraft: `udp/9003`, no poke, `0x51` session-open first ([§27](#27-session-open-0x51--required-before-anything-else-mavic-3), [§27a](#27a-neo-2--the-same-transport-a-different-unlock)).
 - **Xtra Edge Pro** is an Action 5 Pro rebrand with the same model id. Distinguish it by OUI `EC:9E:EA`. Datalink on `10004`, no poke. Answers nothing on camera-control cmdset `0x02` ([§10–17](#camera-control)).
 - **Two advert formats.** Pocket 4 carries the classic model byte. Pocket 4 Pro uses the newer form: flag bit at payload byte 5 marks a 16-bit product type at bytes 10–11 (`218` = Pocket 4 Pro). A client reading only the classic field sees `0x0000` for the Pro.
@@ -91,6 +91,7 @@ id, not name — bodies get renamed.
 | Osmo Nano | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1**, dock SD → **0** | `.LRF` | `T+8` |
 | Osmo Pocket 4 | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1** | none listed | `T+8` |
 | Osmo Pocket 4 Pro | `DCIM/DJI_001/DJI_…` | `0x00100000` / `0x40` | 45 → **0**, 1 → **1** | `(unconfirmed)` | `(unconfirmed)` |
+| Osmo Action 4 | `DCIM/DJI_001/DJI_…_D` | microSD `0x00040000` / `0x10` | microSD (only store) → **0** | `(unconfirmed)` | signature |
 | Osmo Action 5 Pro | `DCIM/DJI_001/DJI_…_D` | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.LRF` | signature |
 | Xtra Edge Pro | `DCIM/CAM_001/CAM_…_D` | SD `0x00040000`, internal `0x40040000`, step `0x10` | SD → **0**, internal → **1** | `.XRF` | signature |
 | Osmo Action 6 | `DCIM/DJI_001/DJI_…_D` | SD `0x00100000`, internal `0x40100000`, step `0x40` | SD → **0**, internal → **1** | `.LRF` | `T+8` |
@@ -113,6 +114,7 @@ id, not name — bodies get renamed.
 |---|---|---|
 | Osmo Nano | 22 B, `stores=1` | can report `0/0` with a card in and files on internal |
 | Osmo Pocket 3 | 22 B, `stores=1` | |
+| Osmo Action 4 | 22 B, `stores=1` | |
 | Xtra Edge Pro / Action 5 Pro | 40 B, `stores=2` | |
 | Osmo Action 6 | 40 B, `stores=2` | card block matches its own screen |
 | Osmo Pocket 4 | 40 B, `stores=2` | two-store body even with no card — first block reads `0/0` |
@@ -127,6 +129,9 @@ Dock and charging bytes (`0x0D/0x02 @27`, `@32`) are Nano-specific. Voltage, cur
 | Osmo Nano | Reads the dock SD only when seated lens-away from the dock screen; otherwise the SD query returns a `start` frame and no data. |
 | Osmo Pocket 3 | Answers `e0` to the `0x53/0x10` wake; the AP still comes up via the `0x00/0x2b` session. |
 | Osmo Pocket 3 | Answers `e0` to `0x02/0x0c`. Playback is entered with `0x01/0x01` ([§13b](#13b-pocket-3-playback-entry-0x010x01)). |
+| Osmo Action 4 | Answers `e0` to `0x02/0x0c`. Playback is entered with `0x01/0x01` ([§13b](#13b-pocket-3-playback-entry-0x010x01)). |
+| Osmo Action 4 | `0x00/0x26` answers `d8` while the camera is in capture. Enter playback first. |
+| Osmo Action 4 | Still records carry `e5` / `e7` before the `19 06` tag. |
 | Osmo Pocket 3 | Serves an incomplete first page when listed while still in capture. Enter playback first. |
 | Osmo Pocket 3 | Still records carry `f6` (photo) / `c7` (panorama) before the `19 06` tag instead of `ff`/`fe`. |
 | Osmo Pocket 4 | Folds its gimbal in playback; `0x04/0x05` telemetry rate is unchanged. |
@@ -191,7 +196,7 @@ One query returns the newest 45 files. Older pages need playback mode and a hand
 
 - Only handles `≥ 0x40000000` advance the cursor; a low-namespace photo handle stalls paging.
 - Consecutive pages overlap by one boundary file; dedup by media path.
-- End of library = a short page (fewer than 45 records).
+- End of library = a short page (fewer than 45 records). The last record of a page also carries a `0c 01` TLV immediately before its `0d` filename field.
 - Pages run either on a fresh registered session each, or inline on one session with a correct `ackSeq` ([Datalink transport](#datalink-transport--sequencing)).
 
 DUML examples:
@@ -262,7 +267,7 @@ Every record carries a `19 06` tag. Let `T` = its offset. Fixed fields hang off 
 
 ```
 video:  03 ff 19 06            T-2 = 03 (MP4)
-photo:  00 [ff|fe|f6|c7] 19 06 T-2 = 00 (JPEG) / 04 (panorama)
+photo:  00 [ff|fe|f6|c7|e5|e7] 19 06 T-2 = 00 (JPEG) / 04 (panorama)
 ```
 
 | field | where | notes |
@@ -271,6 +276,7 @@ photo:  00 [ff|fe|f6|c7] 19 06 T-2 = 00 (JPEG) / 04 (panorama)
 | thumb path | `1a … 00 00 00 02` value | `MISC/THM/<folder>/<base>` |
 | extension | `0d` filename field | only field carrying `.MP4`/`.JPG`/… |
 | file type | `u8 @ T−2` | `MediaFileType` code (table below) |
+| mtime | `u32-LE @ T−18` | FAT/DOS packed, 2 s resolution (`fat_to_datetime` in [§28](#28-get-media-list-drone)) |
 | **handle** | `u32-LE @ T−10` | delete / favourite / group-expand handle, every record |
 | **media byte size** | `u32-LE @ T−14` | video and photo |
 | duration *(video)* | `u16-LE @ T−6` | whole seconds |
@@ -318,6 +324,7 @@ the list ordinal.
 | Xtra Edge Pro / Action 5 Pro | SD | `0x00040000` / `0x10` | `0` |
 | Xtra Edge Pro / Action 5 Pro | internal | `0x40040000` / `0x10` | `1` |
 | Pocket 3 | microSD (only store) | `0x00040000` / `0x10` | `0` |
+| Action 4 | microSD (only store) | `0x00040000` / `0x10` | `0` |
 
 Two stores in one blob = two lists back to back, SD first, each opening with its own
 `[u32-LE count][u32-LE size][u32-LE ts]…` header. The leading count covers only the first list.
@@ -399,7 +406,7 @@ for f in media_files:
    ```
    1b 0a 00 00 00 02 02 01 14 02 15 03  <00|01>
    ```
-   Match all twelve bytes. Xtra Edge Pro, Action 5 Pro, Pocket 3.
+   Match all twelve bytes. Xtra Edge Pro, Action 5 Pro, Action 4, Pocket 3.
 2. **Fallback** `u8 @ T+8`, test `== 1`. Nano, Action 6, Pocket 4 (their records carry `… 14 02 15 00`, so the signature does not match).
 
 > [!CAUTION]
@@ -756,7 +763,7 @@ Not a toggle: `[01]` while recording answers `df`. Drive start/stop off the reco
 ### 13b. Pocket 3 playback entry (`0x01/0x01`)
 - Cmd Set / ID: `0x01` / `0x01` (`SPECIAL Control`)  ·  App → Camera(`0x01`)  ·  `cmd_type 0x00`  ·  no reply
 
-A Pocket 3 answers `e0` to `0x02/0x0c` and stays in capture. Send two payloads in order:
+A Pocket 3 and an Osmo Action 4 answer `e0` to `0x02/0x0c` and stay in capture. Send two payloads in order:
 
 | # | payload | repeat |
 |---|---|---|
