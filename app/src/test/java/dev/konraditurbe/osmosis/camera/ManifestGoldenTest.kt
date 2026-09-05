@@ -67,4 +67,5 @@ class ManifestGoldenTest {
     @Test fun `pocket 3 fifteen`() = check("op3_15.bin", 9004)
     @Test fun `pocket 3 twentynine`() = check("op3_29.bin", 9004)
     @Test fun `pocket 4`() = check("op4_45.bin", 9004)
+    @Test fun `action 4 with stars`() = check("oa4_45.bin", 9004)
 }

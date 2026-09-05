@@ -32,6 +32,7 @@ class ManifestInvariantTest {
         Triple("op3_15.bin", 9004, 15),
         Triple("op3_29.bin", 9004, 29),
         Triple("op4_45.bin", 9004, 45),
+        Triple("oa4_45.bin", 9004, 45),
     )
 
     private fun decode(f: String, port: Int): List<CameraFile> =
