@@ -33,7 +33,9 @@ data class CameraFile(
     val proxyPath: String? = null, // low-res proxy clip (.LRF/.LRV) if the camera lists one
     val handle: Long = 0L,   // camera-assigned delete handle (DUML 0x00/0x28); 0 = unknown → not deletable
     val sizeBytes: Long = 0L, // full media byte size from the DUML manifest (record marker-12); 0 = unknown (probe HTTP)
-    val starred: Boolean = false, // ⭐ favourite flag from the manifest (marker+10, video records)
+    val starred: Boolean = false, // favourite flag from the manifest, stills and videos alike: the byte after the 12-byte
+                                  // `1b 0a 00 00 00 02 02 01 14 02 15 03` signature (Xtra/A5P/Pocket 3/Action 4),
+                                  // else `19 06` tag + 8 == 1 (Nano/Action 6/Pocket 4); see MEDIA_PROTOCOL §1
     val resolution: String? = null, // "3840x2160": video from the res-index enum (marker-1); photo from
                                     // its direct pixel W×H (marker+58/+62); null = unknown
     val durationSec: Int = 0, // video length in whole seconds, from the DUML manifest (marker-4); 0 = unknown

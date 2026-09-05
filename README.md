@@ -62,7 +62,7 @@ Read The Verge's review of an early version of the app:
 | Osmo Pocket 4 / 4 Pro | **Verified on hardware** |
 | Xtra Atto / Edge / Muse | Untested, should work |
 | Osmo Action 1 | _Started_ want this camera supported? raise an issue |
-| Osmo Action 4 | _Started_ Tracking progress in https://github.com/KonradIT/osmosis/issues/31 - seems to work well already |
+| Osmo Action 4 | **Verified on hardware**, thanks to Ave @aveao for helping flip this to verified in https://github.com/KonradIT/osmosis/pull/37 |
 | Osmo 360 | Unplanned (needs Mimo to render 360 content) |
 | Osmo Action 2/3 | _Started_ want this camera supported? raise an issue |
 | DJI Mavic 3 (QuickTransfer) | **Verified on hardware** |
@@ -81,7 +81,6 @@ Want to help adding support for an unsupported camera? [Open an issue](../../iss
 
 Actively trying to support, raise an issue if you have these cams and would like to help:
 
-- Osmo Action 4
 - Osmo Action 3
 - Osmo Action 2
 - Osmo Action (1)

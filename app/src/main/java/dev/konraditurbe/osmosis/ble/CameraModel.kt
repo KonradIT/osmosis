@@ -5,11 +5,10 @@ package dev.konraditurbe.osmosis.ble
  *
  * Only the datalink UDP port and WiFi security actually vary across the Osmo line — pairing (the
  * "osmo" PIN), the `/v2` HTTP media API, and DJI_/CAM_ file naming are shared. Cells marked
- * [verified] were confirmed on real hardware: **Nano, Action 5 Pro, Action 6 and Pocket 3** all
+ * [verified] were confirmed on real hardware: **Nano, Action 4, Action 5 Pro, Action 6 and Pocket 3** all
  * browse + download on 9004 (tester-confirmed). Everything else falls back to the most common config
  * (9004 + TCP-7001 poke + WPA2) so an unrecognized DJI Osmo is still *attempted* rather than refused.
- * Still open: the Action 4 (pairs, but its AP never comes up) and the 360 (parked — 360-format files
- * need Mimo anyway).
+ * Still open: the 360 (parked — 360-format files need Mimo anyway).
  */
 data class CameraModel(
     val name: String,
@@ -48,7 +47,10 @@ data class CameraModel(
             0x0010 to CameraModel("Osmo Action 2"),
             0x0012 to CameraModel("Osmo Action 3"),
             // Tester-confirmed 2026-08-24: pair, BLE creds, a WPA2 AP, datalink on 9004.
-            0x0014 to CameraModel("Osmo Action 4"),
+            // Thanks to Ave for sending over the golden test files. All verified against the actual hardware.
+            // Everything seems to work as expected.
+            // PR: https://github.com/KonradIT/osmosis/pull/37
+            0x0014 to CameraModel("Osmo Action 4", verified = true),
             // Genuine Action 5 Pro on 9004 — tester-confirmed (grid + download). The Xtra rebrand
             // gets flipped to 10004 by resolve(); see the Xtra note below.
             0x0015 to CameraModel("Osmo Action 5 Pro", verified = true),

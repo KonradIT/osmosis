@@ -65,7 +65,7 @@ id, not name — bodies get renamed.
 | Osmo Action (1) | `0x0006` | `OsmoAction` | 9004 | yes | WPA2 |
 | Osmo Action 2 | `0x0010` | `OsmoAction2` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 `(unconfirmed)` |
 | Osmo Action 3 | `0x0012` | `OsmoAction3` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 `(unconfirmed)` |
-| Osmo Action 4 | `0x0014` | `OsmoAction4` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | WPA2 |
+| Osmo Action 4 | `0x0014` | `OsmoAction4` | 9004 | yes | WPA2 |
 | Osmo Action 5 Pro | `0x0015` | `OsmoAction5Pro` | 9004 | yes | WPA2 |
 | Xtra Edge Pro | `0x0015` | `XtraEdgePro` | **10004** | **no** | WPA2 |
 | Osmo 360 | `0x0017` | `Osmo360` | 9004 `(unconfirmed)` | yes `(unconfirmed)` | **WPA3** |
