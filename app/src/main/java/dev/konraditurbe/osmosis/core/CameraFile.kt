@@ -110,8 +110,17 @@ data class CameraFile(
      * CameraFile positionally.
      */
     val handleCandidate: Long = 0L,
+
+    /**
+     * This device indexes its media by DCF number but serves the bytes by **path over `/v2`**, the way
+     * the cameras do — the combination most DJI aircraft use.
+     *
+     * Set from the aircraft's model, because nothing in a record says which HTTP surface its firmware
+     * installs. Also last in the list, for the same reason as [handleShared].
+     */
+    val dcfHttpV2: Boolean = false,
 ) {
-    /** DCF-index-addressed media, fetched over `/v1` rather than by path over `/v2`. */
+    /** DCF-index-addressed media — see [dcfHttpV2] for which HTTP surface serves the bytes. */
     val isIndexed: Boolean get() = fileIndex != 0L
 
     /**
