@@ -271,9 +271,16 @@ abstract class DumlSession(
                         "first=$sdTotal/$sdFree MB" +
                         (if (hasInternal) " built-in=$inTotal/$inFree MB" else " (no built-in block)"))
                 }
+                // A zeroed FIRST block on a body that already reported a real capacity is not "the card
+                // went away" — a Nano pushes `stores=1 first=0/0` for as long as playback is held,
+                // whatever is mounted, and DJI Mimo sees the identical frame. Since `sane(0)` is true,
+                // taking it at face value blanked the pill's storage line the moment browsing began.
+                // Keep the last positive figures instead; a body that genuinely has no card reports 0
+                // from its first frame, where there is nothing to keep.
+                val firstBlockBlanked = sdTotal == 0 && status.sdTotalMb > 0
                 status = status.copy(
-                    sdTotalMb = if (sane(sdTotal)) sdTotal else status.sdTotalMb,
-                    sdFreeMb = if (sane(sdFree)) sdFree else status.sdFreeMb,
+                    sdTotalMb = if (sane(sdTotal) && !firstBlockBlanked) sdTotal else status.sdTotalMb,
+                    sdFreeMb = if (sane(sdFree) && !firstBlockBlanked) sdFree else status.sdFreeMb,
                     // A single-store frame confirms there is no built-in (0), rather than "unknown" (-1).
                     internalTotalMb = if (!hasInternal) 0 else if (sane(inTotal)) inTotal else status.internalTotalMb,
                     internalFreeMb = if (!hasInternal) 0 else if (sane(inFree)) inFree else status.internalFreeMb,
