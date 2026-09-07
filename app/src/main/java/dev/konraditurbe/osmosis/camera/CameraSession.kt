@@ -249,6 +249,19 @@ class CameraSession(
     }
 
     /**
+     * One `0x00/0x88` presence beat, sent from inside a collect loop.
+     *
+     * Playback is dropped about a second after it is set unless the app keeps beating, and the
+     * keep-alive thread that normally does that ([startKeepAlive]) only takes over once the fetch has
+     * returned. A fetch short enough to finish inside the grace period hid this; adding the SD retry
+     * pushed it past nine seconds, and the camera fell out of playback and back in — a visible flash on
+     * the body, and a window where a store-specific query could be answered from the wrong mode. Each
+     * collect batch is a ~700-800 ms receive, so one beat per batch is the documented ~1 Hz cadence.
+     */
+    private fun holdPlayback() =
+        sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
+
+    /**
      * The fast initial load: the proven 3-command sequence for the newest ~45 files, no playback mode
      * needed. Older pages are lazy — the grid's infinite scroll calls [fetchNextPage].
      */
@@ -261,6 +274,7 @@ class CameraSession(
         var stable = 0
         for (batch in 0 until 15) {
             for (r in recvAll(800)) blob.write(r); sendAck()
+            holdPlayback()
             if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"),
                 receiverType = 0x01, receiverId = 0)
             if (batch == 2) sendDuml(0x00, 0x26, hex(
@@ -272,7 +286,37 @@ class CameraSession(
             if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = count
         }
-        return collectStores(blob.toByteArray())
+        return collectStores(retrySdIfNotReady(blob))
+    }
+
+    /**
+     * Re-ask for the SD list when the first query came back with nothing.
+     *
+     * A store is not necessarily mounted the moment the camera confirms playback. An Osmo Nano with a
+     * card in its dock answers the store-0 query `0x00/0x26` -> `d8` and opens an empty transfer, while
+     * answering the store-1 query `00` in the same session a few ms later — so the grid shows internal
+     * only and the card looks absent. DJI Mimo never sees `d8` because it lets ~1.7 s pass between the
+     * playback confirmation and its first list query; we send ours ~50 ms after it.
+     *
+     * Rather than delay every load for the one camera that needs it, ask again once the first pass is
+     * over — by then several seconds have gone by, which is the whole point. Costs one query, and only
+     * on a camera that returned an empty SD slice (which is also the genuine no-card case).
+     */
+    private fun retrySdIfNotReady(blob: java.io.ByteArrayOutputStream): ByteArray {
+        val first = blob.toByteArray()
+        if (manifestBytes(first, requestCtr = SD_QUERY_CTR).isNotEmpty()) return first
+        log("datalink: SD store answered empty — re-asking once (it may not have been mounted yet)")
+        sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, NEWEST_SD), receiverType = 0x01, receiverId = 0)
+        for (batch in 0 until 6) {
+            for (r in recvAll(700)) blob.write(r); sendAck()
+            holdPlayback()
+            if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"),
+                receiverType = 0x01, receiverId = 0)
+        }
+        val again = blob.toByteArray()
+        val n = countMediaPaths(manifestBytes(again, requestCtr = SD_QUERY_CTR))
+        log("datalink: SD retry -> $n record(s)")
+        return again
     }
 
     private fun listCmd(ctr: Int, cursor: Long): ByteArray =

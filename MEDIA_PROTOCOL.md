@@ -88,7 +88,7 @@ id, not name — bodies get renamed.
 
 | Camera | Path shape | Handle base / step | Store → `/v2?storage=` | Proxy ext | Star flag |
 |---|---|---|---|---|---|
-| Osmo Nano | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1**, dock SD → **0** | `.LRF` | `T+8` |
+| Osmo Nano | `DCIM/DJI_001/DJI_…_D` | dock SD `0x00100000`, internal `0x40100000`, step `0x40` | SD → **0**, internal → **1** | `.LRF` | `T+8` |
 | Osmo Pocket 4 | `DCIM/DJI_001/DJI_…_D` | internal `0x40100000` / `0x40` | internal → **1** | none listed | `T+8` |
 | Osmo Pocket 4 Pro | `DCIM/DJI_001/DJI_…` | `0x00100000` / `0x40` | 45 → **0**, 1 → **1** | `(unconfirmed)` | `(unconfirmed)` |
 | Osmo Action 4 | `DCIM/DJI_001/DJI_…_D` | microSD `0x00040000` / `0x10` | microSD (only store) → **0** | `(unconfirmed)` | signature |
@@ -174,6 +174,13 @@ concatenate chunks in arrival order.
 > [!WARNING]
 > Select chunks by DUML command (`0x00/0x27`), not by the `4A 01` payload prefix. `4A 01` also
 > matches parameter pushes ([§8](#8-subscribe-param)) and corrupts the manifest.
+
+> [!IMPORTANT]
+> **A store is not mounted the instant playback is confirmed.** Query it too early and the camera
+> answers `0x00/0x26` with `d8` and opens an empty transfer: a `4A 04` start frame, no data, no end.
+> The other store answers `00` in the same session, so the result reads as a missing card rather than
+> a race. Allow **~1.7 s** after the playback confirmation before the first query, or re-ask any store
+> that came back empty. Seen on a Nano's dock SD and on an Action 4 queried during capture.
 
 #### Filter by kind, favourite or highlight
 
@@ -318,6 +325,7 @@ the list ordinal.
 
 | camera | store | handle base / step | `storage=` |
 |---|---|---|---|
+| Osmo Nano | dock SD | `0x00100000` / `0x40` | `0` |
 | Osmo Nano | internal | `0x40100000` / `0x40` | `1` |
 | Osmo Pocket 4 | internal | `0x40100000` / `0x40` | `1` |
 | Action 6 | SD / internal | `0x00100000` / `0x40100000`, step `0x40` | `0` / `1` |
@@ -594,8 +602,9 @@ filming while it is held. The camera drops the mode ~1 s after entry unless the 
 > ([§20b](#20b-camera-state-flags-0x020x80)); that bit is the definition of "held".
 
 > [!WARNING]
-> Do not poll `0x02/0x8E` while holding playback. It is a parameter GET ([§14](#14-camera-parameters))
-> and takes the camera out of playback ~1 s later. Enter playback *before* the first list query.
+> Enter playback *before* the first list query. Polling `0x02/0x8E`, a parameter GET
+> ([§14](#14-camera-parameters)), drops the mode ~1 s later on some bodies — but not all: on a Nano
+> the official app polls it ~65 times while playback is held and bit 30 never clears.
 
 Alternative beat: `0x00/0x88` sub-cmd `0x1a` (`1a 00 00 00 01`, 5 B) at ~1 Hz, after two `0x17`
 announces. Status pushes (`0x02/0x80`, `0x02/0x82`) arrive regardless of playback.
@@ -708,6 +717,7 @@ Reply byte:
 | reply | meaning |
 |---|---|
 | `00` | success |
+| `d8` | supported, **resource not ready** — the addressed store is not mounted yet ([§1](#1-get-media-list)) |
 | `d9` | supported, wrong state (e.g. already recording) |
 | `df` | supported, wrong parameter |
 | `e3` | supported, bad/missing parameter |
@@ -872,8 +882,10 @@ Xtra  40 B  11 12 02 00 00 02 | 00000000 00000000 | … 0101 | 54bf0000 16bf0000
 ```
 
 > [!WARNING]
-> A Nano can push `0/0` in a well-formed 22 B frame with a card in and files on internal. Keep the
-> last non-zero values until a later push supersedes them.
+> A Nano pushes `0/0` in a well-formed 22 B frame for as long as playback is held, whatever is
+> mounted, and reports `stores=1` even with a dock SD carrying media. Keep the last non-zero values
+> until a later push supersedes them, and never read this frame as evidence about which stores the
+> media list can reach.
 
 ### 20. Battery / power
 - Cmd Set / ID: `0x0D` / `0x02`  ·  Battery(`0x05`, id 0) → App  ·  ~1 Hz push, 34 B

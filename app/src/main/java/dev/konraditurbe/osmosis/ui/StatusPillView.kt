@@ -108,8 +108,10 @@ class StatusPillView @JvmOverloads constructor(
             ma < 0 -> context.getString(R.string.power_drawing, -ma)
             else -> context.getString(R.string.power_idle)
         }
-        // Attached but not (yet) taking charge — seen mid-transition and when the pack is full.
-        val dock = if (s.docked && !s.charging) context.getString(R.string.power_docked_suffix) else ""
+        // Show the dock whenever it is attached. Gating this on `!charging` meant a docked camera with a
+        // full pack — docked=true, charging=true, 0 mA, so the flow word reads "idle" — displayed no
+        // dock state at all, which is the state a camera sitting in its dock spends most of its life in.
+        val dock = if (s.docked) context.getString(R.string.power_docked_suffix) else ""
         return "$volts · $flow$dock"
     }
 
