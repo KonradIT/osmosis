@@ -164,6 +164,8 @@
     <string name="edit_with">Редагувати за допомогою</string>
     <string name="no_app_available_share">Немає застосунку для надсилання цього файлу</string>
     <string name="no_app_available_edit">Немає застосунку для редагування цього файлу</string>
+    <string name="capture_saved">Кадр збережено: %1$s</string>
+    <string name="capture_failed">Не вдалося витягти кадр із цього кліпу</string>
 
     <!-- Content descriptions -->
     <string name="cd_preview">попередній перегляд</string>
@@ -174,6 +176,7 @@
     <string name="cd_scrub_preview">перемотування попереднього перегляду</string>
     <string name="cd_media_badge">тип медіа</string>
     <string name="cd_camera_status">діапазон камери</string>
+    <string name="cd_capture_frame">зберегти кадр як фото</string>
 
     <!-- Status pill -->
     <string name="sd_card">SD-картка</string>

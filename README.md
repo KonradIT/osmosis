@@ -42,6 +42,7 @@ Read The Verge's review of an early version of the app:
 - **Media grid** with thumbnails, pulled straight off the camera.
 - **Low-res streaming preview** — scrub any clip without downloading it first.
 - **In-preview trimming** — set in/out points and download just that slice of the **high-res** clip. Keyframe-accurate stream copy in original quality.
+- **Frame grab** — pause a clip and tap the camera icon to save that instant as a full-resolution JPEG, decoded straight off the camera's high-res file. Only the surrounding keyframe group is fetched, not the clip.
 - **Resumable download queue** — high-res downloads straight into your phone's gallery.
 - **Live status** — battery, shooting mode, and storage (internal / SD) shown in a status pill. More to come (recording indicator, resolution, fps, etc...)
 - **DNG** file download if JPEG+DNG mode is enabled, Mimo doesn't do this.
