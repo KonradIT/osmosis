@@ -151,4 +151,43 @@ class ManifestRobustnessTest {
         // An empty camera must not arm the spinner — the old cursor-only test could.
         assertTrue(!s.hasOlderPage(0, cursor))
     }
+
+    /**
+     * The camera marks its last file: a `0c 01` TLV right before the final record's `0d` name field.
+     * Measured on every fixture — present in the short final pages, absent from the full ones.
+     */
+    @Test
+    fun `the end marker is on final pages and not on full ones`() {
+        val s = session(9004)
+        for (final in listOf("xtra_13.bin", "oa4_6.bin", "oa6_sd_3.bin", "oa6_internal_2.bin", "op3_15.bin"))
+            assertTrue("$final is a final page", s.endMarkerForTest(raw(final)))
+        for (full in listOf("nano_45.bin", "oa4_45.bin", "op4_45.bin"))
+            assertTrue("$full is a full page", !s.endMarkerForTest(raw(full)))
+    }
+
+    /**
+     * Stream completion comes from the camera's end frame. Both raw captures answer the SD query with
+     * `start` only (no card) and the internal one with data + `end`: that is a closed pair. Cut the
+     * end frames away and the same bytes are not complete.
+     */
+    @Test
+    fun `a stream is complete when every counter has closed`() {
+        val s = session(9004)
+        val nano = raw("nano_45.bin")
+        assertTrue("start-only SD + ended internal = closed", s.streamsEnded(nano, 1, 2))
+
+        // Drop every 4A 03 end frame: rewrite its subtype so it is neither data nor end.
+        val cut = nano.copyOf()
+        var i = 0
+        while (i + 13 <= cut.size) {
+            if ((cut[i].toInt() and 0xFF) != 0x55) { i++; continue }
+            val len = ((cut[i + 1].toInt() and 0xFF) or ((cut[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+            if (len < 13 || i + len > cut.size) { i++; continue }
+            if (cut[i + 9].toInt() == 0 && cut[i + 10].toInt() == 0x27 && cut[i + 11].toInt() == 0x4A && cut[i + 12].toInt() == 0x03)
+                cut[i + 12] = 0x7F
+            i += len
+        }
+        assertTrue("no end frame = still streaming", !s.streamsEnded(cut, 1, 2))
+        assertTrue("a counter the camera never opened is not closed", !s.streamsEnded(nano, 1, 2, 3))
+    }
 }

@@ -199,11 +199,13 @@ One query returns the newest 45 files. Older pages need playback mode and a hand
 |---|---|---|
 | newest | `0x00000001` / `0x40000001` | newest 45 |
 | next older | oldest **video** handle (`≥ 0x40000000`) of the previous page | next 45 |
-| … | repeat | until a page returns fewer than 45 records |
+| … | repeat | until the page carries the end marker (below) |
 
 - Only handles `≥ 0x40000000` advance the cursor; a low-namespace photo handle stalls paging.
 - Consecutive pages overlap by one boundary file; dedup by media path.
-- End of library = a short page (fewer than 45 records). The last record of a page also carries a `0c 01` TLV immediately before its `0d` filename field.
+- **End of library = the `0c 01` TLV**.
+- **Completeness:** the manifest's leading `u32-LE` count is the number of records in *this page* (45 on a full page), not the library size. Fewer records than declared = the collector stopped before the last chunks arrived; on a newest-first list the missing tail is the oldest files. Wait for the `4A 03` end frame of every counter before decoding — a store with nothing on it sends `start` only and never ends.
+- A two-store page can take ~4.5 s (Xtra: the internal answer follows the SD one by ~2.5 s). A collector that returns after 400 ms of quiet, or at a 4 s deadline, hands back a cut page.
 - Pages run either on a fresh registered session each, or inline on one session with a correct `ackSeq` ([Datalink transport](#datalink-transport--sequencing)).
 
 DUML examples:

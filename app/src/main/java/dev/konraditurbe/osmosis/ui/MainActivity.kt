@@ -373,6 +373,21 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             dev.konraditurbe.osmosis.camera.CameraSession.debugNoWriteRefresh = true
             logLine("nowriterefresh: writes will go out on old sessions, no re-registration")
         }
+        // Pagination evidence hooks (DEBUG): `--ez pageforce true` walks past a short page; `--ei pagesize N`
+        // asks for N records per query; `--ez pageauto true` keeps loading older pages by itself until
+        // the session says there are none, so a full walk needs no pulling.
+        if (intent?.getBooleanExtra("pageforce", false) == true) {
+            dev.konraditurbe.osmosis.camera.CameraSession.debugPageForce = true
+            logLine("pageforce: paging ignores the short-page end test")
+        }
+        intent?.getIntExtra("pagesize", 0)?.takeIf { it > 0 }?.let {
+            dev.konraditurbe.osmosis.camera.CameraSession.debugPageSize = it
+            logLine("pagesize: asking for $it records per list query")
+        }
+        if (intent?.getBooleanExtra("pageauto", false) == true) {
+            pageAuto = true
+            logLine("pageauto: older pages load automatically")
+        }
         if (intent?.getBooleanExtra("autoscan", false) == true) {
             main.postDelayed({ startCameraScan(select = true) }, 500)
         }
@@ -1334,6 +1349,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     // ---- lazy grid pagination (pull up past the last row to load older pages) --------------------
     private var loadingMore = false
+    /** DEBUG `--ez pageauto true`: chain [loadMorePages] until the session reports no older page. */
+    private var pageAuto = false
     private var storageForBit = HashMap<Int, Int>()   // handle store-bit (0/1) -> resolved /v2 mount (cached)
 
     /** Stamp each file's HTTP storage index (per-file, by its handle's store bit) and sort newest-first —
@@ -1451,6 +1468,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 if (more.isNotEmpty()) logLine("Loaded ${more.size} older (${adapter?.totalFiles() ?: 0} total)")
                 else logLine("No more media to load.")
                 loadingMore = false
+                if (pageAuto && dl.moreAvailable) main.postDelayed({ loadMorePages() }, 400)
             }
         }.start()
     }

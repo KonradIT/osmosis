@@ -62,10 +62,17 @@ class DumlTransport(
         private set
 
     /**
-     * The peer's reliable-downlink cursor, from `[10:12]` of its 34-byte pktType-`0x01` status frames.
-     * Echoed back in [sendAck]; the peer holds off streaming until its window is being acknowledged.
+     * The peer's reliable **video** window end, from `[10:12]` of its 34-byte pktType-`0x01` status
+     * frames, echoed back in [sendAck]. The peer holds off streaming until its window is acknowledged.
      */
     private var peerCursor = 0
+
+    /**
+     * The peer's reliable **download** window end, from `[18:20]` of the same status frames. This is the
+     * window the media manifest (`0x00/0x27` chunk stream) rides; [sendAck] must echo it or the camera
+     * stops mid-page. See [sendAck] for the truncation this fixed.
+     */
+    private var peerDownloadCursor = 0
     private var msgId51 = 0
     private var seq51 = 0
 
@@ -106,6 +113,7 @@ class DumlTransport(
         baseSeq = Random.nextInt(0x1000, 0xF000) and 0xFFF8
         camChannel = baseSeq
         peerCursor = 0
+        peerDownloadCursor = 0
     }
 
     /**
@@ -149,19 +157,26 @@ class DumlTransport(
     }
 
     /**
-     * The pktType-`0x04` window acknowledgement: a 34-byte frame of three `[u16][u16][u32 zero]` groups
-     * carrying, in order, **the peer's downlink cursor**, **our base seq** and **our current send seq**.
+     * The pktType-`0x04` window acknowledgement: a 34-byte frame of three `[u16 start][u16 end][u32 zero]`
+     * groups — **video**, **download**, **control** — plus a trailing `[u16 0]`. The camera runs each as
+     * a sliding reliable window and **will not keep streaming a window it does not see acknowledged**.
      *
-     * All three used to be [camChannel] — right for the middle one only by accident, since camChannel
-     * *was* the constant base, while the first never reflected what the peer had actually sent us.
+     * **The download window is the one the media manifest rides.** A `0x00/0x26` list query is answered
+     * as a run of `0x00/0x27` chunks on the download channel, and in the Mimo capture the camera advances
+     * its download cursor (`d=[…]` in its status frames) with every chunk while the app echoes it straight
+     * back (`d=[end,end]`) ~1×/chunk. The video window stays frozen the whole time. We used to send a
+     * **static** base value here, so past roughly one windowful the camera stopped — which is exactly how
+     * a two-store page (the internal list streaming right behind the SD one) lost its tail: `hdr=21
+     * records=17`, the four oldest files gone, non-deterministic because it rode on timing. Echoing the
+     * peer's own download cursor ([peerDownloadCursor], latched at `[18:20]` of its status frames) is the
+     * fix, and it can only ever tell the camera to send more, never less. The reference SWUDP transport
+     * does the same: it copies the camera's download window each RECV and echoes it every 30 ms.
      *
-     * **The third stays at the base, deliberately.** The reference implementation puts its current send
-     * seq there, and copying that broke drone pagination outright: page 1 fine, page 2 dead with the
-     * drone streaming status and no data. The two quantities are not the same. That implementation
-     * advances its sequence in exactly one place — per data frame — whereas ours advances on *every*
-     * packet, including the ~860/s drone uplink, so within a minute it had raced ahead and wrapped past
-     * `0xFFFF` (`0xdd88` → `0x8e70` between the two pages) and the peer's window stalled. Sending our
-     * seq here would only be equivalent if our sequence meant what theirs does.
+     * **The control window (third group) stays at the base, deliberately.** The reference puts its current
+     * send seq there; copying that broke drone pagination outright (page 1 fine, page 2 dead), because our
+     * send seq advances on *every* packet — the ~860/s drone uplink included — and laps `0xFFFF` within a
+     * minute (`0xdd88` → `0x8e70` across two pages), stalling the peer's window. The write cliff that field
+     * governs is mitigated elsewhere (re-register before a write); it is a different quantity and left alone.
      *
      * Sent with seq 0, like every other type-`0x04`.
      */
@@ -171,7 +186,7 @@ class DumlTransport(
             (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
             0, 0, 0, 0,
         )
-        val payload = grp(peerCursor) + grp(baseSeq) + grp(baseSeq) + byteArrayOf(0, 0)
+        val payload = grp(peerCursor) + grp(peerDownloadCursor) + grp(baseSeq) + byteArrayOf(0, 0)
         val old = udpSeq; udpSeq = 0
         val hdr = udpHeader(0x04, payload.size)
         udpSeq = old
@@ -237,10 +252,13 @@ class DumlTransport(
                     val ch = (data[8].toInt() and 0xFF) or ((data[9].toInt() and 0xFF) shl 8)
                     if (ch != 0) camChannel = ch
                 }
-                // The peer's reliable-downlink cursor rides in its 34-byte pktType-0x01 status frames;
-                // [sendAck] echoes it back, and the peer will not open its downlink until we do.
+                // The peer's reliable-window cursors ride in its 34-byte pktType-0x01 status frames;
+                // [sendAck] echoes them back, and the peer will not keep streaming a window it does not
+                // see acknowledged. Video window end at [10:12], download window end at [18:20] — the
+                // download one is what the media manifest streams on.
                 if (data.size == 34 && (data[6].toInt() and 0xFF) == 0x01) {
                     peerCursor = (data[10].toInt() and 0xFF) or ((data[11].toInt() and 0xFF) shl 8)
+                    peerDownloadCursor = (data[18].toInt() and 0xFF) or ((data[19].toInt() and 0xFF) shl 8)
                 }
             } catch (_: java.net.SocketTimeoutException) {
                 // keep polling until the deadline
