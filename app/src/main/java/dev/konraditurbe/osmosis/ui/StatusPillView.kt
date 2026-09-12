@@ -86,10 +86,15 @@ class StatusPillView @JvmOverloads constructor(
         }
         val battDrawable = if (battIcon == 0) null else
             ContextCompat.getDrawable(context, battIcon)!!.mutate().also {
-                val sz = dp(17); it.setBounds(0, 0, sz, sz); it.setTint(ink)
+                // Size to the text: height = the text's line box, width kept to the icon's own aspect
+                // (each pill icon is cropped to its glyph), so it reads as tall as the percentage.
+                val fm = batteryText.paint.fontMetricsInt
+                val h = fm.descent - fm.ascent
+                val w = if (it.intrinsicHeight > 0) h * it.intrinsicWidth / it.intrinsicHeight else h
+                it.setBounds(0, 0, w, h); it.setTint(ink)
             }
         batteryText.setCompoundDrawablesRelative(battDrawable, null, null, null)
-        batteryText.compoundDrawablePadding = dp(4)
+        batteryText.compoundDrawablePadding = dp(5)
         batteryBar.progress = pct.coerceIn(0, 100)
         batteryBar.progressTintList = ColorStateList.valueOf(
             when { pct < 0 -> track; s.charging -> green; pct <= 15 -> red; pct <= 35 -> orange; else -> green }
