@@ -89,12 +89,14 @@
             android:textColor="@color/osmo_muted"
             android:textSize="12sp" />
 
+        <!-- Connection progress: invisible by default, space reserved so the camera list doesn't jump
+             when it appears (same idea as the grid's progressArea, one bar tall). -->
         <com.google.android.material.progressindicator.LinearProgressIndicator
             android:id="@+id/connectBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
-            android:visibility="gone"
+            android:visibility="invisible"
             app:indicatorColor="@color/osmo_accent"
             app:trackColor="@color/osmo_track"
             app:trackCornerRadius="3dp"

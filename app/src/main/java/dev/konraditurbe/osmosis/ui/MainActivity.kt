@@ -1472,9 +1472,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * 100 completes and hides (the grid takes over).
      */
     private fun setConnectProgress(pct: Int) = main.post {
+        // INVISIBLE, never GONE: the bar's row stays reserved so showing/hiding it doesn't shift the list.
         when {
-            pct <= 0 -> connectBar.visibility = View.GONE
-            pct >= 100 -> { connectBar.setProgressCompat(100, true); connectBar.visibility = View.GONE }
+            pct <= 0 -> connectBar.visibility = View.INVISIBLE
+            pct >= 100 -> { connectBar.setProgressCompat(100, true); connectBar.visibility = View.INVISIBLE }
             else -> {
                 if (connectBar.visibility != View.VISIBLE) { connectBar.visibility = View.VISIBLE; connectBar.progress = 0 }
                 connectBar.setProgressCompat(pct, true)
