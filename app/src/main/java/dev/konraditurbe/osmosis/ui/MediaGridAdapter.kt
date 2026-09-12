@@ -168,7 +168,7 @@ class MediaGridAdapter(
         private val thumb: ImageView = v.findViewById(R.id.thumb)
         private val check: CheckBox = v.findViewById(R.id.check)
         private val name: TextView = v.findViewById(R.id.name)
-        private val star: TextView = v.findViewById(R.id.star)
+        private val star: ImageView = v.findViewById(R.id.star)
         private var file: CameraFile? = null
         private var downX = 0f
         private var downY = 0f
@@ -194,18 +194,29 @@ class MediaGridAdapter(
             val queued = selected.containsKey(f.path)
             check.visibility = if (selectMode || queued) View.VISIBLE else View.GONE
             check.isChecked = queued
-            // ❤️ favorited; 🎞️ burst/interval group; 🌐 in-camera panorama (an ordinary .JPG, so only
-            // the record's type byte tells it apart); else a media-type hint (📷 photo / 📹 video).
-            star.text = when {
-                f.starred -> "❤️"
-                f.isBurst -> "🎞️"
-                f.isPanorama -> "🌐"
-                f.isVideo -> "📹"
-                else -> "📷"
-            }
+            // favorite; burst/interval group; in-camera panorama (an ordinary .JPG, so only the record's
+            // type byte tells it apart); else a media-type hint (photo / video). White glyph on a plate.
+            star.setImageResource(when {
+                f.starred -> R.drawable.ic_media_favorite
+                f.isBurst -> R.drawable.ic_media_burst
+                f.isPanorama -> R.drawable.ic_media_panorama
+                f.isVideo -> R.drawable.ic_media_video
+                else -> R.drawable.ic_media_photo
+            })
             loader.load(f.thumbUrlPath(), thumb)
-            val prefix = "%04d".format(f.seq) + (if (selected[f.path] != null) " ✂" else "")
-            meta.load(f, name, prefix)
+            // A queued clip that carries a trim shows the scissors mark before its filename (compound
+            // drawable, so it survives the async meta text update). Sized to the 10sp name row.
+            val trimmed = selected[f.path] != null
+            if (trimmed) {
+                val d = androidx.core.content.ContextCompat.getDrawable(name.context, R.drawable.ic_trimmed)!!.mutate()
+                val s = (13 * name.resources.displayMetrics.density).toInt()
+                d.setBounds(0, 0, s, s)
+                name.setCompoundDrawablesRelative(d, null, null, null)
+                name.compoundDrawablePadding = (3 * name.resources.displayMetrics.density).toInt()
+            } else {
+                name.setCompoundDrawablesRelative(null, null, null, null)
+            }
+            meta.load(f, name, "%04d".format(f.seq))
         }
     }
 

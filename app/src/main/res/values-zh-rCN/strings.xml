@@ -56,11 +56,12 @@
 
     <!-- GPS sync -->
     <string name="the_camera">相机</string>
-    <string name="gps_sync_active_banner">🛰️ 正在与 %1$s 进行 GPS 同步\nGPS 流式传输期间无法浏览媒体。点按 🛰️ 停止。</string>
-    <string name="gps_sync_connecting_banner">🛰️ 正在连接 %1$s 进行 GPS 同步…如相机弹出提示请批准。点按 🛰️ 取消。</string>
+    <string name="gps_sync_active_banner">正在与 %1$s 进行 GPS 同步\nGPS 流式传输期间无法浏览媒体。点按 GPS 同步 停止。</string>
+    <string name="gps_sync_connecting_banner">正在连接 %1$s 进行 GPS 同步…如相机弹出提示请批准。点按 GPS 同步 取消。</string>
     <string name="gps_sync_starting">正在为 %1$s 启动 GPS 同步——如相机弹出提示请批准</string>
-    <string name="gps_active_select_blocked">GPS 同步进行中——请先点按 🛰️ 停止，再选择相机。</string>
-    <string name="gps_stop_before_browse">请先停止 GPS 同步（点按 🛰️），再浏览媒体。</string>
+    <string name="gps_active_select_blocked">GPS 同步进行中——请先点按 GPS 同步 停止，再选择相机。</string>
+    <string name="gps_stop_before_browse">请先停止 GPS 同步（点按 GPS 同步），再浏览媒体。</string>
+    <string name="gps_sync">GPS 同步</string>
 
     <!-- GPS sync notification -->
     <string name="notif_channel_gps">GPS 同步</string>
@@ -173,6 +174,8 @@
     <string name="cd_play_pause">播放/暂停</string>
     <string name="cd_fast_forward">快进</string>
     <string name="cd_scrub_preview">拖动预览</string>
+    <string name="cd_media_badge">媒体类型</string>
+    <string name="cd_camera_status">相机范围</string>
 
     <!-- Status pill -->
     <string name="sd_card">SD 卡</string>

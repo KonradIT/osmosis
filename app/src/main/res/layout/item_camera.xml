@@ -7,7 +7,7 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/pill_bg"
+        android:background="@drawable/camera_row_bg"
         android:foreground="@drawable/card_ripple"
         android:gravity="center_vertical"
         android:minHeight="64dp"
@@ -52,10 +52,11 @@
             android:textStyle="bold"
             android:visibility="gone" />
 
-        <TextView
+        <ImageView
             android:id="@+id/camStatus"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textSize="20sp" />
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:contentDescription="@string/cd_camera_status"
+            android:tint="@color/osmo_ink" />
     </LinearLayout>
 </FrameLayout>

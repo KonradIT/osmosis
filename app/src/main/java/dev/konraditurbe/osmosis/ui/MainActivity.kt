@@ -50,7 +50,6 @@ import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MediaDownloader
 import dev.konraditurbe.osmosis.net.MetaLoader
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.materialswitch.MaterialSwitch
 import dev.konraditurbe.osmosis.rsdk.GpsService
 import dev.konraditurbe.osmosis.rsdk.GpsSyncState
 import com.google.android.material.progressindicator.LinearProgressIndicator
@@ -323,12 +322,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         findViewById<View>(R.id.fabDownload).setOnClickListener { onDownloadClicked() }
         findViewById<View>(R.id.fabDelete).setOnClickListener { onBulkDeleteClicked() }
         wireGalleryChips()
-        // "Save logs" toggle → persist all log lines to a rotating .log file in external files dir.
+        // "Save logs" button (checkable, same outlined pill as GPS Sync) → persist all log lines to a
+        // rotating .log file in external files dir.
         val prefs = getSharedPreferences("osmosis", MODE_PRIVATE)
-        val saveLogs = findViewById<MaterialSwitch>(R.id.switchSaveLogs)
+        val saveLogs = findViewById<MaterialButton>(R.id.btnSaveLogs)
         saveLogs.isChecked = prefs.getBoolean("save_logs", false)
         if (saveLogs.isChecked) startFileLogging() // set state before the listener so this isn't double-fired
-        saveLogs.setOnCheckedChangeListener { _, checked ->
+        saveLogs.addOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean("save_logs", checked).apply()
             if (checked) {
                 startFileLogging()
@@ -1307,11 +1307,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun updateBulkDeleteFab() {
         val n = adapter?.selectedCount() ?: 0
         val show = n > 0 && ::chipSelect.isInitialized && chipSelect.isChecked && !downloadRunning
-        findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabDelete)
-            ?.apply {
-                visibility = if (show) View.VISIBLE else View.GONE
-                text = getString(R.string.delete_selected, n)
-            }
+        val fab = findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabDelete)
+            ?: return
+        // show()/hide() animate the FAB's own scale+fade motion, so it grows in / shrinks out instead of
+        // popping. Both are no-ops when already in the target state, so updating the count (1→2) while it
+        // is up just refreshes the label without re-animating.
+        if (show) { fab.text = getString(R.string.delete_selected, n); fab.show() } else fab.hide()
     }
 
     private fun resetGalleryChips() {
@@ -1472,9 +1473,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * 100 completes and hides (the grid takes over).
      */
     private fun setConnectProgress(pct: Int) = main.post {
+        // INVISIBLE, never GONE: the bar's row stays reserved so showing/hiding it doesn't shift the list.
         when {
-            pct <= 0 -> connectBar.visibility = View.GONE
-            pct >= 100 -> { connectBar.setProgressCompat(100, true); connectBar.visibility = View.GONE }
+            pct <= 0 -> connectBar.visibility = View.INVISIBLE
+            pct >= 100 -> { connectBar.setProgressCompat(100, true); connectBar.visibility = View.INVISIBLE }
             else -> {
                 if (connectBar.visibility != View.VISIBLE) { connectBar.visibility = View.VISIBLE; connectBar.progress = 0 }
                 connectBar.setProgressCompat(pct, true)

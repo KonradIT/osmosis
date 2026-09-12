@@ -59,17 +59,26 @@
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
                 android:minWidth="0dp"
-                android:text="🛰️"
-                android:textSize="15sp"
-                app:icon="@null" />
+                android:text="@string/gps_sync"
+                android:textSize="13sp"
+                app:cornerRadius="20dp"
+                app:icon="@null"
+                app:strokeWidth="2dp" />
 
-            <com.google.android.material.materialswitch.MaterialSwitch
-                android:id="@+id/switchSaveLogs"
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSaveLogs"
+                style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:checkable="true"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
                 android:text="@string/save_logs"
-                android:textColor="@color/osmo_muted"
-                android:textSize="12sp" />
+                android:textSize="13sp"
+                app:cornerRadius="20dp"
+                app:icon="@null"
+                app:strokeWidth="2dp" />
         </LinearLayout>
 
         <TextView
@@ -80,12 +89,14 @@
             android:textColor="@color/osmo_muted"
             android:textSize="12sp" />
 
+        <!-- Connection progress: invisible by default, space reserved so the camera list doesn't jump
+             when it appears (same idea as the grid's progressArea, one bar tall). -->
         <com.google.android.material.progressindicator.LinearProgressIndicator
             android:id="@+id/connectBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
-            android:visibility="gone"
+            android:visibility="invisible"
             app:indicatorColor="@color/osmo_accent"
             app:trackColor="@color/osmo_track"
             app:trackCornerRadius="3dp"

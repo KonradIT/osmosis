@@ -56,11 +56,12 @@
 
     <!-- GPS sync -->
     <string name="the_camera">die Kamera</string>
-    <string name="gps_sync_active_banner">🛰️ GPS-Sync aktiv mit %1$s\nDas Durchsuchen von Medien ist deaktiviert, solange GPS streamt. Tippe auf 🛰️ zum Stoppen.</string>
-    <string name="gps_sync_connecting_banner">🛰️ GPS-Sync verbindet mit %1$s… bestätige an der Kamera, falls sie fragt. Tippe auf 🛰️ zum Abbrechen.</string>
+    <string name="gps_sync_active_banner">GPS-Sync aktiv mit %1$s\nDas Durchsuchen von Medien ist deaktiviert, solange GPS streamt. Tippe auf GPS-Sync zum Stoppen.</string>
+    <string name="gps_sync_connecting_banner">GPS-Sync verbindet mit %1$s… bestätige an der Kamera, falls sie fragt. Tippe auf GPS-Sync zum Abbrechen.</string>
     <string name="gps_sync_starting">GPS-Sync startet für %1$s – bestätige an der Kamera, falls sie fragt</string>
-    <string name="gps_active_select_blocked">GPS-Sync ist aktiv – tippe auf 🛰️ zum Stoppen, bevor du eine Kamera auswählst.</string>
-    <string name="gps_stop_before_browse">Stoppe GPS-Sync (tippe auf 🛰️), bevor du Medien durchsuchst.</string>
+    <string name="gps_active_select_blocked">GPS-Sync ist aktiv – tippe auf GPS-Sync zum Stoppen, bevor du eine Kamera auswählst.</string>
+    <string name="gps_stop_before_browse">Stoppe GPS-Sync (tippe auf GPS-Sync), bevor du Medien durchsuchst.</string>
+    <string name="gps_sync">GPS-Sync</string>
 
     <!-- GPS sync notification -->
     <string name="notif_channel_gps">GPS-Sync</string>
@@ -171,6 +172,8 @@
     <string name="cd_play_pause">Wiedergabe/Pause</string>
     <string name="cd_fast_forward">vorspulen</string>
     <string name="cd_scrub_preview">Scrubbing-Vorschau</string>
+    <string name="cd_media_badge">Medientyp</string>
+    <string name="cd_camera_status">Kamera-Reichweite</string>
 
     <!-- Status pill -->
     <string name="sd_card">SD-Karte</string>

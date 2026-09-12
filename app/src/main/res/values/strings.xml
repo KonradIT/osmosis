@@ -56,11 +56,12 @@
 
     <!-- GPS sync -->
     <string name="the_camera">the camera</string>
-    <string name="gps_sync_active_banner">🛰️ GPS sync active with %1$s\nMedia browsing is disabled while GPS is streaming. Tap 🛰️ to stop.</string>
-    <string name="gps_sync_connecting_banner">🛰️ GPS sync connecting to %1$s… approve on the camera if it prompts. Tap 🛰️ to cancel.</string>
+    <string name="gps_sync_active_banner">GPS sync active with %1$s\nMedia browsing is disabled while GPS is streaming. Tap GPS Sync to stop.</string>
+    <string name="gps_sync_connecting_banner">GPS sync connecting to %1$s… approve on the camera if it prompts. Tap GPS Sync to cancel.</string>
     <string name="gps_sync_starting">GPS sync starting for %1$s — approve on the camera if it prompts</string>
-    <string name="gps_active_select_blocked">GPS sync is active — tap 🛰️ to stop before selecting a camera.</string>
-    <string name="gps_stop_before_browse">Stop GPS sync (tap 🛰️) before browsing media.</string>
+    <string name="gps_active_select_blocked">GPS sync is active — tap GPS Sync to stop before selecting a camera.</string>
+    <string name="gps_stop_before_browse">Stop GPS sync (tap GPS Sync) before browsing media.</string>
+    <string name="gps_sync">GPS Sync</string>
 
     <!-- GPS sync notification -->
     <string name="notif_channel_gps">GPS sync</string>
@@ -171,6 +172,8 @@
     <string name="cd_play_pause">play/pause</string>
     <string name="cd_fast_forward">fast forward</string>
     <string name="cd_scrub_preview">scrub preview</string>
+    <string name="cd_media_badge">media type</string>
+    <string name="cd_camera_status">camera range</string>
 
     <!-- Status pill -->
     <string name="sd_card">SD card</string>
