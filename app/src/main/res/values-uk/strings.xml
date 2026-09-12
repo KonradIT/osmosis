@@ -56,11 +56,12 @@
 
     <!-- GPS sync -->
     <string name="the_camera">камера</string>
-    <string name="gps_sync_active_banner">🛰️ Синхронізація GPS активна з %1$s\nПерегляд медіа вимкнено, доки триває передавання GPS. Торкніться 🛰️, щоб зупинити.</string>
-    <string name="gps_sync_connecting_banner">🛰️ Підключення синхронізації GPS до %1$s… підтвердьте на камері, якщо з’явиться запит. Торкніться 🛰️, щоб скасувати.</string>
+    <string name="gps_sync_active_banner">Синхронізація GPS активна з %1$s\nПерегляд медіа вимкнено, доки триває передавання GPS. Торкніться GPS-синхр., щоб зупинити.</string>
+    <string name="gps_sync_connecting_banner">Підключення синхронізації GPS до %1$s… підтвердьте на камері, якщо з’явиться запит. Торкніться GPS-синхр., щоб скасувати.</string>
     <string name="gps_sync_starting">Синхронізація GPS запускається для %1$s — підтвердьте на камері, якщо з’явиться запит</string>
-    <string name="gps_active_select_blocked">Синхронізація GPS активна — торкніться 🛰️, щоб зупинити її перед вибором камери.</string>
-    <string name="gps_stop_before_browse">Зупиніть синхронізацію GPS (торкніться 🛰️) перед переглядом медіа.</string>
+    <string name="gps_active_select_blocked">Синхронізація GPS активна — торкніться GPS-синхр., щоб зупинити її перед вибором камери.</string>
+    <string name="gps_stop_before_browse">Зупиніть синхронізацію GPS (торкніться GPS-синхр.) перед переглядом медіа.</string>
+    <string name="gps_sync">GPS-синхр.</string>
 
     <!-- GPS sync notification -->
     <string name="notif_channel_gps">Синхронізація GPS</string>
@@ -171,6 +172,8 @@
     <string name="cd_play_pause">відтворення/пауза</string>
     <string name="cd_fast_forward">вперед</string>
     <string name="cd_scrub_preview">перемотування попереднього перегляду</string>
+    <string name="cd_media_badge">тип медіа</string>
+    <string name="cd_camera_status">діапазон камери</string>
 
     <!-- Status pill -->
     <string name="sd_card">SD-картка</string>

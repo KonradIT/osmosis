@@ -56,11 +56,12 @@
 
     <!-- GPS sync -->
     <string name="the_camera">la cámara</string>
-    <string name="gps_sync_active_banner">🛰️ Sincronización GPS activa con %1$s\nLa exploración de contenido está desactivada mientras el GPS transmite. Haz click en 🛰️ para detener.</string>
-    <string name="gps_sync_connecting_banner">🛰️ Conectando la sincronización GPS con %1$s… aprueba en la cámara si lo pide. Haz click en 🛰️ para cancelar.</string>
+    <string name="gps_sync_active_banner">Sincronización GPS activa con %1$s\nLa exploración de contenido está desactivada mientras el GPS transmite. Haz click en GPS Sync para detener.</string>
+    <string name="gps_sync_connecting_banner">Conectando la sincronización GPS con %1$s… aprueba en la cámara si lo pide. Haz click en GPS Sync para cancelar.</string>
     <string name="gps_sync_starting">Iniciando la sincronización GPS con %1$s: aprueba en la cámara si lo pide</string>
-    <string name="gps_active_select_blocked">La sincronización GPS está activa: haz click en 🛰️ para detenerla antes de seleccionar una cámara.</string>
-    <string name="gps_stop_before_browse">Detén la sincronización GPS (haz click en 🛰️) antes de explorar el contenido.</string>
+    <string name="gps_active_select_blocked">La sincronización GPS está activa: haz click en GPS Sync para detenerla antes de seleccionar una cámara.</string>
+    <string name="gps_stop_before_browse">Detén la sincronización GPS (haz click en GPS Sync) antes de explorar el contenido.</string>
+    <string name="gps_sync">GPS Sync</string>
 
     <!-- GPS sync notification -->
     <string name="notif_channel_gps">Sincronización GPS</string>
@@ -171,6 +172,8 @@
     <string name="cd_play_pause">reproducir/pausar</string>
     <string name="cd_fast_forward">avanzar</string>
     <string name="cd_scrub_preview">vista previa de desplazamiento</string>
+    <string name="cd_media_badge">tipo de contenido</string>
+    <string name="cd_camera_status">alcance de la cámara</string>
 
     <!-- Status pill -->
     <string name="sd_card">Tarjeta SD</string>

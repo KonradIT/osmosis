@@ -59,8 +59,8 @@
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
                 android:minWidth="0dp"
-                android:text="🛰️"
-                android:textSize="15sp"
+                android:text="@string/gps_sync"
+                android:textSize="13sp"
                 app:icon="@null" />
 
             <com.google.android.material.materialswitch.MaterialSwitch

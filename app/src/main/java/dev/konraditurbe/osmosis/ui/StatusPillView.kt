@@ -76,12 +76,20 @@ class StatusPillView @JvmOverloads constructor(
         nameView.text = name
         val pct = s.batteryPercent
         // A charging bolt REPLACES the battery next to the percentage — the camera reports charging
-        // while docked, and two glyphs side by side just crowd the header.
-        batteryText.text = when {
-            pct !in 0..100 -> "—"
-            s.charging -> "⚡ $pct%"
-            else -> "🔋 $pct%"
+        // while docked, and two glyphs side by side just crowd the header. Icon is a compound drawable
+        // before the percent; none when the level is unknown.
+        batteryText.text = if (pct !in 0..100) "—" else "$pct%"
+        val battIcon = when {
+            pct !in 0..100 -> 0
+            s.charging -> R.drawable.ic_battery_charging
+            else -> R.drawable.ic_battery
         }
+        val battDrawable = if (battIcon == 0) null else
+            ContextCompat.getDrawable(context, battIcon)!!.mutate().also {
+                val sz = dp(17); it.setBounds(0, 0, sz, sz); it.setTint(ink)
+            }
+        batteryText.setCompoundDrawablesRelative(battDrawable, null, null, null)
+        batteryText.compoundDrawablePadding = dp(4)
         batteryBar.progress = pct.coerceIn(0, 100)
         batteryBar.progressTintList = ColorStateList.valueOf(
             when { pct < 0 -> track; s.charging -> green; pct <= 15 -> red; pct <= 35 -> orange; else -> green }

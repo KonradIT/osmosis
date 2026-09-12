@@ -24,18 +24,18 @@
         android:textColor="#FFFFFF"
         android:textSize="10sp" />
 
-    <!-- Media badge: ❤️ when favorited, else a type hint (📷 photo / 📹 video). Text set in the adapter.
-         Sized/centered to mirror the checkbox's ~40dp box on the opposite corner. -->
-    <TextView
+    <!-- Media badge: favorite when starred, else a type hint (photo / video / panorama / burst). Icon set
+         in the adapter. A translucent plate keeps the white glyph legible over any thumbnail. -->
+    <ImageView
         android:id="@+id/star"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_width="30dp"
+        android:layout_height="30dp"
         android:layout_gravity="top|start"
-        android:minWidth="40dp"
-        android:minHeight="40dp"
-        android:gravity="center"
-        android:text="❤️"
-        android:textSize="18sp" />
+        android:layout_margin="6dp"
+        android:background="@drawable/badge_plate"
+        android:padding="6dp"
+        android:scaleType="fitCenter"
+        android:contentDescription="@string/cd_media_badge" />
 
     <CheckBox
         android:id="@+id/check"
