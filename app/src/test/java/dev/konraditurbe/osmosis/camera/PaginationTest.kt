@@ -194,6 +194,49 @@ class PaginationTest {
         assertEquals(0x40100900L, step.internalCursor)
     }
 
+    // ---- wire facts about the page: end marker + truncation --------------------------
+
+    private fun info(declared: Int, records: Int, endMarker: Boolean) =
+        CameraSession.SliceInfo(declared, records, endMarker, ended = true)
+
+    /** The camera's `0c 01` marker is final, even when the page it sits on happens to be full. */
+    @Test
+    fun `the end marker ends pagination on a full page`() {
+        val seen = mutableSetOf<String>()
+        val internal = page(pageSize, 0x40101400L, step = 0x40, storage = 1)
+        val step = dl.stepPagination(newestSd, 0x40101500L, internal, seen,
+            mapOf(1 to info(declared = pageSize, records = pageSize, endMarker = true)))
+        assertEquals(pageSize, step.fresh.size)
+        assertFalse("marker beats the count rule", step.moreAvailable)
+    }
+
+    /**
+     * The Xtra bug: an internal page of 21 came back as 18 because the collector stopped listening
+     * mid-stream. 18 < 45 read as "end of library", and the three oldest files never showed. A slice
+     * with fewer records than its header declares is cut, not short — the cursor still advances, and
+     * the next page brings the tail back.
+     */
+    @Test
+    fun `a truncated short page keeps paging`() {
+        val seen = mutableSetOf<String>()
+        val internal = page(18, 0x40040180L, step = 0x10, firstSeq = 24, storage = 1)
+        val step = dl.stepPagination(newestSd, 0x40040190L, internal, seen,
+            mapOf(1 to info(declared = 21, records = 18, endMarker = false)))
+        assertEquals(18, step.fresh.size)
+        assertEquals("cursor moved to the oldest record that did arrive", 0x40040070L, step.internalCursor)
+        assertTrue("truncated is not final", step.moreAvailable)
+    }
+
+    /** A short page that arrived whole, with no marker: the count rule still ends it. */
+    @Test
+    fun `a complete short page without a marker ends pagination`() {
+        val seen = mutableSetOf<String>()
+        val internal = page(18, 0x40040180L, step = 0x10, firstSeq = 24, storage = 1)
+        val step = dl.stepPagination(newestSd, 0x40040190L, internal, seen,
+            mapOf(1 to info(declared = 18, records = 18, endMarker = false)))
+        assertFalse(step.moreAvailable)
+    }
+
     /** Both stores short: the library is exhausted and the pull-up spinner must not arm. */
     @Test
     fun `a short page in every store ends pagination`() {

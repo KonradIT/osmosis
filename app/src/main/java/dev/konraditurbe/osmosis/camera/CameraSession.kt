@@ -154,6 +154,35 @@ class CameraSession(
      * obviously tied to what we actually asked for.
      */
     private val PAGE_SIZE = 45
+    /** Records to ask for: [PAGE_SIZE] unless `--ei pagesize N` (DEBUG) overrides it. */
+    private val pageSize: Int get() = debugPageSize.takeIf { it in 1..255 } ?: PAGE_SIZE
+
+    /**
+     * What one store's answer to a page query looked like on the wire, kept by [collectStores] for the
+     * page step that follows ([stepPagination]) and for the evidence log.
+     *
+     * [declared] is the manifest's own `u32-LE` header count — the number of records this page carries
+     * (45 on every full page in the fixtures; `0` on an Action 5/6, which writes no count). [records]
+     * is how many media-path fields were actually in the bytes. A page with fewer records than it
+     * declared was cut short in transit — the collector stopped listening before the last chunks
+     * landed — and its tail is missing, which on a list ordered newest-first is the oldest files.
+     *
+     * [endMarker] is the `0c 01` TLV that sits immediately before the last record's `0d` name field in
+     * every captured final page (xtra_13, oa4_6, oa6_*, op3_*) and in none of the full 45-record ones
+     * (nano_45, oa4_45, op4_45) — Mimo's `isPageLastFile`. It is the camera saying "nothing older".
+     */
+    internal class SliceInfo(val declared: Int, val records: Int, val endMarker: Boolean, val ended: Boolean) {
+        /**
+         * Fewer records than the header promised: the answer was truncated, not short.
+         *
+         * [declared] is only trusted when it is a plausible per-page count. Not every model writes the
+         * count at offset 0 — several fixtures (`oa4_6`, `nano_delete`, `op3_29`) and the live Xtra carry
+         * a large non-count value there (`0x1310…`), which would otherwise read as "declared 300 million,
+         * 41 arrived → truncated" on every page. A real page count never exceeds the records we asked for.
+         */
+        val incomplete: Boolean get() = declared in 1..COUNT_MAX && records < declared
+    }
+    private val lastSlices = HashMap<Int, SliceInfo>()
 
     // Request counters we put at byte 4 of each 0x00/0x26, echoed back at sub-header byte 4 of every
     // 0x00/0x27 chunk answering it. Counter 1 is the SD query, counter 2 the internal one; each carries
@@ -241,9 +270,11 @@ class CameraSession(
         val intOldest = oldestHandle(files, INTERNAL_STORE, below = Long.MAX_VALUE)
         sdCursor = sdOldest ?: NEWEST_SD
         internalCursor = intOldest ?: NEWEST_INTERNAL
-        moreAvailable = hasOlderPage(storeSlice(files, SD_STORE).size, sdOldest ?: 0L) ||
-            hasOlderPage(storeSlice(files, INTERNAL_STORE).size, intOldest ?: 0L)
+        moreAvailable = storeHasOlderPage(storeSlice(files, SD_STORE).size, sdOldest != null, lastSlices[SD_STORE]) ||
+            storeHasOlderPage(storeSlice(files, INTERNAL_STORE).size, intOldest != null, lastSlices[INTERNAL_STORE])
+        if (debugPageForce) moreAvailable = sdOldest != null || intOldest != null
         log("datalink: parsed ${files.size} media files (newest page; ${cursorLog()}; more=$moreAvailable)")
+        logPageEvidence(files, files, NEWEST_SD, NEWEST_INTERNAL)
         onFetchProgress?.invoke(100)
         return files
     }
@@ -266,9 +297,9 @@ class CameraSession(
      * needed. Older pages are lazy — the grid's infinite scroll calls [fetchNextPage].
      */
     private fun queryNewestPage(): List<CameraFile> {
-        sendDuml(0x00, 0x26, hex(
-            "4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000"
-        ), receiverType = 0x01, receiverId = 0)
+        // Byte-identical to the proven newest-page blob (PaginationTest pins it); built through listCmd
+        // so a debug page size reaches the first page too.
+        sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, NEWEST_SD), receiverType = 0x01, receiverId = 0)
         val blob = java.io.ByteArrayOutputStream()
         var lastCount = -1
         var stable = 0
@@ -277,12 +308,13 @@ class CameraSession(
             holdPlayback()
             if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"),
                 receiverType = 0x01, receiverId = 0)
-            if (batch == 2) sendDuml(0x00, 0x26, hex(
-                "4a002a10020000000000010000402d000d0100ffffffffffffffff000100000000000000000000000000"
-            ), receiverType = 0x01, receiverId = 0)
+            if (batch == 2) sendDuml(0x00, 0x26, listCmd(INTERNAL_QUERY_CTR, NEWEST_INTERNAL),
+                receiverType = 0x01, receiverId = 0)
             val count = distinctPaths(blob)
             if (count != lastCount) log("datalink: $count files (batch $batch)")
             onFetchProgress?.invoke((55 + batch * 6).coerceAtMost(95))
+            // Done when the camera has closed both answers; otherwise wait for the count to settle.
+            if (batch >= 3 && streamsEnded(blob.toByteArray(), SD_QUERY_CTR, INTERNAL_QUERY_CTR)) break
             if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = count
         }
@@ -322,6 +354,7 @@ class CameraSession(
     private fun listCmd(ctr: Int, cursor: Long): ByteArray =
         hex("4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000").also {
             it[4] = ctr.toByte()
+            it[14] = pageSize.toByte()
             it[10] = (cursor and 0xFF).toByte()
             it[11] = ((cursor ushr 8) and 0xFF).toByte()
             it[12] = ((cursor ushr 16) and 0xFF).toByte()
@@ -346,19 +379,29 @@ class CameraSession(
         // stepPagination (which advances the cursors) ONLY on a non-empty decode, so a failed inline query
         // falls through to the fresh path without double-advancing.
         if (keepAliveOn) {
+            // A two-store page can take several seconds: the Xtra answered the internal query ~2.5 s
+            // after the SD one on a newest-page load. The old 4 s deadline cut such pages short.
             val blob = runManifestQuery(
                 listCmd(SD_QUERY_CTR, sdCursor),
                 hex("4a040e1001000000000001000000"),
-                listCmd(INTERNAL_QUERY_CTR, internalCursor))
+                listCmd(INTERNAL_QUERY_CTR, internalCursor),
+                timeoutMs = PAGE_STREAM_TIMEOUT_MS)
             val page = blob?.let { collectStores(it) } ?: emptyList()
-            if (page.isNotEmpty()) {
-                val step = stepPagination(sdCursor, internalCursor, page, seenKeys)
+            // A truncated slice is not a page: taking it would make the count rule call the library
+            // finished. Re-ask in a fresh session instead, whose 800 ms windows and end-frame check
+            // give the camera room to finish.
+            val truncated = lastSlices.values.any { it.incomplete }
+            if (page.isNotEmpty() && !truncated) {
+                val before = sdCursor to internalCursor
+                val step = stepPagination(sdCursor, internalCursor, page, seenKeys, lastSlices)
                 sdCursor = step.sdCursor; internalCursor = step.internalCursor
                 moreAvailable = step.moreAvailable
                 log("datalink: next page(inline) ${cursorLog()} +${step.fresh.size} new (more=$moreAvailable)")
+                logPageEvidence(page, step.fresh, before.first, before.second)
                 return step.fresh
             }
-            log("datalink: next page(inline) empty — fresh-session fallback")
+            if (truncated) logPageEvidence(page, emptyList(), sdCursor, internalCursor)
+            log("datalink: next page(inline) ${if (truncated) "TRUNCATED" else "empty"} — fresh-session fallback")
         }
 
         // Fallback: fresh registered session (pre-#12 path).
@@ -386,15 +429,18 @@ class CameraSession(
             if (batch == 2) sendDuml(0x00, 0x26, listCmd(INTERNAL_QUERY_CTR, internalCursor),
                 receiverType = 0x01, receiverId = 0)                                    // page selector
             val c = distinctPaths(blob)
+            if (batch >= 3 && streamsEnded(blob.toByteArray(), SD_QUERY_CTR, INTERNAL_QUERY_CTR)) break
             if (batch >= 4 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = c
         }
         val page = collectStores(blob.toByteArray())
-        val step = stepPagination(sdCursor, internalCursor, page, seenKeys)
+        val before = sdCursor to internalCursor
+        val step = stepPagination(sdCursor, internalCursor, page, seenKeys, lastSlices)
         sdCursor = step.sdCursor
         internalCursor = step.internalCursor
         moreAvailable = step.moreAvailable
         log("datalink: next page ${cursorLog()} +${step.fresh.size} new (more=$moreAvailable)")
+        logPageEvidence(page, step.fresh, before.first, before.second)
         return step.fresh
     }
 
@@ -477,14 +523,66 @@ class CameraSession(
      * holding at least one video — so the pull-up spinner armed on libraries that were already
      * complete, and a pull spent a whole page fetch to append nothing.
      *
-     * Mimo answers the same question from a per-record `isPageLastFile` flag it gets in the manifest.
-     * That flag is not at any fixed offset in our decoded records — searched every marker-relative
-     * position against a known-final page (`xtra_13.bin`, 13 records) versus a known-continuing one
-     * (`nano_45.bin`, a full 45 of 195) and nothing separates them — so the page-size test stands in
-     * for it. Same conclusion, one less unknown, and it needs no new byte to be right.
+     * Mimo answers the same question from a per-record `isPageLastFile` flag. That flag **is** in the
+     * manifest: the `0c 01` TLV before the last record's name field, present in every captured final
+     * page and absent from every full one ([hasEndMarker]). [storeHasOlderPage] layers it, and the
+     * truncation check, on top of this count rule; this stays as the fallback for a decode with no
+     * per-store wire facts.
      */
     internal fun hasOlderPage(pageSize: Int, cursor: Long): Boolean =
-        cursor > 0L && pageSize >= PAGE_SIZE
+        cursor > 0L && pageSize >= this.pageSize
+
+    /**
+     * Does [store]'s slice of a page leave an older page to fetch? Needs the cursor to have moved, and then:
+     *
+     *  - the camera's `0c 01` end marker ([SliceInfo.endMarker]) is final — nothing older, even on a
+     *    page that happens to be full;
+     *  - a slice with fewer records than its header declared ([SliceInfo.incomplete]) was **cut short**,
+     *    not short: whatever it lost is older than the cursor we just advanced to, so the next page
+     *    brings it back. Calling that "end" is exactly how an Xtra lost its three oldest files;
+     *  - otherwise the count rule of [hasOlderPage]: a full page means more, a short one means done.
+     *
+     * [info] null (a merged, no-counter-echo decode) falls back to the count rule alone.
+     */
+    internal fun storeHasOlderPage(sliceSize: Int, cursorMoved: Boolean, info: SliceInfo?): Boolean = when {
+        !cursorMoved -> false
+        info == null -> sliceSize >= pageSize
+        // Truncation outranks the marker: the marker rides the LAST record's name field, and a page that
+        // lost chunks in the middle can carry it while the records before it are missing — seen on an
+        // Xtra page declaring 21, delivering 17, marker present, 0003–0006 gone.
+        info.incomplete -> true
+        info.endMarker -> false
+        else -> sliceSize >= pageSize
+    }
+
+    /**
+     * DEBUG evidence line per store for one page: what the camera declared, what we decoded, whether the
+     * end-of-list TLV was there, how the cursor moved, and every record as `seq:handle` in manifest
+     * order — enough to reconstruct the walk from a log and to compare the two end-of-list rules
+     * (record count vs `0c 01` marker) against what the camera actually had.
+     */
+    private fun logPageEvidence(page: List<CameraFile>, fresh: List<CameraFile>, sdBefore: Long, intBefore: Long) {
+        for ((store, name, before, after) in listOf(
+            Quad(SD_STORE, "SD", sdBefore, sdCursor), Quad(INTERNAL_STORE, "internal", intBefore, internalCursor))) {
+            val slice = storeSlice(page, store)
+            val info = lastSlices[store]
+            val freshN = fresh.count { storeOf(it) == store }
+            val handles = slice.map { it.handle }.filter { it != 0L }
+            val moved = after != before          // a newest-page selector is replaced, not walked below
+            val countRule = hasOlderPage(slice.size, if (moved) after else 0L)
+            val verdict = storeHasOlderPage(slice.size, moved, info)
+            log("datalink: page[$name] hdr=${info?.declared ?: "-"} records=${info?.records ?: "-"} decoded=${slice.size}" +
+                " end0c01=${info?.endMarker ?: "-"} ended=${info?.ended ?: "-"} incomplete=${info?.incomplete ?: "-"}" +
+                " fresh=$freshN cursor 0x%08x→0x%08x".format(before, after) +
+                " min=0x%08x last=0x%08x".format(handles.minOrNull() ?: 0L, slice.lastOrNull()?.handle ?: 0L) +
+                " | more=$verdict (count-rule alone=$countRule)")
+            // The record list is a kilobyte a page — only under a debug page flag, where a walk is
+            // being reconstructed; the summary line above is what an ordinary log needs.
+            if (slice.isNotEmpty() && (debugPageForce || debugPageSize > 0)) log("datalink: page[$name] " +
+                slice.joinToString(" ") { "%04d:%08x".format(it.seq, it.handle) })
+        }
+    }
+    private data class Quad(val store: Int, val name: String, val before: Long, val after: Long)
 
     /**
      * Pull a video's highlight / moment marks (side-button presses) — DUML **0x02/0xff**, RE'd from an
@@ -622,13 +720,17 @@ class CameraSession(
         internalCursor: Long,
         page: List<CameraFile>,
         seen: MutableSet<String>,
+        info: Map<Int, SliceInfo> = emptyMap(),
     ): PageStep {
         val fresh = page.filter { seen.add(pageKey(it)) }
         val sdOldest = oldestHandle(page, SD_STORE, below = sdCursor)
         val intOldest = oldestHandle(page, INTERNAL_STORE, below = internalCursor)
-        val more = fresh.isNotEmpty() && (
-            hasOlderPage(storeSlice(page, SD_STORE).size, sdOldest ?: 0L) ||
-                hasOlderPage(storeSlice(page, INTERNAL_STORE).size, intOldest ?: 0L))
+        var more = fresh.isNotEmpty() && (
+            storeHasOlderPage(storeSlice(page, SD_STORE).size, sdOldest != null, info[SD_STORE]) ||
+                storeHasOlderPage(storeSlice(page, INTERNAL_STORE).size, intOldest != null, info[INTERNAL_STORE]))
+        // DEBUG `--ez pageforce true`: ignore the short-page test and keep walking while a cursor moves
+        // and the page brought something new — to see whether a "final" page really was final.
+        if (debugPageForce) more = fresh.isNotEmpty() && (sdOldest != null || intOldest != null)
         return PageStep(fresh, sdOldest ?: sdCursor, intOldest ?: internalCursor, more)
     }
 
@@ -675,6 +777,9 @@ class CameraSession(
      * the raw blob (feed to `manifestBytes` + `decodeManifest`). Null if the keep-alive isn't running.
      */
     fun runManifestQuery(payload: ByteArray, vararg primeFrames: ByteArray, timeoutMs: Long = 4000): ByteArray? {
+        // Completion is decided on the keep-alive tick: the camera's own `end` frame for every counter it
+        // opened, else the path count sitting still for STREAM_QUIET_TICKS, else [timeoutMs] — and a
+        // deadline hit hands back whatever arrived, which the page step then checks for truncation.
         if (!keepAliveOn) return null
         val c = PendingCmd(0x00, 0x26, payload, 0x01, 0, 2, 0x00, 0x27,
             System.currentTimeMillis() + timeoutMs, primeFrames = primeFrames.toList(), stream = true)
@@ -893,11 +998,20 @@ class CameraSession(
                             if (c.ticks in 1..c.primeFrames.size)       // send each prime frame one tick apart
                                 sendDuml(c.set, c.cmd, c.primeFrames[c.ticks - 1], receiverType = c.rType, receiverId = c.rId, cmdType = c.cType)
                             val cnt = distinctPaths(c.blob)
-                            if (c.ticks >= c.primeFrames.size + 2 && cnt > 0 && cnt == c.lastCount) {
-                                if (++c.stable >= 2) { c.reply = c.blob.toByteArray(); c.done = true; awaitingCmd = null }
+                            // First choice: the camera closed every answer it opened (`4A 03` end frame per
+                            // counter). Second: the count has not moved for STREAM_QUIET_TICKS. The old
+                            // 2-tick (400 ms) quiet test fired inside a mid-stream pause and returned a
+                            // page missing its last chunks — the oldest records — which the short-page
+                            // rule then read as the end of the library.
+                            val allSent = c.ticks >= c.primeFrames.size + 1
+                            if (allSent && cnt > 0 && streamsEnded(c.blob.toByteArray())) {
+                                c.reply = c.blob.toByteArray(); c.done = true; awaitingCmd = null
+                            } else if (allSent && cnt > 0 && cnt == c.lastCount) {
+                                if (++c.stable >= STREAM_QUIET_TICKS) { c.reply = c.blob.toByteArray(); c.done = true; awaitingCmd = null }
                             } else c.stable = 0
                             c.lastCount = cnt
                             if (!c.done && System.currentTimeMillis() > c.deadlineMs) {
+                                log("datalink: manifest stream deadline after ${c.ticks} ticks, $cnt paths — reply may be truncated")
                                 c.reply = c.blob.toByteArray(); c.done = true; awaitingCmd = null
                             }
                         } else {
@@ -1313,10 +1427,21 @@ class CameraSession(
         // The label is only for the log: each store's slice is decoded on its own, so every record in it
         // is group 0 and both stores would otherwise report "list 0" with different bases — which reads
         // like one list being fitted twice rather than two stores each being fitted once.
+        val tally = chunkTally(raw)
+        lastSlices.clear()
         fun sliceOf(ctr: Int): List<CameraFile> {
             val store = if (ctr == SD_QUERY_CTR) "SD" else "internal"
-            return manifestBytes(raw, requestCtr = ctr).takeIf { it.isNotEmpty() }
-                ?.let { decodeManifest(it, store) } ?: emptyList()
+            val bytes = manifestBytes(raw, requestCtr = ctr)
+            val files = bytes.takeIf { it.isNotEmpty() }?.let { decodeManifest(it, store) } ?: emptyList()
+            val info = SliceInfo(
+                declared = if (bytes.size >= 4) u32le(bytes, 0).toInt() else -1,
+                records = countMediaPaths(bytes),
+                endMarker = hasEndMarker(bytes),
+                ended = (tally[ctr]?.get(0x03) ?: 0) > 0)
+            lastSlices[if (ctr == SD_QUERY_CTR) SD_STORE else INTERNAL_STORE] = info
+            if (info.incomplete) log("datalink: $store slice TRUNCATED — header declares ${info.declared}" +
+                " records, ${info.records} arrived (end frame ${if (info.ended) "seen" else "missing"})")
+            return files
         }
         val sd = sliceOf(SD_QUERY_CTR)
         val internal = sliceOf(INTERNAL_QUERY_CTR)
@@ -1347,6 +1472,18 @@ class CameraSession(
     }
 
     /**
+     * Does a reassembled per-store manifest carry the `0c 01` end-of-list TLV? It sits immediately
+     * before a record's `0d` name field (`… 13 00 | 0c 01 | 0d <len> <name>`), so the three-byte run
+     * `0c 01 0d` is the test. Present in every captured final page (xtra_13, oa4_6, oa6_*, op3_*),
+     * absent in every captured full page (nano_45, oa4_45, op4_45).
+     */
+    internal fun hasEndMarker(bytes: ByteArray): Boolean {
+        for (i in 0 until bytes.size - 2)
+            if (bytes[i] == 0x0C.toByte() && bytes[i + 1] == 0x01.toByte() && bytes[i + 2] == 0x0D.toByte()) return true
+        return false
+    }
+
+    /**
      * Tally the `0x00/0x27` reply frames in a collected blob by sub-header byte 4 (the request counter
      * the camera echoes) and by `4A` subtype, e.g. `ctr1={start=1,data=0,end=1} ctr2={…}`.
      *
@@ -1355,6 +1492,35 @@ class CameraSession(
      * how to read the output.
      */
     private fun chunkCensus(raw: ByteArray): String {
+        val tally = chunkTally(raw)
+        if (tally.isEmpty()) return "none"
+        fun name(sub: Int) = when (sub) { 0x04 -> "start"; 0x01 -> "data"; 0x03 -> "end"; else -> "sub$sub" }
+        return tally.entries.joinToString(" ") { (ctr, subs) ->
+            "ctr$ctr={" + subs.entries.joinToString(",") { (s, n) -> "${name(s)}=$n" } + "}"
+        }
+    }
+
+    /**
+     * Has the camera closed every answer in [raw]? A counter is closed when it sent its `4A 03` end
+     * frame, or when it opened (`4A 04`) and never sent a data chunk — that is how a store with nothing
+     * on it answers (`ctr1={start=1}` on a Nano with no card, in both raw fixtures), and no end frame
+     * ever follows. Every counter seen must be closed, and so must each [required] one (a query the
+     * camera has not even started answering is not closed). At least one counter must have carried
+     * data. The end frame is the camera's own completion signal; a collector that stops on a quiet gap
+     * instead can hand back a page missing its last chunks.
+     */
+    internal fun streamsEnded(raw: ByteArray, vararg required: Int): Boolean {
+        val tally = chunkTally(raw)
+        if (tally.values.none { (it[0x01] ?: 0) > 0 }) return false
+        fun closed(ctr: Int): Boolean {
+            val subs = tally[ctr] ?: return false
+            return (subs[0x03] ?: 0) > 0 || ((subs[0x04] ?: 0) > 0 && (subs[0x01] ?: 0) == 0)
+        }
+        return required.all { closed(it) } && tally.keys.all { closed(it) }
+    }
+
+    /** `0x00/0x27` reply frames in [raw] by request counter, then by `4A` subtype (0x04 start · 0x01 data · 0x03 end). */
+    private fun chunkTally(raw: ByteArray): java.util.SortedMap<Int, MutableMap<Int, Int>> {
         val tally = sortedMapOf<Int, MutableMap<Int, Int>>()
         var i = 0
         while (i + 13 <= raw.size) {
@@ -1371,11 +1537,7 @@ class CameraSession(
             }
             i += len
         }
-        if (tally.isEmpty()) return "none"
-        fun name(sub: Int) = when (sub) { 0x04 -> "start"; 0x01 -> "data"; 0x03 -> "end"; else -> "sub$sub" }
-        return tally.entries.joinToString(" ") { (ctr, subs) ->
-            "ctr$ctr={" + subs.entries.joinToString(",") { (s, n) -> "${name(s)}=$n" } + "}"
-        }
+        return tally
     }
 
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
@@ -1391,6 +1553,12 @@ class CameraSession(
 
     /** Test seam: the per-store split, so it can be checked against the handle-bit rule it replaces. */
     internal fun collectStoresForTest(rawBlob: ByteArray): List<CameraFile> = collectStores(rawBlob)
+
+    /** Test seam: what [collectStores] recorded about each store's answer on its last run. */
+    internal fun lastSlicesForTest(): Map<Int, SliceInfo> = lastSlices.toMap()
+
+    /** Test seam: the `0c 01` end-of-list marker on a reassembled manifest (raw blob or bare manifest). */
+    internal fun endMarkerForTest(rawBlob: ByteArray): Boolean = hasEndMarker(manifestBytes(rawBlob))
 
     /** Test seam: decode an already-reassembled CompositePack manifest (post frame-reassembly). */
     internal fun decodeCompositeForTest(manifest: ByteArray): List<CameraFile> = decodeComposite(manifest)
@@ -2108,6 +2276,23 @@ class CameraSession(
 
     companion object {
         /**
+         * Keep-alive ticks (200 ms each) the path count must sit still before an inline manifest stream
+         * is taken as finished, when the camera has not sent its end frame. Was 2: a 400 ms pause
+         * between the SD and internal answers, or inside one, returned a page missing its tail.
+         */
+        private const val STREAM_QUIET_TICKS = 5
+
+        /** Deadline for an inline two-store page. A newest-page load on an Xtra takes ~4.5 s. */
+        private const val PAGE_STREAM_TIMEOUT_MS = 12_000L
+
+        /**
+         * Largest value at manifest offset 0 still treated as this page's record count. A real page never
+         * holds more than [PAGE_SIZE] (255 at the widest a `--ei pagesize` debug run asks for); anything
+         * bigger is not a count — the field is model-dependent, and several bodies write other data there.
+         */
+        private const val COUNT_MAX = 512
+
+        /**
          * `--ez nowriterefresh true` — DEBUG ONLY, off in every ordinary run.
          *
          * Suppresses [refreshSessionForWrite] so an inline command goes out on whatever session exists,
@@ -2117,5 +2302,20 @@ class CameraSession(
          */
         @Volatile
         var debugNoWriteRefresh = false
+
+        /**
+         * `--ez pageforce true` — DEBUG ONLY. Keep paging while a cursor still advances and the page
+         * brought new files, ignoring the short-page end-of-list test. Walks past a page the count rule
+         * would have called final, so the log shows whether anything was behind it.
+         */
+        @Volatile
+        var debugPageForce = false
+
+        /**
+         * `--ei pagesize N` — DEBUG ONLY (1..255). Records asked for per list query instead of Mimo's
+         * 45. A camera that honours a bigger page gives an independent listing to compare a walk against.
+         */
+        @Volatile
+        var debugPageSize = 0
     }
 }
