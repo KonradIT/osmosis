@@ -61,15 +61,24 @@
                 android:minWidth="0dp"
                 android:text="@string/gps_sync"
                 android:textSize="13sp"
-                app:icon="@null" />
+                app:cornerRadius="20dp"
+                app:icon="@null"
+                app:strokeWidth="2dp" />
 
-            <com.google.android.material.materialswitch.MaterialSwitch
-                android:id="@+id/switchSaveLogs"
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSaveLogs"
+                style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:checkable="true"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
                 android:text="@string/save_logs"
-                android:textColor="@color/osmo_muted"
-                android:textSize="12sp" />
+                android:textSize="13sp"
+                app:cornerRadius="20dp"
+                app:icon="@null"
+                app:strokeWidth="2dp" />
         </LinearLayout>
 
         <TextView

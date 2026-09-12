@@ -7,7 +7,7 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/pill_bg"
+        android:background="@drawable/camera_row_bg"
         android:foreground="@drawable/card_ripple"
         android:gravity="center_vertical"
         android:minHeight="64dp"
