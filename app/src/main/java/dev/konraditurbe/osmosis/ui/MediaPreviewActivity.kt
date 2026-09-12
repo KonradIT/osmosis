@@ -31,6 +31,7 @@ import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.core.previewCandidates
 import dev.konraditurbe.osmosis.core.urlPath
+import dev.konraditurbe.osmosis.net.FrameCapture
 import dev.konraditurbe.osmosis.net.Highlights
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.net.ImageLoader
@@ -71,6 +72,12 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var btnRew: ImageButton
     private lateinit var btnFf: ImageButton
     private var scrubbing = false
+
+    // Frame capture: pull the full-res frame at the paused position off the camera as a JPEG.
+    private lateinit var btnCapture: ImageButton
+    private lateinit var captureSpinner: ProgressBar
+    private var capturing = false
+    private val frameCapture by lazy { FrameCapture(this, http) { Log.i("Osmosis", it) } }
 
     private lateinit var file: CameraFile
     private var ip = "192.168.2.1"
@@ -164,6 +171,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnPlay = findViewById(R.id.btnPlay)
         btnRew = findViewById(R.id.btnRew)
         btnFf = findViewById(R.id.btnFf)
+        btnCapture = findViewById(R.id.btnCapture)
+        captureSpinner = findViewById(R.id.captureSpinner)
         burstRow = findViewById(R.id.burstRow)
         burstStrip = findViewById(R.id.burstStrip)
         previewRoot = findViewById(R.id.previewRoot)
@@ -467,6 +476,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         btnPlay.setOnClickListener { togglePlay() }
         btnRew.setOnClickListener { seekBy(-5000) }
         btnFf.setOnClickListener { seekBy(5000) }
+        btnCapture.setOnClickListener { captureFrame() }
         // Dragging moves the *preview*, not the player: the frame under the thumb shows in a bubble
         // over the bar and the clip jumps once, on release. Seeking live used to fire a seek per
         // pixel of travel, each one a fresh range fetch over the camera's AP.
@@ -528,9 +538,49 @@ class MediaPreviewActivity : AppCompatActivity() {
         txtCur.text = mmss(target.toLong())
     }
 
-    private fun updatePlayIcon() = btnPlay.setImageResource(
-        if (videoView.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
-    )
+    private fun updatePlayIcon() {
+        btnPlay.setImageResource(
+            if (videoView.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+        )
+        // The capture button only makes sense on a paused frame. INVISIBLE (not GONE) so the transport
+        // group doesn't shift; left alone mid-capture so the spinner / ✓ stay where the tap was.
+        if (!capturing) btnCapture.visibility = if (videoView.isPlaying) View.INVISIBLE else View.VISIBLE
+    }
+
+    /**
+     * Save the full-res frame at the paused position as a JPEG in Pictures/Osmosis (see [FrameCapture]).
+     * The offset comes from the proxy the player is streaming; the frame is pulled from the full-res
+     * file, which is never otherwise fetched here. Button → spinner while it runs, ✓ for a moment on
+     * success, then back to the camera icon.
+     */
+    private fun captureFrame() {
+        if (capturing || videoView.isPlaying) return
+        val f = file
+        val ms = videoView.currentPosition.toLong()
+        capturing = true
+        btnCapture.visibility = View.INVISIBLE
+        captureSpinner.visibility = View.VISIBLE
+        Thread {
+            val uri = frameCapture.capture(f, ms)
+            main.post {
+                if (isFinishing) return@post
+                capturing = false
+                captureSpinner.visibility = View.GONE
+                if (uri == null) {
+                    toast(getString(R.string.capture_failed))
+                    updatePlayIcon()
+                    return@post
+                }
+                toast(getString(R.string.capture_saved, FrameCapture.captureName(f, ms)))
+                btnCapture.setImageResource(R.drawable.ic_check)
+                btnCapture.visibility = View.VISIBLE
+                main.postDelayed({
+                    btnCapture.setImageResource(R.drawable.ic_camera)
+                    updatePlayIcon()
+                }, CAPTURE_OK_MS)
+            }
+        }.apply { name = "frame-capture" }.start()
+    }
 
     /** Tap the media to hide the title + controls for a full-frame view; tap again to bring them back.
      *  The scrubber/transport/trim block is video-only, but the bar itself carries the queue button,
@@ -774,6 +824,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         /** Coarse grid decoded up front — enough that any thumb position has a frame within a few
          *  percent of the clip, without a long stall on the camera's link before the first drag. */
         private const val SCRUB_GRID_CELLS = 12
+        /** How long the ✓ stays on the capture button after a frame is saved. */
+        private const val CAPTURE_OK_MS = 1_200L
 
         const val EXTRA_PATH = "path"
         private const val EXTRA_STORAGE = "storage"

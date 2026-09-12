@@ -163,6 +163,8 @@
     <string name="edit_with">编辑</string>
     <string name="no_app_available_share">没有可用于分享此文件的应用</string>
     <string name="no_app_available_edit">没有可用于编辑此文件的应用</string>
+    <string name="capture_saved">已保存帧：%1$s</string>
+    <string name="capture_failed">无法从此片段提取帧</string>
     <string name="sidecar_title">检测到附属文件</string>
     <string name="sidecar_msg">此项目附带一个 %1$s 文件（%2$s）。是否也加入下载队列？</string>
     <string name="sidecar_added">%1$s 已加入下载队列</string>
@@ -176,6 +178,7 @@
     <string name="cd_scrub_preview">拖动预览</string>
     <string name="cd_media_badge">媒体类型</string>
     <string name="cd_camera_status">相机范围</string>
+    <string name="cd_capture_frame">将帧保存为照片</string>
 
     <!-- Status pill -->
     <string name="sd_card">SD 卡</string>

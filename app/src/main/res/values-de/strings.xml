@@ -164,6 +164,8 @@
     <string name="edit_with">Bearbeiten mit</string>
     <string name="no_app_available_share">Keine App zum Teilen dieser Datei verfügbar</string>
     <string name="no_app_available_edit">Keine App zum Bearbeiten dieser Datei verfügbar</string>
+    <string name="capture_saved">Einzelbild gespeichert: %1$s</string>
+    <string name="capture_failed">Aus diesem Clip konnte kein Einzelbild extrahiert werden</string>
 
     <!-- Content descriptions -->
     <string name="cd_preview">Vorschau</string>
@@ -174,6 +176,7 @@
     <string name="cd_scrub_preview">Scrubbing-Vorschau</string>
     <string name="cd_media_badge">Medientyp</string>
     <string name="cd_camera_status">Kamera-Reichweite</string>
+    <string name="cd_capture_frame">Einzelbild als Foto speichern</string>
 
     <!-- Status pill -->
     <string name="sd_card">SD-Karte</string>

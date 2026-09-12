@@ -164,6 +164,8 @@
     <string name="edit_with">Edit with</string>
     <string name="no_app_available_share">No app available to share this file</string>
     <string name="no_app_available_edit">No app available to edit this file</string>
+    <string name="capture_saved">Frame saved: %1$s</string>
+    <string name="capture_failed">Couldn\'t extract a frame from this clip</string>
 
     <!-- Content descriptions -->
     <string name="cd_preview">preview</string>
@@ -174,6 +176,7 @@
     <string name="cd_scrub_preview">scrub preview</string>
     <string name="cd_media_badge">media type</string>
     <string name="cd_camera_status">camera range</string>
+    <string name="cd_capture_frame">save frame as photo</string>
 
     <!-- Status pill -->
     <string name="sd_card">SD card</string>

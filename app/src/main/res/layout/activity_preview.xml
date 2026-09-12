@@ -147,64 +147,102 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
-            <!-- Transport + trim row:  [   <<   play/pause   >>   ] -->
+            <!-- Transport + trim row:  📷   [   <<   play/pause   >>   ]
+                 The frame-capture button sits at the left edge (shown only while paused); a same-width
+                 spacer on the right keeps the transport group centred on the screen. -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
-                android:gravity="center"
+                android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <Button
-                    android:id="@+id/btnMarkIn"
-                    style="?android:attr/borderlessButtonStyle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:minWidth="56dp"
-                    android:text="["
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
-
-                <ImageButton
-                    android:id="@+id/btnRew"
+                <!-- Capture box: the button, a spinner while the frame is being pulled, then a ✓ -->
+                <FrameLayout
+                    android:id="@+id/captureBox"
                     android:layout_width="52dp"
-                    android:layout_height="48dp"
-                    android:layout_marginHorizontal="4dp"
-                    android:background="?android:attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="@string/cd_rewind"
-                    android:src="@android:drawable/ic_media_rew"
-                    android:tint="#FFFFFF" />
+                    android:layout_height="48dp">
 
-                <ImageButton
-                    android:id="@+id/btnPlay"
-                    android:layout_width="60dp"
-                    android:layout_height="48dp"
-                    android:background="?android:attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="@string/cd_play_pause"
-                    android:src="@android:drawable/ic_media_pause"
-                    android:tint="#FFFFFF" />
+                    <ImageButton
+                        android:id="@+id/btnCapture"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:background="?android:attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/cd_capture_frame"
+                        android:src="@drawable/ic_camera"
+                        android:visibility="invisible" />
 
-                <ImageButton
-                    android:id="@+id/btnFf"
-                    android:layout_width="52dp"
-                    android:layout_height="48dp"
-                    android:layout_marginHorizontal="4dp"
-                    android:background="?android:attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="@string/cd_fast_forward"
-                    android:src="@android:drawable/ic_media_ff"
-                    android:tint="#FFFFFF" />
+                    <ProgressBar
+                        android:id="@+id/captureSpinner"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_gravity="center"
+                        android:indeterminateTint="#FFFFFF"
+                        android:visibility="gone" />
+                </FrameLayout>
 
-                <Button
-                    android:id="@+id/btnMarkOut"
-                    style="?android:attr/borderlessButtonStyle"
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:minWidth="56dp"
-                    android:text="]"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                    android:layout_weight="1"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btnMarkIn"
+                        style="?android:attr/borderlessButtonStyle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="56dp"
+                        android:text="["
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <ImageButton
+                        android:id="@+id/btnRew"
+                        android:layout_width="52dp"
+                        android:layout_height="48dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="?android:attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/cd_rewind"
+                        android:src="@android:drawable/ic_media_rew"
+                        android:tint="#FFFFFF" />
+
+                    <ImageButton
+                        android:id="@+id/btnPlay"
+                        android:layout_width="60dp"
+                        android:layout_height="48dp"
+                        android:background="?android:attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/cd_play_pause"
+                        android:src="@android:drawable/ic_media_pause"
+                        android:tint="#FFFFFF" />
+
+                    <ImageButton
+                        android:id="@+id/btnFf"
+                        android:layout_width="52dp"
+                        android:layout_height="48dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="?android:attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/cd_fast_forward"
+                        android:src="@android:drawable/ic_media_ff"
+                        android:tint="#FFFFFF" />
+
+                    <Button
+                        android:id="@+id/btnMarkOut"
+                        style="?android:attr/borderlessButtonStyle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="56dp"
+                        android:text="]"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <Space
+                    android:layout_width="52dp"
+                    android:layout_height="48dp" />
             </LinearLayout>
         </LinearLayout>
 

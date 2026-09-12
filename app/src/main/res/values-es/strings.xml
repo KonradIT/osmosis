@@ -164,6 +164,8 @@
     <string name="edit_with">Editar con</string>
     <string name="no_app_available_share">No hay ninguna app disponible para compartir este archivo</string>
     <string name="no_app_available_edit">No hay ninguna app disponible para editar este archivo</string>
+    <string name="capture_saved">Fotograma guardado: %1$s</string>
+    <string name="capture_failed">No se pudo extraer un fotograma de este clip</string>
 
     <!-- Content descriptions -->
     <string name="cd_preview">vista previa</string>
@@ -174,6 +176,7 @@
     <string name="cd_scrub_preview">vista previa de desplazamiento</string>
     <string name="cd_media_badge">tipo de contenido</string>
     <string name="cd_camera_status">alcance de la cámara</string>
+    <string name="cd_capture_frame">guardar fotograma como foto</string>
 
     <!-- Status pill -->
     <string name="sd_card">Tarjeta SD</string>
