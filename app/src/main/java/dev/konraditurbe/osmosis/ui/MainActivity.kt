@@ -1307,11 +1307,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun updateBulkDeleteFab() {
         val n = adapter?.selectedCount() ?: 0
         val show = n > 0 && ::chipSelect.isInitialized && chipSelect.isChecked && !downloadRunning
-        findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabDelete)
-            ?.apply {
-                visibility = if (show) View.VISIBLE else View.GONE
-                text = getString(R.string.delete_selected, n)
-            }
+        val fab = findViewById<com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton>(R.id.fabDelete)
+            ?: return
+        // show()/hide() animate the FAB's own scale+fade motion, so it grows in / shrinks out instead of
+        // popping. Both are no-ops when already in the target state, so updating the count (1→2) while it
+        // is up just refreshes the label without re-animating.
+        if (show) { fab.text = getString(R.string.delete_selected, n); fab.show() } else fab.hide()
     }
 
     private fun resetGalleryChips() {
