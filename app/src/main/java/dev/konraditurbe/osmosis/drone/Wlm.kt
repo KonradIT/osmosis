@@ -1,13 +1,17 @@
 package dev.konraditurbe.osmosis.drone
 
 /**
- * The WLM (wireless-link-manager) commands a drone uses to be *put into* QuickTransfer mode.
+ * The WLM (wireless-link-manager) commands the `dji-quicktransfer` reference reads out of DJI Fly
+ * 1.21.4 as the way a current aircraft is put into QuickTransfer mode.
  *
- * Distinct from the Mavic 3's `0x51/0x02` session-open, and the distinction matters: that five-byte
- * open is one aircraft's observed trace, while this is the path the current DJI Fly handler
- * (`UAV77WiFiModeHandler`) takes on every other supported airframe. Sending the Mavic's open to a
- * Neo 2 gets silence — not because the aircraft is broken, but because it was never the command that
- * unlocks it.
+ * **UNVERIFIED — this path has never produced an entry on hardware.** It is a static reading of the
+ * handler, and the captures say otherwise: in DJI Fly's own Mini 3 QuickTransfer capture (the same
+ * `UAV77WiFiModeHandler` family as the Neo 2 and Mini 5 Pro) the entry is the five-byte `0x51/0x02`
+ * open + `0x51/0x08` challenge — the Mavic dance — sent right after the identity beacon, and the
+ * `0x51/0x04` push this path waits on never arrives during entry (it is an app-sent GET issued after
+ * the media list is already flowing). A Neo 2 and a Mini 5 Pro both went silent on it. Kept as a
+ * labelled fallback only; see `DroneSession.enterQuickTransfer`. The byte layouts below are the
+ * reference's reading, recorded as such.
  *
  * The choice is made at runtime from the aircraft's own `0x51/0x04` push, not from a model table:
  *

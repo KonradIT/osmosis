@@ -47,6 +47,13 @@ class DroneSession(
     /** The most recent `0x51/0x04` push, latched by [watch51Frames] as frames go by. */
     @Volatile private var deviceOsd: Wlm.DeviceOsd? = null
 
+    /** Which entry request the aircraft answered, so [close] can hand the link back the same way. */
+    private enum class Entry { NONE, MAVIC_CHALLENGE, SERVICE_MODE, LINK_MODE }
+    @Volatile private var enteredVia = Entry.NONE
+
+    /** Every DUML frame [dronePump] has seen, so a probe can measure the rate without a blind 1 s wait. */
+    @Volatile private var rxFrames = 0L
+
     /**
      * Serve file bytes by path over `/v2` rather than by packed index over `/v1`.
      *
@@ -165,6 +172,9 @@ class DroneSession(
         var wentAhead = false
         rxByType.clear()
         pageNo++
+        val frames0 = rxFrames
+        val seen51Before = HashMap(seen51)
+        val t0 = System.currentTimeMillis()
         val tState = "page=$pageNo seq=0x%02x cursor=%d(file %d) udpSeq=0x%04x chan=0x%04x t=%.1fs"
             .format(seq, cursor, cursor and 0xFFFF, tx.seq, tx.cameraChannel,
                 (System.currentTimeMillis() - sessionStartMs) / 1000.0)
@@ -215,6 +225,12 @@ class DroneSession(
                 "%02x/%02x×%d".format(it.key shr 8, it.key and 0xFF, it.value)
             }.ifEmpty { "(no 0x00/0x27 frames)" }
             log("datalink: drone list FAILED $tState after ${blob.size()}B data; rx [$rx]; frames $what")
+            // The sink above holds only pktType 0x03, so a chatty link that never sends 0x00/0x27 looked
+            // identical to a dead one there. Count every DUML frame the pump saw and what the 0x51
+            // channel said meanwhile — on a new airframe that is the only evidence of its state.
+            val elapsed = maxOf(1L, System.currentTimeMillis() - t0)
+            log("datalink: during the query — ${rxFrames - frames0} DUML frames " +
+                "(${(rxFrames - frames0) * 1000 / elapsed}/s); 0x51: ${census51Delta(seen51Before)}")
             return emptyList()
         }
         log("datalink: drone list OK $tState — ${chunks.size} chunks, rx [$rx]")
@@ -431,11 +447,11 @@ class DroneSession(
      * TODO: the UUID is the one DJI Fly minted on this phone. If this turns out to matter, test whether
      * an arbitrary UUID is accepted rather than shipping a captured identity.
      */
-    private val droneIdentityFrame = hex(
-        "5544041aeee97c000051130004020037386565383937622d643231392d343964642d" +
+    private val droneIdentityFrame by lazy {   // lazy: the id constants below initialise after this
+        hex("5544041aeee97c000051130004020037386565383937622d643231392d343964642d" +
             "000401040000000000000100000101018d01000084dc22000000e00c00000000" +
-            "f5e439fdb2ae020a000000ffffffff010000000000000000"
-    )
+            "f5e4") + tail51(broadcast = true)
+    }
     private var droneIdentityCounter = 0x018D
     private val droneStartMs = System.currentTimeMillis()
 
@@ -446,8 +462,52 @@ class DroneSession(
      */
     private val appId51 = "78ee897b-d219-49dd-".toByteArray(Charsets.US_ASCII)
 
-    /** Common 22-byte wrapper tail; byte 5 is the counter `sendDumlRaw` re-stamps per frame. */
-    private val trailing51 = hex("39fdb2ae020100000079102e9b010000000000000000")
+    /**
+     * The 22-byte tail every `0x51/0x01` tunnel frame carries after the inner DUML frame is an
+     * **address header**, not padding:
+     *
+     * ```
+     * [src id u32] 02 [seq u32 LE] [dst id u32] 01 [6 bytes: flags + link MAC on the aircraft side] 00 00
+     * ```
+     *
+     * Read off three captures. The aircraft's own id is the `src` of its beacons; DJI Fly sends the
+     * `0x51/0x13` identity reply to `ff ff ff ff` (broadcast) and **every unicast frame — the open, the
+     * challenge answer, `0x51/0x06` — to the aircraft's id**, which the aircraft echoes back as `dst`
+     * on its challenge. Mavic 3: `79 10 2e 9b`; Mini 3: `ce 03 c9 93`.
+     *
+     * We had replayed the Mavic capture's tail verbatim, so every open went out addressed to *that
+     * Mavic*. It worked on the Mavic 3 because it was the same aircraft as the capture — and was
+     * silently dropped by a Neo 2 and a Mini 5 Pro, which is exactly what "ignores every open, keeps
+     * beaconing" looks like. The id is learned from the first beacon ([wlmPeerId]).
+     */
+    private val appWlmId = hex("39fdb2ae")
+    private val broadcastWlmId = hex("ffffffff")
+
+    /** This aircraft's WLM id, the `src` of its `0x51` tail. Null until its first frame arrives. */
+    @Volatile private var wlmPeerId: ByteArray? = null
+
+    /**
+     * The byte after the tail's `dst 01` — a link flag whose value differs by Fly firmware generation:
+     *
+     * | | broadcast (`0x51/0x13`) | unicast (open, `0x06`) |
+     * |---|---|---|
+     * | Mavic 3 (old capture) | `0x00` | `0x00` |
+     * | Mini 3 (modern capture) | `0x82` | `0xe2` |
+     *
+     * The Mini 3 is the only *modern* UAV77 aircraft whose open we have on the wire, and its open is
+     * challenged in ~10 ms — so on any non-Mavic aircraft (the Mini 5 Pro included) the modern value is
+     * the faithful bet, where the Mavic's `0x00` is what a stale replay of the old capture would send.
+     * Mavic keeps `0x00`, since that is the value hardware-verified on it.
+     */
+    private val wlmUnicastFlag = if (modelId == MAVIC_3_MODEL_ID) 0x00 else 0xE2
+    private val wlmBroadcastFlag = if (modelId == MAVIC_3_MODEL_ID) 0x00 else 0x82
+
+    /** A fresh tail: [seq] is re-stamped by `sendDumlRaw`, [dst] is the aircraft unless [broadcast]. */
+    private fun tail51(broadcast: Boolean = false): ByteArray =
+        appWlmId + byteArrayOf(0x02, 0, 0, 0, 0) +
+            (if (broadcast) broadcastWlmId else (wlmPeerId ?: broadcastWlmId)) +
+            byteArrayOf(0x01, (if (broadcast) wlmBroadcastFlag else wlmUnicastFlag).toByte(),
+                0, 0, 0, 0, 0, 0, 0)
 
     /** The drone's serial, read from its own `0x51/0x13` beacon. Length varies by model. */
     @Volatile private var droneSerial: ByteArray? = bleSerial?.first
@@ -458,6 +518,9 @@ class DroneSession(
     /** Every `0x51` sub-command seen, so a drone that never beacons is distinguishable from one whose
      *  beacon we failed to parse. Those need completely different fixes. */
     private val seen51 = LinkedHashMap<Int, Int>()
+    /** First body seen per `0x51` sub-command, so an unfamiliar reply is logged with its bytes rather
+     *  than as a bare count — on a new airframe the bytes are the only evidence there is. */
+    private val firstBody51 = LinkedHashMap<Int, ByteArray>()
     /** First `0x51/0x13` payload seen, kept verbatim for the log when the serial can't be read out. */
     @Volatile private var beacon13: ByteArray? = null
 
@@ -472,12 +535,25 @@ class DroneSession(
      *  that loop always timed out and sent the *next* airframe's open to an aircraft that had
      *  already replied. */
     private fun watch51Frames(raw: ByteArray) {
-        for ((set, cmd, pl) in scanFrames(raw)) {
+        val frames = scanFrames(raw)
+        rxFrames += frames.size
+        for ((set, cmd, pl) in frames) {
             if (set != 0x51 || cmd != 0x01 || pl.size < 13 || (pl[0].toInt() and 0xFF) != 0x55) continue
             val ln = (pl[1].toInt() and 0xFF) or ((pl[2].toInt() and 0x03) shl 8)
             if (ln > pl.size) continue
             val inner = pl[10].toInt() and 0xFF
             seen51[inner] = (seen51[inner] ?: 0) + 1
+            if (inner !in firstBody51) firstBody51[inner] = pl.copyOfRange(11, maxOf(11, ln - 2))
+            // The aircraft names itself in the tail's src field on every frame it sends. Latch it from
+            // the first — the open has to be addressed to it or it is dropped without a word.
+            if (wlmPeerId == null && pl.size >= ln + 22 && pl[ln + 4].toInt() == 0x02) {
+                val id = pl.copyOfRange(ln, ln + 4)
+                if (!id.contentEquals(broadcastWlmId) && !id.contentEquals(appWlmId)) {
+                    wlmPeerId = id
+                    log("datalink: aircraft WLM id ${id.joinToString("") { "%02x".format(it) }} " +
+                        "(tail src of its 0x51/0x%02x) — unicast 0x51 frames now addressed to it".format(inner))
+                }
+            }
             // 0x04 is wlm_dev_osd_push, which decides the entry flow — always latched, even once the
             // serial is known, because the aircraft's version byte can only be read from it.
             if (inner == Wlm.CMD_DEVICE_OSD_PUSH) {
@@ -512,14 +588,31 @@ class DroneSession(
         val inner = seen51.entries.joinToString(", ") { "0x%02x×%d".format(it.key, it.value) }
         log("datalink: 0x51 inner cmds seen: ${if (inner.isEmpty()) "NONE" else inner}")
         beacon13?.let {
-            log("datalink: a 0x51/0x13 beacon DID arrive but carried no readable serial — payload " +
-                it.copyOfRange(0, minOf(64, it.size)).joinToString("") { b -> "%02x".format(b) })
+            val hex = it.copyOfRange(0, minOf(64, it.size)).joinToString("") { b -> "%02x".format(b) }
+            log("datalink: 0x51/0x13 beacon " +
+                (if (droneSerial == null) "arrived but carried no readable serial" else "as received") +
+                " — payload $hex" + (beaconLinkMode()?.let { m -> " (byte0=0x%02x, link-mode byte=0x%02x)"
+                    .format(it[0].toInt() and 0xFF, m) } ?: ""))
         }
+    }
+
+    /**
+     * The byte at offset 8 of the 15-byte flag block that follows the serial in the aircraft's
+     * `0x51/0x13` beacon. On both aircraft whose open we have captured it reads `0x05`, and `0x05` is
+     * also the first byte of the five-byte `0x51/0x02` open DJI Fly then sends (`05 01 04 01 00`,
+     * `05 ff 04 02 00`) — which reads as "current link mode, …, requested mode 4 (WIFI_ONLY)". A Mini 5
+     * Pro beacons `0x04` there. Not established; logged for diagnosis, never used to build a request.
+     */
+    private fun beaconLinkMode(): Int? {
+        val b = beacon13 ?: return null
+        val serialLen = droneSerial?.size ?: return null
+        val at = 4 + serialLen + 8
+        return if (b.size > at) b[at].toInt() and 0xFF else null
     }
 
     /** One `0x51`-channel frame: inner DUML (target 0xe9ee) + the shared 22-byte tail. */
     private fun frame51(cmd: Int, flags: Int, innerId: Int, payload: ByteArray): ByteArray =
-        DjiMessage(0xE9EE, innerId, flags or (0x51 shl 8) or (cmd shl 16), payload).encode() + trailing51
+        DjiMessage(0xE9EE, innerId, flags or (0x51 shl 8) or (cmd shl 16), payload).encode() + tail51()
 
     /**
      * `00 00 <tag> <serial> 00` — the body of both `0x51/0x08` and `0x51/0x06` responses.
@@ -544,62 +637,118 @@ class DroneSession(
      * session. Trying is cheap and self-evidencing: the aircraft answers a `0x51/0x08` challenge to
      * the open it understands, and ignores the other. DJI Fly sends its own open twice regardless.
      */
-    /** Per-variant wait for a `0x51/0x08` challenge. Sized for the Mavic 3, the slowest observed. */
-    private val OPEN_CHALLENGE_WAIT_MS = 2000L
-
     private val openRequests = listOf(
         "0501040100",   // Mavic 3 (hardware-verified end to end)
         "05ff040200",   // Mini 3 (PCAPdroid capture, 2026-08-09)
     )
 
     /**
-     * Put the aircraft into QuickTransfer, by whichever route it actually uses.
+     * Put the aircraft into QuickTransfer. Three tiers of evidence live here — keep them straight:
      *
-     * There are two, and they are not variants of one another. The Mavic 3's
-     * `0x51/0x02 → 0x08 → 0x06 → 0x06` challenge is a captured trace from that airframe; every other
-     * supported aircraft is driven by the current DJI Fly handler's runtime decision, which waits for
-     * the aircraft's own `0x51/0x04` push and picks from its message-version byte ([Wlm]).
+     * **Verified on hardware:** the `0x51/0x02 → 0x08 → 0x06 → 0x06` open ([droneSessionOpen]), end to
+     * end on a Mavic 3. DJI Fly's own Mini 3 QuickTransfer capture shows the same dance as the entry for
+     * the `UAV77WiFiModeHandler` family the Neo 2 and Mini 5 Pro share: the open goes out right after
+     * the identity beacon and the aircraft challenges within ~10 ms, before any device-OSD, service-mode
+     * or ability negotiation. So every aircraft gets the open.
      *
-     * Sending the Mavic's open to a Neo 2 produces nothing at all — the aircraft keeps beaconing and
-     * the frame rate never climbs. That reads like refusal, but it is simply the wrong command: the
-     * Neo never advertises the challenge the Mavic answers with, so waiting for `0x51/0x08` there is
-     * waiting for a frame that was never coming.
+     * **Capture-derived, unverified on non-Mavic hardware:** the open must be *addressed* to the
+     * aircraft — the 22-byte wrapper tail carries its WLM id as `dst` plus a modern-Fly flag byte
+     * ([tail51]). Every build that ran on a Neo 2 or a Mini 5 Pro before this sent the Mavic capture's
+     * tail verbatim, i.e. addressed to a different aircraft, so their silence never tested the open.
+     *
+     * **Unverified — has never produced an entry:** the WLM device-OSD path ([wifiFastEnter], [Wlm]):
+     * wait for a `0x51/0x04` push, then `0x51/0x1a`. A static reading of the handler; no capture shows
+     * an aircraft pushing `0x51/0x04` during entry (in the Mini 3 capture it is an app-sent GET issued
+     * after the media list is already flowing). Kept only as a labelled fallback, so a run that reaches
+     * it says so in the log instead of trying it silently.
      */
     private fun enterQuickTransfer() {
         val product = DroneProducts.of(modelId)
         log("datalink: aircraft ${product?.name ?: "unknown"}" +
             (modelId?.let { " (0x%04x)".format(it) } ?: "") +
             " — media over ${if (httpV2) "/v2 by path" else "/v1 by packed index"}")
-        if (modelId == MAVIC_3_MODEL_ID) { droneSessionOpen(); return }
-        log("datalink: entering QuickTransfer via the WLM handler")
-        if (!wifiFastEnter()) {
-            // Not a fallback to the Mavic dance: that would send a challenge-open to an aircraft that
-            // has just told us it speaks the other protocol. Carry on and let the media query be the
-            // test — a drone that entered on its own still answers, and one that did not now says so
-            // with the OSD evidence rather than a bare timeout.
-            log("datalink: WLM entry did not complete — continuing, the media query will show whether " +
-                "the aircraft is serving")
+        awaitWlmPeerId()
+        droneSessionOpen(OPEN_CHALLENGE_WAIT_MS)
+        if (enteredVia != Entry.NONE || modelId == MAVIC_3_MODEL_ID) return
+
+        // UNVERIFIED fallback — see above. Reached only when the open drew no challenge.
+        log("datalink: open not challenged — trying the UNVERIFIED WLM device-OSD path " +
+            "(0x51/0x04 → 0x51/0x1a); it has never worked on hardware")
+        val deadline = System.currentTimeMillis() + OSD_WAIT_MS
+        while (deviceOsd == null && System.currentTimeMillis() < deadline) dronePump(100)
+        if (deviceOsd == null) {
+            log("datalink: no 0x51/0x04 push in ${OSD_WAIT_MS} ms — the WLM path has nothing to act on " +
+                "(as on every run so far)")
+        } else if (wifiFastEnter() && enteredVia != Entry.NONE) return
+        log("datalink: no entry accepted — continuing, the media query is the last test")
+        logBeaconDiagnostics()
+    }
+
+    /** The aircraft beacons twice a second, so its id is normally in hand before this is reached; the
+     *  wait only matters when BLE supplied the serial and no datalink frame has been looked at yet. */
+    private fun awaitWlmPeerId() {
+        val deadline = System.currentTimeMillis() + PEER_ID_WAIT_MS
+        while (wlmPeerId == null && System.currentTimeMillis() < deadline) dronePump(100)
+        if (wlmPeerId == null)
+            log("datalink: no 0x51 frame from the aircraft in ${PEER_ID_WAIT_MS} ms — its WLM id is " +
+                "unknown, so unicast frames go to ff ff ff ff (broadcast); expect them to be ignored")
+    }
+
+    /** What one probe rung got back: new `0x51` sub-commands and the frame rate during the window. */
+    private class ProbeResult(val newInner: Map<Int, Int>, val framesPerSec: Long) {
+        /** Answered if the aircraft replied on [cmd], or the link went from keepalive to streaming. */
+        fun answered(cmd: Int) = (newInner[cmd] ?: 0) > 0 || framesPerSec >= STREAMING_FRAMES_PER_SEC
+    }
+
+    /** Send one entry request and watch the `0x51` channel for [ms], logging exactly what came back. */
+    private fun probe(label: String, ms: Long, send: () -> Unit): ProbeResult {
+        val before = HashMap(seen51)
+        val frames0 = rxFrames
+        val t0 = System.currentTimeMillis()
+        send()
+        log("datalink: $label sent")
+        dronePump(ms)
+        val elapsed = maxOf(1L, System.currentTimeMillis() - t0)
+        val rate = (rxFrames - frames0) * 1000 / elapsed
+        val delta = seen51.mapNotNull { (k, v) ->
+            val n = v - (before[k] ?: 0)
+            if (n > 0) k to n else null
+        }.toMap()
+        log("datalink: after $label — ${census51Delta(before)}; $rate frames/s")
+        return ProbeResult(delta, rate)
+    }
+
+    /** `0x51` sub-commands seen since [before], each with the first body ever seen on it (beacons
+     *  excepted — theirs is logged once by [logBeaconDiagnostics]). */
+    private fun census51Delta(before: Map<Int, Int>): String {
+        val delta = seen51.mapNotNull { (k, v) ->
+            val n = v - (before[k] ?: 0)
+            if (n > 0) k to n else null
+        }
+        if (delta.isEmpty()) return "nothing on 0x51"
+        return delta.joinToString(", ") { (k, n) ->
+            val body = firstBody51[k]?.let { b ->
+                b.copyOfRange(0, minOf(48, b.size)).joinToString("") { "%02x".format(it) }
+            } ?: ""
+            "51/%02x×%d".format(k, n) + if (k != 0x13 && body.isNotEmpty()) "[$body]" else ""
         }
     }
 
     /**
-     * The current handler's entry: wait for the aircraft's `0x51/0x04`, then switch service mode or
-     * fall back to a link-mode switch. Returns whether a request was actually issued.
+     * **UNVERIFIED — has never produced an entry on hardware.** The static reading of the current
+     * handler: given a `0x51/0x04` push, switch service mode or fall back to a link-mode switch.
+     * Returns whether a request was issued; sets [enteredVia] when the aircraft answered it. See
+     * [enterQuickTransfer] for why it is a fallback and not the entry.
      */
     private fun wifiFastEnter(): Boolean {
-        val deadline = System.currentTimeMillis() + OSD_WAIT_MS
-        while (deviceOsd == null && System.currentTimeMillis() < deadline) dronePump(200)
-        val osd = deviceOsd ?: run {
-            log("datalink: no WLM device OSD (0x51/0x04) in ${OSD_WAIT_MS} ms — cannot choose an entry flow")
-            logBeaconDiagnostics()
-            return false
-        }
-
+        val osd = deviceOsd ?: return false
         if (osd.serviceModeSupported) {
-            sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
-                Wlm.CMD_SERVICE_MODE_SWITCH, 0x40, 0x007C,
-                Wlm.serviceModeRequest(enter = true, serial = droneSerial)))
-            log("datalink: 51/1a sent — download service to WIFI_HIGHSPEED")
+            val r = probe("51/1a service mode (OSD version ${osd.messageVersion})", PROBE_WAIT_MS) {
+                sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
+                    Wlm.CMD_SERVICE_MODE_SWITCH, 0x40, 0x007C,
+                    Wlm.serviceModeRequest(enter = true, serial = droneSerial)))
+            }
+            if (r.answered(Wlm.CMD_SERVICE_MODE_SWITCH)) enteredVia = Entry.SERVICE_MODE
         } else {
             val liveview = osd.liveviewLinkModeForFallback ?: run {
                 // Sending a live-view mode the aircraft is not in is worse than not asking: the request
@@ -609,29 +758,30 @@ class DroneSession(
                     "the 51/02 fallback body")
                 return false
             }
-            sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
-                Wlm.CMD_LINK_MODE_SWITCH, 0x40, 0x007C,
-                Wlm.linkModeRequest(Wlm.LINK_MODE_WIFI_ONLY, liveview)))
-            log("datalink: 51/02 link-mode switch sent — WIFI_ONLY, live-view $liveview")
+            val r = probe("51/02 link mode WIFI_ONLY (live-view $liveview)", PROBE_WAIT_MS) {
+                sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
+                    Wlm.CMD_LINK_MODE_SWITCH, 0x40, 0x007C,
+                    Wlm.linkModeRequest(Wlm.LINK_MODE_WIFI_ONLY, liveview)))
+            }
+            if (r.answered(Wlm.CMD_LINK_MODE_SWITCH)) enteredVia = Entry.LINK_MODE
         }
-        dronePump(600)
         return true
     }
 
-    /** Hand the link back, mirroring whichever entry ran. Best-effort; never throws. */
+    /** Hand the link back, mirroring whichever entry the aircraft accepted. Best-effort; never throws. */
     private fun exitQuickTransfer() {
-        if (modelId == MAVIC_3_MODEL_ID) return   // the Mavic trace has no close command
-        val osd = deviceOsd ?: return
         runCatching {
-            if (osd.serviceModeSupported) {
-                sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
+            when (enteredVia) {
+                Entry.NONE, Entry.MAVIC_CHALLENGE -> return   // the Mavic trace has no close command
+                Entry.SERVICE_MODE -> sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
                     Wlm.CMD_SERVICE_MODE_SWITCH, 0x40, 0x007C,
                     Wlm.serviceModeRequest(enter = false, serial = droneSerial)))
-            } else {
-                val liveview = osd.liveviewLinkModeForFallback ?: return
-                sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
-                    Wlm.CMD_LINK_MODE_SWITCH, 0x40, 0x007C,
-                    Wlm.linkModeRequest(Wlm.LINK_MODE_COMMON, liveview)))
+                Entry.LINK_MODE -> {
+                    val liveview = deviceOsd?.liveviewLinkModeForFallback ?: return
+                    sendDumlRaw(0xE93B, 0x51, 0x01, frame51(
+                        Wlm.CMD_LINK_MODE_SWITCH, 0x40, 0x007C,
+                        Wlm.linkModeRequest(Wlm.LINK_MODE_COMMON, liveview)))
+                }
             }
             dronePump(200)
             log("datalink: WLM download service handed back to COMMON")
@@ -670,7 +820,7 @@ class DroneSession(
      * anything that answers step 1. So the beacon is now only a *fast path*: step 1 goes out either
      * way, and the challenge supplies the serial when the beacon didn't.
      */
-    private fun droneSessionOpen() {
+    private fun droneSessionOpen(challengeWaitMs: Long) {
         val sink = java.io.ByteArrayOutputStream()
         // Fast path: a Mavic 3 beacons its serial unprompted, so give it a moment to. [dronePump]
         // latches per-datagram, which also fixes a straddle bug in the old probe loop — it rescanned
@@ -687,12 +837,13 @@ class DroneSession(
         // reply to it is the step-2 challenge, which *names the serial*. Bailing here was circular:
         // no serial meant no open, and no open meant no challenge to learn the serial from. Every
         // airframe whose beacon we can't parse died on that loop without us ever asking it anything.
-        for ((n, body) in openRequests.withIndex()) {
+        val requests = openRequests
+        for ((n, body) in requests.withIndex()) {
             // Count challenges that arrive *after* this open, not in total: an aircraft that already
             // challenged for some other reason would otherwise satisfy the first variant for free.
             val challengesBefore = seen51[0x08] ?: 0
             sendDumlRaw(0xE93B, 0x51, 0x01, frame51(0x02, 0x40, 0x007C, hex(body)))
-            log("datalink: 51/02 open sent, variant ${n + 1}/${openRequests.size} ($body)" + when {
+            log("datalink: 51/02 open sent, variant ${n + 1}/${requests.size} ($body)" + when {
                 droneSerial == null -> " — listening for the challenge to name a serial"
                 bleSerial != null -> " (serial from BLE)"
                 else -> " (serial from the datalink beacon)"
@@ -706,11 +857,12 @@ class DroneSession(
             // than a timing guess. Two seconds is the value already tuned elsewhere in this method for
             // the Mavic's challenge; the cost is that a Mini 3 waits that long before its correct open,
             // which is cheap next to getting the first one wrong.
-            val until = System.currentTimeMillis() + OPEN_CHALLENGE_WAIT_MS
+            val until = System.currentTimeMillis() + challengeWaitMs
             while ((seen51[0x08] ?: 0) == challengesBefore && System.currentTimeMillis() < until)
                 dronePump(100, sink)
             if ((seen51[0x08] ?: 0) > challengesBefore) {
                 log("datalink: variant ${n + 1} answered (0x51/08) — not trying the rest")
+                enteredVia = Entry.MAVIC_CHALLENGE
                 break
             }
         }
@@ -950,7 +1102,24 @@ class DroneSession(
          */
         const val MAVIC_3_MODEL_ID = 0x0070
 
-        /** How long to wait for the `0x51/0x04` push that chooses the entry flow. */
-        const val OSD_WAIT_MS = 8000L
+        /** Per-variant wait for a `0x51/0x08` challenge on the Mavic path. Sized for the Mavic 3, the
+         *  slowest observed: 700 ms was not enough, it answered only after the next variant had gone. */
+        const val OPEN_CHALLENGE_WAIT_MS = 2000L
+
+        /**
+         * How long the ladder waits for the `0x51/0x04` push before probing blind. Short on purpose:
+         * the aircraft's AP has a ~16 s life without an accepted entry, and the ladder has three more
+         * rungs to fit inside it.
+         */
+        const val OSD_WAIT_MS = 1500L
+
+        /** How long to wait for the first aircraft `0x51` frame, which carries its WLM id. */
+        const val PEER_ID_WAIT_MS = 3000L
+
+        /** How long each ladder rung gets to be answered. A Mini 3 challenges in ~10 ms. */
+        const val PROBE_WAIT_MS = 1500L
+
+        /** Frames/s that mean "session open": an unopened link idles at ~2–5, an open one at 600+. */
+        const val STREAMING_FRAMES_PER_SEC = 100L
     }
 }
