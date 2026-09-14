@@ -76,10 +76,11 @@ id, not name — bodies get renamed.
 | Osmo Pocket 4 Pro | `0x0022` | `OsmoPocket4P` | 9004 | yes | WPA2 |
 | Mavic 3 | `0x0070` | *(varies)* | **9003** | **no** | WPA2 |
 | DJI Neo 2 | `0x007e` | *(varies)* | **9003** | **no** | WPA2 |
+| DJI Mini 5 Pro | `0x0079` | `DJI-MINI5PRO-XXXX` | **9003** | **no** | WPA2 |
 
 - **Osmo Action (1)** uses the index-based list ([§1](#1-get-media-list), "Parsed — index-based") and addresses media by numeric index.
 - **Osmo 360** pairs and hands over credentials but its AP never comes up; it does not reach the datalink. It advertises an extra `fff7` characteristic.
-- **Mavic 3 / Neo 2** are aircraft: `udp/9003`, no poke, `0x51` session-open first ([§27](#27-session-open-0x51--required-before-anything-else-mavic-3), [§27a](#27a-neo-2--the-same-transport-a-different-unlock)).
+- **Mavic 3 / Neo 2 / Mini 5 Pro** are aircraft: `udp/9003`, no poke, `0x51` session-open first ([§27](#27-session-open-0x51--required-before-anything-else-mavic-3), [§27a](#27a-neo-2--the-same-transport-a-different-unlock), [§27b](#27b-mini-5-pro--what-is-verified-what-is-capture-derived-what-never-worked)).
 - **Xtra Edge Pro** is an Action 5 Pro rebrand with the same model id. Distinguish it by OUI `EC:9E:EA`. Datalink on `10004`, no poke. Answers nothing on camera-control cmdset `0x02` ([§10–17](#camera-control)).
 - **Two advert formats.** Pocket 4 carries the classic model byte. Pocket 4 Pro uses the newer form: flag bit at payload byte 5 marks a 16-bit product type at bytes 10–11 (`218` = Pocket 4 Pro). A client reading only the classic field sees `0x0000` for the Pro.
 - **Unrecognised body:** try `9004` + poke + WPA2, then the alternate (`10004` / no poke).
@@ -1007,15 +1008,17 @@ quick presses instead).
 
 Everything below is the Mavic 3 family (Mavic 3, Classic, Pro) unless stated.
 
-| | Mavic 3 | Neo 2 |
-|---|---|---|
-| BLE pair, `DJI FLY` token | yes | yes |
-| WiFi creds over `0x07/0x07` + `0x07/0x0e` | yes | yes |
-| Datalink | udp/9003 | udp/9003 |
-| Handshake reply | 9 B | 15 B ([§27a](#27a-neo-2--the-same-transport-a-different-unlock)) |
-| Serial tag in the `0x51/0x13` beacon | `0x11` | `0x24` |
-| Answers `0x51/0x02` session-open | yes | **no** |
-| Media list | yes | not reached |
+| | Mavic 3 | Neo 2 | Mini 5 Pro |
+|---|---|---|---|
+| BLE pair, `DJI FLY` token | yes | yes | yes |
+| WiFi creds over `0x07/0x07` + `0x07/0x0e` | yes | yes | yes |
+| Datalink | udp/9003 | udp/9003 | udp/9003 |
+| Handshake reply | 9 B | 15 B ([§27a](#27a-neo-2--the-same-transport-a-different-unlock)) | 9 B |
+| Serial tag in the `0x51/0x13` beacon | `0x11` | `0x24` | `0x21` |
+| Answers `0x51/0x02` session-open | yes | **no**¹ | **no**¹ |
+| Media list | yes | not reached | not reached |
+
+¹ Every run so far sent the open addressed to the *Mavic capture's* aircraft id — see the tail structure in [§27](#27-session-open-0x51--required-before-anything-else-mavic-3). A correctly addressed open has not yet been tried on either.
 
 Differences from an Osmo camera:
 
@@ -1045,7 +1048,7 @@ Addressing byte unchanged (App `0x02`, Camera `0x01`). The `0x51` channel uses i
 | 6 | ⇄ | `0x51/0x06` | `0xC0` | serial echo, both directions |
 
 - **Serial** = 20 uppercase alphanumerics in the drone's `0x51/0x13` beacon, preceded by a tag byte (`0x11` Mavic 3, `0x24` Neo 2). Find it by shape, echo the tag in steps 4–5.
-- **Trailing bytes** `39fdb2ae 02 <ctr> 00 00 00 79102e9b 01 00×8` — `ctr` must increase on every `0x51` frame sent; a repeat is dropped as a replay.
+- **Trailing 22 bytes are an address header**, not padding *(capture-derived: Mavic 3, Mini 3 and our own captures agree)*: `[src id u32] 02 [seq u32 LE] [dst id u32] 01 [flag] [6 B: link MAC on the aircraft side, else 0] 0`. The aircraft's id is the `src` of its beacons (Mavic 3 `79 10 2e 9b`, Mini 3 `ce 03 c9 93`); the app picks its own. The `0x51/0x13` identity reply goes to `ff ff ff ff`; **every unicast frame — the open, steps 4–6 — goes to the aircraft's id**, and the aircraft addresses its challenge to the app's. `seq` must increase on every `0x51` frame sent; a repeat is dropped as a replay. The `flag` byte is `0x00` in the old Mavic capture and `0x82` (broadcast) / `0xe2` (unicast) in the Mini 3 capture. A frame addressed to another aircraft's id is dropped silently — which is what replaying the Mavic capture's tail verbatim did on every non-Mavic airframe until 2026-09-13.
 - **Outer DUML message id** is a per-frame counter from `1`.
 - Before the session opens the drone emits ~2 frames/s; after, ~1200 frames/s. The jump is the tell.
 
@@ -1063,6 +1066,53 @@ Pairing, credentials, join and handshake on udp/9003 all complete. The aircraft 
 - The AP drops ~16 s after joining while the session is unopened.
 
 Unlock sequence: unknown. [§29](#29-http-media-api-v1--dcf-indexed) has not been exercised on a Neo 2.
+
+> [!NOTE]
+> The "DJI Fly never sends `0x51/0x02` to a Neo" observation comes from a *flight-link* capture of the
+> original Neo (the `neo-control` reference), not from QuickTransfer. It says how the app arms the
+> aircraft to fly, not how it opens media transfer, so it does not rule the `0x51` entry out — and the
+> Mini 3 capture below shows that entry *is* the `0x51/0x02` open on this handler family.
+
+### 27b. Mini 5 Pro — what is verified, what is capture-derived, what never worked
+
+Three tester runs (2026-09-12/13, `0x0079`) plus a decode of DJI Fly's own **Mini 3** QuickTransfer
+capture (`reference/captures/wifi/mini3_2026-08-09_2322.pcap`), which uses the same
+`UAV77WiFiModeHandler` the Mini 5 Pro does. Evidence is tiered on purpose.
+
+**Verified on hardware (Mini 5 Pro):** pairing (`ALREADY PAIRED`), credentials, the join, the udp/9003
+handshake (9-byte reply, same as a Mavic), and its serial in the `0x51/0x13` beacon — tag `0x21`, 20
+ASCII characters, beacon byte 0 `0x00`, flag byte 8 after the serial `0x04` (Mavic 3 and Mini 3 both
+send `0x05` there). Then nothing: every open ignored, `0x51` census beacons only, ~1–2 DUML frames/s,
+`r0-1` frozen through the whole prelude (no command of any set accepted). The AP dropped 15.8 s after
+the join on run 1 and held ~29 s on run 3 — the teardown is real but not deterministic.
+
+**Capture-derived (Mini 3 = same handler; not yet run on a Mini 5 Pro):**
+
+- **The five-byte `0x51/0x02` open IS the entry.** Fly sends it right after the identity beacon
+  (`t=7.09`) and the aircraft challenges `0x51/0x08` within ~10 ms, unconditionally — before any
+  device-OSD, service-mode switch or ability negotiation. Our inner open frame matches Fly's
+  byte-for-byte; only the wrapper tail differed (addressed to the Mavic capture's aircraft, flag
+  `0x00`), and every Mini 5 Pro run so far carried that wrong tail. So the aircraft never *refused* an
+  open; it never received one addressed to it.
+- **`0x51/0x04` is not a gating push.** In that capture it is an *app-sent GET* issued at `t=9.05`,
+  after the media list is already flowing. Nothing in any capture we hold shows an aircraft pushing it
+  during entry.
+- **After the challenge Fly runs a setup barrage before the list**, all tunnelled in `0x51/0x01`:
+  `0x51/0x34` (ability + serial) → `0x00/0x51` serial → `0x00/0x99` camera capability → **`0x00/0x4a`
+  set-time** → **`0x00/0x32` activation** (country `3131`) → `0x08/0x41` wifi-ground-start → FLYC /
+  camera setup → **`0x00/0x26` media list** (`t=8.48`). We send none of it yet. Fly's
+  `WifiFastConnectCore.enterWifiModeByUserIntent` waits on `WifiAbilityNegotiateInfo.isNegotiateInfoValid()`
+  — the post-challenge establish, not the gate.
+
+**Unverified — never produced an entry on hardware:** the WLM device-OSD path (`0x51/0x04` →
+`0x51/0x1a` service-mode switch, or the three-byte `0x51/0x02` link-mode fallback) — a static reading
+of the current handler from the `dji-quicktransfer` reference. A Neo 2 and a Mini 5 Pro both went
+silent on it, and the capture above says it is not the entry. It survives in `Wlm.kt` as a labelled
+fallback only.
+
+**Next:** one run with the correctly addressed open (`dst` = the aircraft's beacon `src`, flag `0xe2`),
+or better a PCAPdroid capture of DJI Fly's own QuickTransfer on a Mini 5 Pro — cold start, through a
+photo and a video download — which settles the entry and the barrage in one file.
 
 ### 28. Get media list (drone)
 - Cmd Set / ID: `0x00` / `0x26`  ·  App → Camera(`0x01`)  ·  datalink  ·  response `0x00/0x27`

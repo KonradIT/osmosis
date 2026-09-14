@@ -88,7 +88,22 @@ duration, fps, resolution and size, all manifest fields, and nothing about expos
   (a Mavic 3's length), or the Neo 2 never emits the beacon. A failed open now logs every `0x51` inner
   command and dumps any `0x13` payload, so the next run tells them apart. Secondary: its AP dropped
   ~16 s in, 112 ms *before* the list query went out.
-- **Mini 3** — model byte unknown, so it resolves only by the `DRONE_ID_FLOOR` guess. It also enters
+- **Mini 5 Pro (`0x0079`) — same wall as the Neo 2; the evidence is now tiered.** Pairs, hands over
+  creds, handshakes, beacons a 20-char serial (tag `0x21`) — then ignores every open, `0x51` census
+  beacons only, `r0-1` frozen through the prelude, AP torn down 15.8 s after the join on one run and
+  held ~29 s on another ([MEDIA_PROTOCOL §27b](MEDIA_PROTOCOL.md#27b-mini-5-pro--what-is-verified-what-is-capture-derived-what-never-worked)).
+  **Verified:** the `0x51/0x02 → 0x08 → 0x06` open (Mavic 3 hardware; and DJI Fly's own Mini 3 capture
+  shows it is the entry for this handler family, challenged in ~10 ms before any OSD or service-mode
+  step). **Capture-derived, not yet run on the aircraft:** the 22-byte `0x51` wrapper tail is an
+  address header — every run so far sent the open addressed to the *Mavic capture's* aircraft id, so
+  the silence never tested the open; the tail now carries the aircraft's own beacon `src` as `dst`.
+  **Unverified, never worked:** the WLM `0x51/0x04 → 0x51/0x1a` path from the `dji-quicktransfer`
+  static reading — the `0x51/0x04` it waits on is an app-sent GET issued *after* the list in the Mini 3
+  capture, not a gate; kept in `Wlm.kt` as a labelled fallback. **Blocker:** one run with the addressed
+  open, or a cold-start PCAPdroid capture of DJI Fly's QuickTransfer on the aircraft through a photo +
+  video download. After the challenge lands, the post-challenge barrage (set-time, activation, camera
+  capability, ability negotiation) is the next build-out.
+- **Mini 3** — `0x0075` per the Fly roster (`DroneProducts`), never seen advertising. It also enters
   QuickTransfer differently: no hold-to-confirm at all, **three quick power-button presses** instead,
   which is why the approval dialog needs its own line for it.
 - **Delete and favourite are camera-only.** Drone records carry no manifest handle, so
