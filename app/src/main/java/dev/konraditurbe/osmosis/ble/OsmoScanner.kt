@@ -85,7 +85,7 @@ class OsmoScanner(
                         modelId = d.modelId
                         modelGuess = when {
                             d.modelId != null ->
-                                BleConstants.MODEL_NAMES[d.modelId] ?: "unknown(0x%04x)".format(d.modelId)
+                                BleConstants.nameFor(d.modelId) ?: "unknown(0x%04x)".format(d.modelId)
                             // New format, product type we haven't mapped. Say the number: it is the one
                             // thing that identifies the camera, and a tester's log then names it for us.
                             d.newFormat && d.rawProductType != null ->
