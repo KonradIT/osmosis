@@ -1,24 +1,5 @@
 # Osmosis — Roadmap
 
-### 2. The rest of the Osmo line:
-
-- **Action 4**: WIP, seems mostly everything works.
-
-See:
-
-[Harden Osmo Action 4 support](https://github.com/KonradIT/osmosis/pull/34)
-
-https://github.com/KonradIT/osmosis/issues/31
-
-- [x] Camera is detected and can be connected to
-- [x] Grid loads
-- [x] Media downloads work
-- [ ] Delete a file
-- [ ] Pagination: scroll past 45 files
-- [ ] Favorite a file
-- [ ] Load previous favorites in the grid
-- [ ] Disconnection handling
-
 ### 6. Older Osmo Action generation (index-based list)
 
 We want browse + download on the Action 1/2/3, which use an older list format keyed by numeric
@@ -116,10 +97,6 @@ be deduced from what we have.
 ### 19. Migrate to CompanionDeviceManager API
 
 CompanionDeviceManager will give us features such as auto-detect, less permissions, better handling for BLE, etc...
-
-### 21. UI icons overhaul
-
-Design an iconset, stop using emojis
 
 ### 22. Show a tick for downloaded media
 
