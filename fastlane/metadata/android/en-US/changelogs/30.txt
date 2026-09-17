@@ -1,0 +1,5 @@
+Grab a still from a video. Pause playback and a camera button appears; tap it to save a high-resolution 8-bit frame of the exact moment on screen. Decoding happens on your phone, so it depends on the phone's video decoder — 10-bit clips recorded on the Osmo Nano cannot be extracted on some devices.
+
+The last files on a full card no longer go missing. On a camera with two stores, the oldest files of a page were silently dropped and the library reported itself complete early; on a full internal store the final files never appeared and "load more" would not arm. The app now acknowledges the camera's download window as it streams, so a library of any size lists to the very end, and the end of the library is taken from the camera's own end-of-list marker rather than guessed from a short page.
+
+A new monochrome icon set replaces the emoji throughout the app. Also: a clearer border on the camera selector, "save logs" styled like GPS sync, the connection bar keeps its space so the camera list no longer jumps, and the bulk-delete button animates.
