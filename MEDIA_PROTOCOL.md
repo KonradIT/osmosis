@@ -1270,3 +1270,103 @@ Field layouts are identical to the camera frames ([§19](#19-sd--storage), [§20
 
 The official app sends `0x02/0x82` (42 B), `0x02/0xdc` (40 B) and `0x04/0x1c` (`38`) at ~860/s to
 `0x1c01`/`0x1c04` with sender `0x01`. Not required to open the session or browse media.
+
+## RTMP livestream
+
+The camera pushes the stream itself; the app only tells it which network to join, where to send the
+stream, and to start. Everything is BLE DUML — no datalink, no HTTP, and **no media list**: an RTMP
+session never reads the library.
+
+Ported from [djictl](https://github.com/xaionaro-go/djictl) (`ble connect-wifi-and-start-streaming`),
+CC0-1.0. djictl verified this on a **Pocket 3** and the Action line; nothing upstream has sent these
+frames to a Nano, a Pocket 4 or the 360, so those are untested here.
+
+**Verified on hardware here** — OSMO Action 4, Oct 2026, every reading measured off the live stream
+with `ffprobe`/`ss` on the receiving host: all three resolution bytes (480p `0x47` → 854×480, 720p
+`0x04` → 1280×720, 1080p `0x0a` → 1920×1080), the fps byte (`0x03`, ~30.3 fps as RTMP's
+millisecond timebase reports it), 6000 and 10000 kbps both honoured on the wire (the camera does
+**not** cap at 6000), the battery push (§36), and stop → restart ×3 with no app restart. Not yet
+traced to hardware: the EIS values (§35) beyond what djictl sends, 25 fps, and every model but the
+Action 4.
+
+Sequence, all on the one paired BLE session (§[21](#21-session-wake--keepalive)–[23](#23-connecttowifi)):
+
+| # | step | Cmd Set / ID | target | payload | reply |
+|---|---|---|---|---|---|
+| 1 | prepare, stage 1 | `0x02` / `0xE1` | `0x0802` | `1a` | `0x02/0xE1`, `00` = ok |
+| 2 | prepare, stage 2 | `0x02` / `0x8E` | `0x0802` | `00 01 1c 00` | `0x02/0x8E` |
+| 3 | join network | `0x07` / `0x47` | `0x0702` | PackString(ssid) + PackString(psk) | `0x07/0x47`, `0000` = ok |
+| 4 | stabilization *(Action 4 / 5 Pro only)* | `0x02` / `0x8E` | `0x0102` | see §35 | `0x02/0x8E` |
+| 5 | configure | `0x08` / `0x78` | `0x0802` | see §33 | `0x08/0x78` |
+| 6 | start | `0x02` / `0x8E` | `0x0802` | `01 01 1a 00 01 01` | `0x02/0x8E` |
+
+### 32. Message ids
+
+djictl's ids for these frames, written **big-endian** on the wire — the rest of the frame is LE:
+
+| step | id |
+|---|---|
+| prepare, stage 1 | `feab` |
+| prepare, stage 2 | `ffab` |
+| configure | `b3bb` |
+| start | `b4bb` |
+| stop | `b5bb` |
+
+### 33. ConfigureStreaming (`0x08/0x78`)
+
+| off | size | field |
+|---:|---|---|
+| +0 | u8 | `0x00` |
+| +1 | u8 | device byte: `0x2e` on an Action 5 Pro, `0x2a` otherwise |
+| +2 | u8 | `0x00` |
+| +3 | u8 | resolution: 480p `0x47` (854×480) · 720p `0x04` (1280×720) · 1080p `0x0a` (1920×1080) |
+| +4 | u16-LE | bitrate, kbps |
+| +6 | u8 | `0x02` |
+| +7 | u8 | `0x00` |
+| +8 | u8 | fps: 25 → `0x02`, 30 → `0x03` |
+| +9 | 3 B | `00 00 00` |
+| +12 | u16-LE | URL length |
+| +14 | — | URL bytes |
+
+Golden frame from djictl's own capture (DJI Mimo, 1080p / 6000 kbps / 30 fps):
+
+```
+55 42 04 b0  0208  b3bb  400878   00 32 00 0a 7017 0200 03 000000 2700 "rtmp://192.168.0.131:1946/test/stream0/"
+```
+
+Two things that capture contradicts, both still unresolved: the device byte is `0x32` there while
+djictl's code sends `0x2a`, and the byte at +6 (`0x02`) has no known meaning. One of them may be
+Mimo's **Streaming Quality** setting — djictl exposes no quality field at all, only bitrate. An
+Action 4 streams fine with `0x2a`, so the device-byte difference is not fatal, whatever it means.
+
+> [!WARNING]
+> The frame's own length field is a u8, so the payload can never exceed 242 bytes. With 14 bytes of
+> fixed header that caps the RTMP URL at **228 bytes** — `OsmoCommands.configureStream` rejects
+> anything longer rather than wrap the length byte.
+
+### 34. Start / stop streaming (`0x02/0x8E`)
+
+`01 01 1a 00 01 01` starts, `01 01 1a 00 01 02` stops. djictl defines stop but its CLI never sends
+it — after start it blocks forever reading battery pushes, so an interrupted session has no way back
+except the camera's own menu. Osmosis sends stop; on an Action 4 stop closes the RTMP connection
+within a few seconds, and start → stop → start works three times in a row without an app restart.
+
+### 35. Image stabilization (`0x02/0x8E`, camera `0x0102`)
+
+`01 01 <device byte> 00 01 <value>` — device byte `0x1a` on an Action 5 Pro, `0x08` otherwise; value
+`00` off, `01` RockSteady, `02` HorizonSteady, `03` RockSteady+, `04` HorizonBalancing. djictl sends
+this **only** to an Action 4 / Action 5 Pro, always RockSteady+.
+
+Osmosis offers all five in the dialog, but none has been traced to a visible change in the stream:
+the frame is accepted with no error, and no test has yet compared a recorded clip with stabilization
+on against one with it off.
+
+### 36. Live battery
+
+While streaming, the camera pushes `0x0d/0x02` (percent `u8 @ 20`, or `@ 12` on a short frame) — the
+same layout as §[30](#30-drone-status-pushes).
+
+> [!WARNING]
+> Joining the home network drops the camera's own AP. Every offload path in the app needs that AP, so
+> the stream must be stopped (and possibly the camera power-cycled) before media browsing works again.
+

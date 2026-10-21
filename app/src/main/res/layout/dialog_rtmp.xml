@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RTMP livestream form. Every value here maps to a field in the ConfigureStreaming frame — see
+     OsmoCommands.configureStream and MEDIA_PROTOCOL.md § "RTMP livestream". -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingHorizontal="24dp"
+        android:paddingTop="8dp">
+
+        <EditText
+            android:id="@+id/rtmpUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/rtmp_url_hint"
+            android:importantForAutofill="no"
+            android:inputType="textUri"
+            android:maxLines="1" />
+
+        <EditText
+            android:id="@+id/rtmpSsid"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/rtmp_ssid_hint"
+            android:importantForAutofill="no"
+            android:inputType="text"
+            android:maxLines="1" />
+
+        <EditText
+            android:id="@+id/rtmpPsk"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/rtmp_psk_hint"
+            android:importantForAutofill="no"
+            android:inputType="textPassword"
+            android:maxLines="1" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/rtmp_resolution"
+            android:textColor="@color/osmo_muted"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/rtmpResolution"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="40dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/rtmp_quality"
+            android:textColor="@color/osmo_muted"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/rtmpQuality"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="40dp" />
+
+        <TextView
+            android:id="@+id/rtmpEisLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/rtmp_eis"
+            android:textColor="@color/osmo_muted"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/rtmpEis"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="40dp" />
+    </LinearLayout>
+</ScrollView>

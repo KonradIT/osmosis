@@ -29,14 +29,17 @@ data class CamRow(
 
 /**
  * The camera selector list. Swiping a row's card left reveals its actions on a [SwipeRevealLayout]:
- * GPS sync on the models DJI's R-SDK supports, Delete on a saved camera. A row with neither doesn't
- * swipe. At most one row is open at a time. Rows are diffed by MAC, so the scan's frequent rebuilds
- * leave an open or mid-drag row alone instead of re-inflating it.
+ * an RTMP livestream on a streaming-capable camera in range, GPS sync on the models DJI's R-SDK
+ * supports, Delete on a saved camera. A row with none of them doesn't swipe. At most one row is open at a time. Rows are
+ * diffed by MAC, so the scan's frequent rebuilds leave an open or mid-drag row alone instead of
+ * re-inflating it. While GPS sync or a livestream holds the camera's link the rows lock: dimmed and
+ * unswipeable, except the streaming camera's, which stays bright under its LIVE tag.
  */
 class CameraListAdapter(private val actions: Actions) : RecyclerView.Adapter<CameraListAdapter.Holder>() {
 
     interface Actions {
         fun onTap(r: CamRow)
+        fun onLivestream(r: CamRow)
         fun onGpsSync(r: CamRow)
         fun onDelete(r: CamRow)
     }
@@ -48,11 +51,14 @@ class CameraListAdapter(private val actions: Actions) : RecyclerView.Adapter<Cam
         val type: TextView = v.findViewById(R.id.camType)
         val name: TextView = v.findViewById(R.id.camName)
         val tag: TextView = v.findViewById(R.id.camTag)
+        val liveTag: TextView = v.findViewById(R.id.camLive)
         val status: ImageView = v.findViewById(R.id.camStatus)
+        val stream: View = v.findViewById(R.id.actionStream)
         val gps: View = v.findViewById(R.id.actionGps)
         val delete: View = v.findViewById(R.id.actionDelete)
         var row: CamRow? = null
         // The card's TalkBack actions, mirroring whichever tiles the row shows; 0 = not added.
+        var streamAction = 0
         var gpsAction = 0
         var deleteAction = 0
     }
@@ -61,12 +67,19 @@ class CameraListAdapter(private val actions: Actions) : RecyclerView.Adapter<Cam
     private var openMac: String? = null
     private var list: RecyclerView? = null
 
-    /** While a GPS-sync link owns the BLE no row swipes open; a tap still reaches [Actions.onTap], which says why. */
+    /** While GPS sync or a livestream owns the BLE no row swipes open; a tap still reaches [Actions.onTap], which says why. */
     var locked = false
         set(value) {
             field = value
             if (value) openMac = null
-            forEachHolder { it.swipe.swipeEnabled = !value }
+            forEachHolder { applyLock(it) }
+        }
+
+    /** The livestreaming camera's MAC: its row stays bright in the locked list and wears the LIVE tag. */
+    var liveMac: String? = null
+        set(value) {
+            field = value
+            forEachHolder { applyLock(it) }
         }
 
     fun submit(newRows: List<CamRow>) {
@@ -108,6 +121,11 @@ class CameraListAdapter(private val actions: Actions) : RecyclerView.Adapter<Cam
             val r = h.row ?: return@setOnClickListener
             // With another row open, a tap elsewhere only closes it, like tapping outside a menu.
             if (openMac != null) closeOpen() else actions.onTap(r)
+        }
+        h.stream.setOnClickListener {
+            val r = h.row ?: return@setOnClickListener
+            h.swipe.close()
+            actions.onLivestream(r)
         }
         h.gps.setOnClickListener {
             val r = h.row ?: return@setOnClickListener
@@ -152,15 +170,27 @@ class CameraListAdapter(private val actions: Actions) : RecyclerView.Adapter<Cam
         val dim = if (r.inRange) 1f else 0.5f
         h.text.alpha = dim
         h.status.alpha = dim
-        // GPS sync only where the R-SDK supports the model (never an Xtra); Delete only for a saved
-        // camera, since an unsaved one has nothing to delete.
+        // A livestream only on the models that stream, and with the camera in range (it pairs and joins
+        // the stream's network itself); GPS sync only where the R-SDK supports the model (never an
+        // Xtra); Delete only for a saved camera, since an unsaved one has nothing to delete.
+        val canStream = r.model.livestream && r.device != null
+        h.stream.visibility = if (canStream) View.VISIBLE else View.GONE
         h.gps.visibility = if (r.model.gpsSync) View.VISIBLE else View.GONE
         h.delete.visibility = if (r.saved) View.VISIBLE else View.GONE
         // TalkBack can't drag the card, so the same actions sit on the card itself.
+        h.streamAction = syncAction(h, h.streamAction, canStream, R.string.rtmp_start, actions::onLivestream)
         h.gpsAction = syncAction(h, h.gpsAction, r.model.gpsSync, R.string.gps_sync, actions::onGpsSync)
         h.deleteAction = syncAction(h, h.deleteAction, r.saved, R.string.delete, actions::onDelete)
-        h.swipe.swipeEnabled = !locked
+        applyLock(h)
         if (!h.swipe.isDragging) h.swipe.snap(open = r.mac == openMac)
+    }
+
+    /** A locked row doesn't swipe and sits dimmed, except the live camera's, which keeps its LIVE tag lit. */
+    private fun applyLock(h: Holder) {
+        val live = liveMac != null && h.row?.mac == liveMac
+        h.swipe.swipeEnabled = !locked
+        h.card.alpha = if (locked && !live) LOCKED_ALPHA else 1f
+        h.liveTag.visibility = if (live) View.VISIBLE else View.GONE
     }
 
     /** Add or remove one of the card's TalkBack actions to match [wanted]; returns its id, 0 if absent. */
@@ -185,5 +215,10 @@ class CameraListAdapter(private val actions: Actions) : RecyclerView.Adapter<Cam
     private fun forEachHolder(f: (Holder) -> Unit) {
         val rv = list ?: return
         for (i in 0 until rv.childCount) (rv.getChildViewHolder(rv.getChildAt(i)) as? Holder)?.let(f)
+    }
+
+    private companion object {
+        /** A locked row's opacity, matching the selector's other locked controls. */
+        const val LOCKED_ALPHA = 0.4f
     }
 }

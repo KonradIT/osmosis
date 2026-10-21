@@ -9,6 +9,7 @@
 .externalNativeBuild
 .cxx
 /reference/
+.opencode
 
 # Signing — NEVER commit the keystore or its passwords
 *.jks

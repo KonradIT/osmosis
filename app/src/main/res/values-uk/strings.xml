@@ -78,6 +78,30 @@
     <string name="filter_videos">Відео</string>
     <string name="filter_faved">Улюблені</string>
     <string name="select">Вибрати</string>
+
+    <!-- RTMP livestream -->
+    <string name="rtmp_start">Транслювати через RTMP</string>
+    <string name="rtmp_tile">Ефір</string>
+    <string name="rtmp_title">%1$s — трансляція RTMP</string>
+    <string name="rtmp_url_hint">rtmp://server/app/stream-key</string>
+    <string name="rtmp_ssid_hint">Назва мережі Wi-Fi</string>
+    <string name="rtmp_psk_hint">Пароль Wi-Fi</string>
+    <string name="rtmp_resolution">Роздільна здатність</string>
+    <string name="rtmp_quality">Якість (бітрейт)</string>
+    <string name="rtmp_eis">Стабілізація</string>
+    <string name="rtmp_eis_unsupported">Не надсилається на цій моделі</string>
+    <string name="rtmp_start_button">Почати трансляцію</string>
+    <string name="rtmp_stop_button">Зупинити трансляцію</string>
+    <string name="rtmp_need_url">Спочатку введіть URL RTMP</string>
+    <string name="rtmp_need_ssid">Введіть назву мережі Wi-Fi (SSID)</string>
+    <string name="rtmp_starting">Під’єднання до %1$s…</string>
+    <string name="rtmp_connecting_banner">Трансляція запускається на %1$s: %2$s\nТоркніться цього банера, щоб скасувати.</string>
+    <string name="rtmp_live_banner">Ефір з %1$s на %2$s\nПерегляд медіа вимкнено, доки триває трансляція. Торкніться цього банера, щоб зупинити.</string>
+    <string name="rtmp_battery">Заряд камери %1$d%%</string>
+    <string name="rtmp_stop_first">Триває трансляція — торкніться банера, щоб зупинити її перед вибором камери.</string>
+    <string name="rtmp_stop_for_gps_title">Зупинити трансляцію?</string>
+    <string name="rtmp_stop_for_gps_message">Синхронізації GPS потрібне Bluetooth-з’єднання камери, яке зараз використовує трансляція. Запуск синхронізації GPS завершить трансляцію.</string>
+    <string name="live_tag">ЕФІР</string>
     <string name="download">Завантажити</string>
     <string name="download_count">Завантажити (%1$d)</string>
     <string name="download_running">Завантаження…</string>

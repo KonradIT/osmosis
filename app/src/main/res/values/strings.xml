@@ -78,6 +78,32 @@
     <string name="filter_videos">Videos</string>
     <string name="filter_faved">Faved</string>
     <string name="select">Select</string>
+
+    <!-- RTMP livestream -->
+    <string name="rtmp_start">Stream to RTMP</string>
+    <!-- The camera row's swipe-menu tile: one short word, it has to fit a 72dp tile. -->
+    <string name="rtmp_tile">Stream</string>
+    <string name="rtmp_title">%1$s — RTMP livestream</string>
+    <string name="rtmp_url_hint">rtmp://server/app/stream-key</string>
+    <string name="rtmp_ssid_hint">Wi-Fi network name</string>
+    <string name="rtmp_psk_hint">Wi-Fi password</string>
+    <string name="rtmp_resolution">Resolution</string>
+    <string name="rtmp_quality">Quality (bitrate)</string>
+    <string name="rtmp_eis">Stabilization</string>
+    <string name="rtmp_eis_unsupported">Not sent on this model</string>
+    <string name="rtmp_start_button">Start stream</string>
+    <string name="rtmp_stop_button">Stop stream</string>
+    <string name="rtmp_need_url">Enter an RTMP URL first</string>
+    <string name="rtmp_need_ssid">Enter the Wi-Fi network name (SSID)</string>
+    <string name="rtmp_starting">Connecting to %1$s…</string>
+    <!-- The lockout banner, as for GPS sync: %2$s is the stream's current step, then its host. -->
+    <string name="rtmp_connecting_banner">Livestream starting on %1$s: %2$s\nTap this banner to cancel.</string>
+    <string name="rtmp_live_banner">Live from %1$s to %2$s\nMedia browsing is disabled while streaming. Tap this banner to stop.</string>
+    <string name="rtmp_battery">Camera battery %1$d%%</string>
+    <string name="rtmp_stop_first">A livestream is running — tap the banner to stop it before selecting a camera.</string>
+    <string name="rtmp_stop_for_gps_title">Stop the livestream?</string>
+    <string name="rtmp_stop_for_gps_message">GPS sync needs the camera\'s Bluetooth link, which the livestream is using. Starting GPS sync ends the stream.</string>
+    <string name="live_tag">LIVE</string>
     <string name="download">Download</string>
     <string name="download_count">Download (%1$d)</string>
     <string name="download_running">Downloading…</string>

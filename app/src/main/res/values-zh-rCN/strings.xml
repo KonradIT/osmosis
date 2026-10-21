@@ -78,6 +78,30 @@
     <string name="filter_videos">视频</string>
     <string name="filter_faved">已收藏</string>
     <string name="select">选择</string>
+
+    <!-- RTMP livestream -->
+    <string name="rtmp_start">推流到 RTMP</string>
+    <string name="rtmp_tile">直播</string>
+    <string name="rtmp_title">%1$s — RTMP 直播推流</string>
+    <string name="rtmp_url_hint">rtmp://server/app/stream-key</string>
+    <string name="rtmp_ssid_hint">Wi-Fi 网络名称</string>
+    <string name="rtmp_psk_hint">Wi-Fi 密码</string>
+    <string name="rtmp_resolution">分辨率</string>
+    <string name="rtmp_quality">画质（码率）</string>
+    <string name="rtmp_eis">增稳</string>
+    <string name="rtmp_eis_unsupported">该机型不会发送此设置</string>
+    <string name="rtmp_start_button">开始推流</string>
+    <string name="rtmp_stop_button">停止推流</string>
+    <string name="rtmp_need_url">请先输入 RTMP 地址</string>
+    <string name="rtmp_need_ssid">请输入 Wi-Fi 网络名称（SSID）</string>
+    <string name="rtmp_starting">正在连接 %1$s…</string>
+    <string name="rtmp_connecting_banner">正在 %1$s 上启动直播：%2$s\n点按此横幅取消。</string>
+    <string name="rtmp_live_banner">正在从 %1$s 直播到 %2$s\n直播期间无法浏览媒体。点按此横幅停止。</string>
+    <string name="rtmp_battery">相机电量 %1$d%%</string>
+    <string name="rtmp_stop_first">直播进行中——请先点按横幅停止，再选择相机。</string>
+    <string name="rtmp_stop_for_gps_title">停止直播？</string>
+    <string name="rtmp_stop_for_gps_message">GPS 同步需要使用相机的蓝牙连接，而直播正在占用它。开始 GPS 同步将结束直播。</string>
+    <string name="live_tag">直播</string>
     <string name="download">下载</string>
     <string name="download_count">下载（%1$d）</string>
     <string name="download_running">正在下载…</string>

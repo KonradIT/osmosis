@@ -1,0 +1,9 @@
+<!-- Going live: a dot broadcasting two arcs to each side. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"
+    android:tint="?attr/colorControlNormal">
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.7"
+        android:strokeLineJoin="round" android:strokeLineCap="round"
+        android:pathData="M14.97,9.03 a4.2,4.2 0 0,1 0,5.94 M9.03,14.97 a4.2,4.2 0 0,1 0,-5.94 M17.52,6.48 a7.8,7.8 0 0,1 0,11.03 M6.48,17.52 a7.8,7.8 0 0,1 0,-11.03" />
+    <path android:fillColor="#FFFFFF" android:pathData="M12,10.4 a1.6,1.6 0 1,0 0,3.2 a1.6,1.6 0 0,0 0,-3.2z" />
+</vector>

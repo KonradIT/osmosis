@@ -21,7 +21,10 @@
 
     <!-- Camera-row swipe menu. The tiles are muted fills under white icons, the same in both themes;
          the pill behind them sits darker than the page (and, in dark, darker than the card). -->
+    <color name="osmo_action_live">#5E4B8B</color>
     <color name="osmo_action_gps">#1F6587</color>
     <color name="osmo_action_delete">#A4403A</color>
     <color name="osmo_swipe_well">#DDD6CB</color>
+    <!-- The LIVE tag on a streaming camera's row: a bright red under white text, both themes. -->
+    <color name="osmo_live">#D32F2F</color>
 </resources>

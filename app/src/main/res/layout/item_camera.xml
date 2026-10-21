@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- One camera row. The card sits on top; behind it is the darkened pill holding the swipe actions
-     (GPS sync on R-SDK models, Delete on a saved camera; the adapter hides what doesn't apply),
-     uncovered when the card is dragged left. Children are positional: the tray first, the card
-     second (see SwipeRevealLayout). -->
+     (Stream on a camera in range, GPS sync on R-SDK models, Delete on a saved camera; the adapter
+     hides what doesn't apply), uncovered when the card is dragged left. Children are positional:
+     the tray first, the card second (see SwipeRevealLayout). -->
 <dev.konraditurbe.osmosis.ui.SwipeRevealLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -19,8 +19,24 @@
         android:visibility="invisible">
 
         <LinearLayout
+            android:id="@+id/actionStream"
+            style="@style/SwipeAction"
+            android:background="@drawable/swipe_action_live_bg">
+
+            <ImageView
+                style="@style/SwipeActionIcon"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_livestream" />
+
+            <TextView
+                style="@style/SwipeActionLabel"
+                android:text="@string/rtmp_tile" />
+        </LinearLayout>
+
+        <LinearLayout
             android:id="@+id/actionGps"
             style="@style/SwipeAction"
+            android:layout_marginStart="8dp"
             android:background="@drawable/swipe_action_gps_bg">
 
             <ImageView
@@ -85,6 +101,20 @@
                 android:textColor="@color/osmo_muted"
                 android:textSize="12sp" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/camLive"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="12dp"
+            android:background="@drawable/chip_live"
+            android:paddingHorizontal="7dp"
+            android:paddingVertical="2dp"
+            android:text="@string/live_tag"
+            android:textColor="@color/white"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
 
         <TextView
             android:id="@+id/camTag"

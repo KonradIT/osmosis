@@ -78,6 +78,30 @@
     <string name="filter_videos">Videos</string>
     <string name="filter_faved">Favoriten</string>
     <string name="select">Auswählen</string>
+
+    <!-- RTMP livestream -->
+    <string name="rtmp_start">Per RTMP streamen</string>
+    <string name="rtmp_tile">Stream</string>
+    <string name="rtmp_title">%1$s — RTMP-Livestream</string>
+    <string name="rtmp_url_hint">rtmp://server/app/stream-key</string>
+    <string name="rtmp_ssid_hint">WLAN-Netzwerkname</string>
+    <string name="rtmp_psk_hint">WLAN-Passwort</string>
+    <string name="rtmp_resolution">Auflösung</string>
+    <string name="rtmp_quality">Qualität (Bitrate)</string>
+    <string name="rtmp_eis">Stabilisierung</string>
+    <string name="rtmp_eis_unsupported">Wird bei diesem Modell nicht gesendet</string>
+    <string name="rtmp_start_button">Stream starten</string>
+    <string name="rtmp_stop_button">Stream stoppen</string>
+    <string name="rtmp_need_url">Zuerst eine RTMP-URL eingeben</string>
+    <string name="rtmp_need_ssid">WLAN-Netzwerknamen (SSID) eingeben</string>
+    <string name="rtmp_starting">Verbinden mit %1$s…</string>
+    <string name="rtmp_connecting_banner">Livestream startet auf %1$s: %2$s\nTippe auf dieses Banner zum Abbrechen.</string>
+    <string name="rtmp_live_banner">Live von %1$s zu %2$s\nDas Durchsuchen von Medien ist während des Streams deaktiviert. Tippe auf dieses Banner zum Stoppen.</string>
+    <string name="rtmp_battery">Kamera-Akku %1$d%%</string>
+    <string name="rtmp_stop_first">Ein Livestream läuft – tippe auf das Banner zum Stoppen, bevor du eine Kamera auswählst.</string>
+    <string name="rtmp_stop_for_gps_title">Livestream stoppen?</string>
+    <string name="rtmp_stop_for_gps_message">GPS-Sync braucht die Bluetooth-Verbindung der Kamera, die gerade der Livestream nutzt. Wenn du GPS-Sync startest, endet der Stream.</string>
+    <string name="live_tag">LIVE</string>
     <string name="download">Herunterladen</string>
     <string name="download_count">Herunterladen (%1$d)</string>
     <string name="download_running">Wird heruntergeladen…</string>

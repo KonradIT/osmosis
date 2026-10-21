@@ -78,6 +78,30 @@
     <string name="filter_videos">Vídeos</string>
     <string name="filter_faved">Favoritos</string>
     <string name="select">Seleccionar</string>
+
+    <!-- RTMP livestream -->
+    <string name="rtmp_start">Emitir por RTMP</string>
+    <string name="rtmp_tile">Emitir</string>
+    <string name="rtmp_title">%1$s — Emisión por RTMP</string>
+    <string name="rtmp_url_hint">rtmp://server/app/stream-key</string>
+    <string name="rtmp_ssid_hint">Nombre de la red Wi-Fi</string>
+    <string name="rtmp_psk_hint">Contraseña Wi-Fi</string>
+    <string name="rtmp_resolution">Resolución</string>
+    <string name="rtmp_quality">Calidad (bitrate)</string>
+    <string name="rtmp_eis">Estabilización</string>
+    <string name="rtmp_eis_unsupported">No se envía en este modelo</string>
+    <string name="rtmp_start_button">Iniciar emisión</string>
+    <string name="rtmp_stop_button">Detener emisión</string>
+    <string name="rtmp_need_url">Introduce primero una URL RTMP</string>
+    <string name="rtmp_need_ssid">Introduce el nombre de la red Wi-Fi (SSID)</string>
+    <string name="rtmp_starting">Conectando con %1$s…</string>
+    <string name="rtmp_connecting_banner">Iniciando la emisión en %1$s: %2$s\nHaz click en este aviso para cancelar.</string>
+    <string name="rtmp_live_banner">En directo desde %1$s a %2$s\nLa exploración de contenido está desactivada durante la emisión. Haz click en este aviso para detener.</string>
+    <string name="rtmp_battery">Batería de la cámara %1$d%%</string>
+    <string name="rtmp_stop_first">Hay una emisión en curso: haz click en el aviso para detenerla antes de seleccionar una cámara.</string>
+    <string name="rtmp_stop_for_gps_title">¿Detener la emisión?</string>
+    <string name="rtmp_stop_for_gps_message">La sincronización GPS necesita la conexión Bluetooth de la cámara, que ahora usa la emisión. Al iniciar la sincronización GPS, la emisión termina.</string>
+    <string name="live_tag">EN VIVO</string>
     <string name="download">Descargar</string>
     <string name="download_count">Descargar (%1$d)</string>
     <string name="download_running">Descargando…</string>

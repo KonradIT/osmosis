@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LIVE tag on the camera row that's livestreaming: the NEW chip's shape, in live red. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/osmo_live" />
+    <corners android:radius="7dp" />
+</shape>

@@ -25,10 +25,18 @@ data class CameraModel(
     // power-button press, and their media API is NOT the camera datalink (see DroneSession, and
     // MEDIA_PROTOCOL.md § "DJI Drone QuickTransfer media offload").
     val isDrone: Boolean = false,
+    // djictl's DeviceType where it changes the RTMP livestream frames (pkg/duml/device_type.go):
+    // the Action 4 and Action 5 Pro alone get a SetImageStabilization step, and the 5 Pro uses a
+    // different device byte in the stream configuration. [DJI_TYPE_NONE] = the shared default layout.
+    val djiStreamType: Int = DJI_TYPE_NONE,
     // The camera's device id in DJI's R-SDK, the Osmo GPS Controller protocol GpsService speaks. Only
     // the models that SDK supports have one (https://github.com/dji-sdk/Osmo-GPS-Controller-Demo);
     // null means no GPS sync, and the camera row's swipe menu leaves the GPS tile out.
     val rsdkDeviceId: Int? = null,
+    // RTMP livestream over BLE (djictl's flow, see RtmpStreamer) is offered on this model: the Osmo
+    // Action 1 through 6, the Pocket 3, 4 and 4 Pro, and their Xtra rebadges, which inherit it from the
+    // DJI twin in resolve(). Not the Nano (so not the Atto either), the 360 or the drones.
+    val livestream: Boolean = false,
 ) {
     /** The SetPairingPIN token this device expects: a drone only releases WiFi creds to "DJI FLY". */
     val pairingToken: String get() = if (isDrone) "DJI FLY" else "osmo"
@@ -50,21 +58,36 @@ data class CameraModel(
         const val ID_MAVIC_3 = 0x0070  // drone (confirmed on hardware, mfr 7000…)
         const val ID_NEO_2 = 0x007e    // drone (tester scan, mfr 7e00…)
 
+        /** [djiStreamType] for any model whose RTMP frames are djictl's default layout. */
+        const val DJI_TYPE_NONE = 0
+        const val DJI_TYPE_ACTION4 = 4
+        const val DJI_TYPE_ACTION5_PRO = 5
+
         private val BY_ID: Map<Int, CameraModel> = mapOf(
-            0x0010 to CameraModel("Osmo Action 2"),
-            0x0012 to CameraModel("Osmo Action 3"),
+            // The first Osmo Action, by the id BleAdvert maps its product type to (no hardware has
+            // confirmed it). It has no offload config of its own, so it keeps the defaults it got while
+            // unlisted; it's here so it can stream.
+            0x0006 to CameraModel("Osmo Action", livestream = true),
+            0x0010 to CameraModel("Osmo Action 2", livestream = true),
+            0x0012 to CameraModel("Osmo Action 3", livestream = true),
             // Tester-confirmed 2026-08-24: pair, BLE creds, a WPA2 AP, datalink on 9004.
             // Thanks to Ave for sending over the golden test files. All verified against the actual hardware.
             // Everything seems to work as expected.
             // PR: https://github.com/KonradIT/osmosis/pull/37
-            0x0014 to CameraModel("Osmo Action 4", verified = true, rsdkDeviceId = 0xFF33),
+            0x0014 to CameraModel(
+                "Osmo Action 4", verified = true, djiStreamType = DJI_TYPE_ACTION4, rsdkDeviceId = 0xFF33,
+                livestream = true,
+            ),
             // Genuine Action 5 Pro on 9004 — tester-confirmed (grid + download). The Xtra rebrand
             // gets flipped to 10004 by resolve(); see the Xtra note below.
-            0x0015 to CameraModel("Osmo Action 5 Pro", verified = true, rsdkDeviceId = 0xFF44),
+            0x0015 to CameraModel(
+                "Osmo Action 5 Pro", verified = true, djiStreamType = DJI_TYPE_ACTION5_PRO, rsdkDeviceId = 0xFF44,
+                livestream = true,
+            ),
             // 360 stays unverified: only ever scanned, never a successful offload — and its files are
             // 360-format (need Mimo to view), so it's parked regardless of transport.
             0x0017 to CameraModel("Osmo 360", wpa3 = true, rsdkDeviceId = 0xFF66),
-            0x0018 to CameraModel("Osmo Action 6", verified = true, rsdkDeviceId = 0xFF55),
+            0x0018 to CameraModel("Osmo Action 6", verified = true, rsdkDeviceId = 0xFF55, livestream = true),
             ID_OSMO_NANO to CameraModel("Osmo Nano", verified = true),
             // It DOES broadcast mfr data. This said otherwise, copied from the reverse-engineered
             // Pocket 3 BLE library in reference/, which states it in four places. Our own captures say
@@ -78,18 +101,18 @@ data class CameraModel(
             // Tester-confirmed on 9004; its _OP3-suffixed
             // naming decodes in full (path + ext + delete handle). Note: rejects 0x53/0x10 (e0) but its
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
-            0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true),
+            0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true, livestream = true),
             // Tester-confirmed 2026-08-08 on Android 10 (our minSdk): connect, a 45-file internal
             // manifest, playback held, and downloads the tester rated "same or maybe faster than
             // Mimo". Its `0x02/0xdc` reports real capacity, unlike the Nano's. Note it advertises
             // the CLASSIC format while the Pro sibling below uses the newer one — see BleAdvert.
-            0x0021 to CameraModel("Osmo Pocket 4", verified = true),
+            0x0021 to CameraModel("Osmo Pocket 4", verified = true, livestream = true),
             // Tester-confirmed 2026-08-07 on 9004 + poke: pair, creds, AP, datalink handshake, a
             // 46-file manifest across two stores, playback held, and 43 MB of a clip transferred over
             // /v2. The transfer then died with the AP, not with the protocol — so the datalink config
             // this flag governs really is confirmed, even though no download has yet finished.
             // It advertises the new format (product type 218 / HG224), not a classic model byte.
-            0x0022 to CameraModel("Osmo Pocket 4 Pro", verified = true),
+            0x0022 to CameraModel("Osmo Pocket 4 Pro", verified = true, livestream = true),
             // Drones (MEDIA_PROTOCOL.md §27). The datalink is the SAME handshake as a camera but on
             // **udp/9003** with NO tcp-7001 poke — plus a `0x51/0x02` session-open the cameras don't
             // need, before which the aircraft answers nothing at all.
@@ -131,6 +154,7 @@ data class CameraModel(
             if (brand != Brand.XTRA) return base
             val isEdgePro = modelId == 0x0015 || base.name.contains("Action 5")
             // No Xtra is an R-SDK device, even where its DJI twin is: the rebadges get no GPS sync.
+            // Livestream carries over from the twin, so every Xtra streams but the Atto (a Nano).
             return base.copy(
                 name = XTRA_NAMES[modelId] ?: if (isEdgePro) "Xtra Edge Pro" else "Xtra ${base.name}",
                 datalinkPort = 10004, tcpPoke = false, verified = isEdgePro, rsdkDeviceId = null,

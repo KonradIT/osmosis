@@ -16,10 +16,11 @@
         android:orientation="vertical"
         android:padding="14dp">
 
-        <!-- GPS-sync lockout banner: shown while the R-SDK link owns the camera's BLE, so media
-             browsing (which needs the same link for WiFi handoff) is disabled. Tap it to stop. -->
+        <!-- Lockout banner: shown while a GPS-sync (R-SDK) link or an RTMP livestream owns the camera's
+             BLE, so media browsing (which needs the same link for WiFi handoff) is disabled. Amber while
+             connecting, red once live. Tap it to stop. -->
         <TextView
-            android:id="@+id/gpsBanner"
+            android:id="@+id/lockBanner"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="10dp"

@@ -106,4 +106,124 @@ object OsmoCommands {
     val APP_DEVICE_INFO: ByteArray =
         byteArrayOf(0x00, 0x41, 0x50, 0x50) + ByteArray(37) +
             byteArrayOf(0x02) + ByteArray(8) + byteArrayOf(0x02, 0x08) + ByteArray(10)
+
+    // ---- RTMP livestream (djictl `ble connect-wifi-and-start-streaming`) ------------------------
+    //
+    // Ported from github.com/xaionaro-go/djictl (CC0-1.0), pkg/djible + pkg/duml. Every frame below
+    // is byte-identical to what djictl puts on the wire, except the message id byte order — see
+    // [streamId]. The receiver is the "VideoTransmission" interface, which is DM368 (0x0802) here.
+    //
+    // Model coverage upstream: verified on a Pocket 3; the Action 4 / Action 5 Pro take the extra
+    // stabilization step. Nothing upstream sends these frames to a Nano; see MEDIA_PROTOCOL.md.
+
+    const val TYPE_PREPARE_LIVE_STREAM = 0xE10240    // 0x02/0xE1, payload 1A
+    const val TYPE_START_STOP_STREAM = 0x8E0240      // 0x02/0x8E: prepare st.2, start, stop, EIS
+    const val TYPE_CONFIGURE_STREAM = 0x780840       // 0x08/0x78
+
+    // djictl's Message.ID values (pkg/duml/message_id.go). Not to be confused with the wire bytes.
+    private const val ID_PREPARE_STREAM_STAGE1 = 0xFEAB
+    private const val ID_PREPARE_STREAM_STAGE2 = 0xFFAB
+    private const val ID_CONFIGURE_STREAM = 0xB3BB
+    private const val ID_START_STREAM = 0xB4BB
+    private const val ID_STOP_STREAM = 0xB5BB
+
+    /**
+     * djictl writes `Message.ID` **big-endian** and [DjiMessage] writes the same field little-endian,
+     * so a straight copy of djictl's ids would put reversed bytes on the wire. Swap to match it.
+     */
+    private fun streamId(wireId: Int) = ((wireId and 0xFF) shl 8) or ((wireId shr 8) and 0xFF)
+
+    /** Resolution -> the byte djictl's `Resolution.BytesFixed` sends. No 2.7K/4K option exists. */
+    val STREAM_RESOLUTIONS = linkedMapOf("480p" to 0x47, "720p" to 0x04, "1080p" to 0x0A)
+
+    /** `FPS.BytesFixed` for 30 fps. Mimo exposes no frame-rate setting, so this never varies. */
+    const val STREAM_FPS_30 = 0x03
+
+    /** EIS -> `ImageStabilization.BytesFixed`. Only sent for the Action 4 / Action 5 Pro. */
+    val STREAM_EIS = linkedMapOf(
+        "Off" to 0x00,
+        "RockSteady" to 0x01,
+        "HorizonSteady" to 0x02,
+        "RockSteady+" to 0x03,
+        "HorizonBalancing" to 0x04,
+    )
+
+    /**
+     * A configure frame's length field is one byte, so the URL is capped well below djictl's u16
+     * limit: 12 fixed payload bytes + a 2-byte URL length + the URL must fit in 255-13.
+     */
+    const val MAX_STREAM_URL_BYTES = 228
+
+    /**
+     * PrepareToLiveStream, stage 1 (0x02/0xE1). The device answers `0x02/0xE1` with a 1-byte payload;
+     * anything but `0x00` is a refusal.
+     */
+    fun prepareLiveStreamStage1(): ByteArray = DjiMessage(
+        TARGET_APP_TO_DM368, streamId(ID_PREPARE_STREAM_STAGE1), TYPE_PREPARE_LIVE_STREAM,
+        byteArrayOf(0x1A),
+    ).encode()
+
+    /** PrepareToLiveStream, stage 2 (0x02/0x8E). Answered on the same 0x02/0x8E type. */
+    fun prepareLiveStreamStage2(): ByteArray = DjiMessage(
+        TARGET_APP_TO_DM368, streamId(ID_PREPARE_STREAM_STAGE2), TYPE_START_STOP_STREAM,
+        byteArrayOf(0x00, 0x01, 0x1C, 0x00),
+    ).encode()
+
+    /**
+     * ConfigureStreaming (0x08/0x78): resolution, bitrate, fps and the RTMP URL in one frame.
+     *
+     * [action5Pro] picks djictl's device byte: `0x2E` on an Action 5 Pro, `0x2A` everywhere else. A
+     * capture in that same function shows DJI Mimo sending `0x32` there instead, so treat the byte as
+     * model-specific and expect to iterate on it against real hardware.
+     */
+    fun configureStream(
+        resolution: Int,
+        bitrateKbps: Int,
+        fps: Int,
+        url: String,
+        action5Pro: Boolean = false,
+    ): ByteArray {
+        val urlBytes = url.toByteArray(Charsets.UTF_8)
+        require(urlBytes.size <= MAX_STREAM_URL_BYTES) {
+            "RTMP URL too long: ${urlBytes.size} > $MAX_STREAM_URL_BYTES bytes"
+        }
+        val w = ByteWriter()
+        w.writeUInt8(0x00)
+        w.writeUInt8(if (action5Pro) 0x2E else 0x2A)
+        w.writeUInt8(0x00)
+        w.writeUInt8(resolution)
+        w.writeUInt16Le(bitrateKbps)
+        w.writeBytes(byteArrayOf(0x02, 0x00))
+        w.writeUInt8(fps)
+        w.writeBytes(byteArrayOf(0x00, 0x00, 0x00))
+        w.writeUInt16Le(urlBytes.size)
+        w.writeBytes(urlBytes)
+        return DjiMessage(
+            TARGET_APP_TO_DM368, streamId(ID_CONFIGURE_STREAM), TYPE_CONFIGURE_STREAM, w.data,
+        ).encode()
+    }
+
+    /** StartLiveStream (0x02/0x8E). */
+    fun startStream(): ByteArray = DjiMessage(
+        TARGET_APP_TO_DM368, streamId(ID_START_STREAM), TYPE_START_STOP_STREAM,
+        byteArrayOf(0x01, 0x01, 0x1A, 0x00, 0x01, 0x01),
+    ).encode()
+
+    /**
+     * StopLiveStream (0x02/0x8E). djictl defines this but its CLI never wires it up — once the stream
+     * starts, djictl blocks forever reading battery frames. This is the only way back.
+     */
+    fun stopStream(): ByteArray = DjiMessage(
+        TARGET_APP_TO_DM368, streamId(ID_STOP_STREAM), TYPE_START_STOP_STREAM,
+        byteArrayOf(0x01, 0x01, 0x1A, 0x00, 0x01, 0x02),
+    ).encode()
+
+    /** SetImageStabilization (0x02/0x8E, camera 0x0102). Action 4/5 Pro only in djictl's flow. */
+    fun setImageStabilization(
+        value: Int,
+        action5Pro: Boolean = false,
+    ): ByteArray = DjiMessage(
+        TARGET_APP_TO_CAMERA, 0, TYPE_START_STOP_STREAM,
+        byteArrayOf(0x01, 0x01, if (action5Pro) 0x1A else 0x08, 0x00, 0x01, value.toByte()),
+    ).encode()
 }

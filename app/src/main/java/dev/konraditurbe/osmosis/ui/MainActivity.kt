@@ -23,12 +23,15 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import android.net.LinkProperties
 import android.net.Network
+import android.net.wifi.WifiManager
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import android.widget.ArrayAdapter
+import android.widget.Spinner
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.ble.Brand
 import dev.konraditurbe.osmosis.ble.CameraModel
@@ -41,6 +44,9 @@ import dev.konraditurbe.osmosis.core.FileLog
 import dev.konraditurbe.osmosis.core.SavedCameras
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.duml.DjiMessage
+import dev.konraditurbe.osmosis.duml.DjiPairMessagePayload
+import dev.konraditurbe.osmosis.duml.OsmoCommands
+import dev.konraditurbe.osmosis.stream.RtmpStreamer
 import dev.konraditurbe.osmosis.net.ApJoiner
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.camera.CameraSession
@@ -85,14 +91,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private lateinit var connectBar: LinearProgressIndicator
     private lateinit var savedCameras: SavedCameras
     private lateinit var statusPill: StatusPillView
-    private lateinit var gpsBanner: TextView
+    private lateinit var lockBanner: TextView
     private var pendingGpsTarget: Pair<String, String>? = null // (mac, name) awaiting location perms
 
     // GPS-sync lockout: while the R-SDK link owns the camera's BLE, media browsing must be blocked
     // (both flows fight over one GATT). The service publishes its state on GpsSyncState; we mirror it
-    // into a banner + a locked selector, and the banner doubles as the stop control.
-    private val gpsStateListener = dev.konraditurbe.osmosis.rsdk.GpsSyncState.Listener { phase, name ->
-        main.post { renderGpsLock(phase, name) }
+    // into a banner + a locked selector, and the banner doubles as the stop control. An RTMP stream
+    // locks the same way (see renderLock).
+    private val gpsStateListener = dev.konraditurbe.osmosis.rsdk.GpsSyncState.Listener { _, _ ->
+        main.post { renderLock() }
     }
     private var camRows: List<CamRow> = emptyList()
     private var currentStatus = CameraStatus()
@@ -320,6 +327,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         findViewById<View>(R.id.btnRescan).setOnClickListener { startCameraScan(select = true) }
         cameraAdapter = CameraListAdapter(object : CameraListAdapter.Actions {
             override fun onTap(r: CamRow) = onCamRowClick(r)
+            override fun onLivestream(r: CamRow) = onCamRowLivestream(r)
             override fun onGpsSync(r: CamRow) = onCamRowGps(r)
             override fun onDelete(r: CamRow) = onCamRowDelete(r)
         })
@@ -354,13 +362,20 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             }
         }
 
-        // GPS sync (R-SDK) starts from a camera row's swipe menu. While a link is bound, the lockout
-        // banner is the in-app STOP control (the service notification's Stop action is the other).
-        gpsBanner = findViewById(R.id.gpsBanner)
-        gpsBanner.setOnClickListener {
-            if (GpsSyncState.locked) {
-                logLine("GPS sync: stop requested (banner tapped).")
-                GpsService.stop(this)
+        // GPS sync (R-SDK) and the RTMP livestream start from a camera row's swipe menu. While either
+        // holds the link, the lockout banner is its in-app STOP control (for GPS sync, the service
+        // notification's Stop action is the other).
+        lockBanner = findViewById(R.id.lockBanner)
+        lockBanner.setOnClickListener {
+            when {
+                GpsSyncState.locked -> {
+                    logLine("GPS sync: stop requested (banner tapped).")
+                    GpsService.stop(this)
+                }
+                rtmpBusy || rtmpStreaming -> {
+                    logLine("RTMP: stop requested (banner tapped).")
+                    rtmp?.stop()
+                }
             }
         }
 
@@ -456,6 +471,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // line is flushed, so nothing is lost if the process dies; the toggle closes it explicitly.
         stopKeepalive()
         datalink?.close()
+        rtmp?.stop()
         scanner?.stop()
         gattClient?.disconnect()
         gattClient?.close()
@@ -505,30 +521,36 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     }
 
     /**
-     * Mirror the GPS-sync service's state into the UI: a coloured banner and a locked selector while
-     * a link is bound (STARTING/ACTIVE), cleared when it stops. Tapping the banner is the way out of
-     * the lockout.
+     * Mirror whichever session holds the camera's BLE link into the UI: GPS sync (the service's state,
+     * via GpsSyncState) or an RTMP livestream. Both get the same banner, amber while connecting and red
+     * once live, and a locked selector until they end; tapping the banner stops either. They never
+     * overlap: each refuses to start while the other holds the link.
      */
-    private fun renderGpsLock(phase: GpsSyncState.Phase, name: String?) {
-        val locked = phase != GpsSyncState.Phase.STOPPED
-        val who = name ?: getString(R.string.the_camera)
-        when (phase) {
-            GpsSyncState.Phase.ACTIVE -> {
-                gpsBanner.setBackgroundColor(ContextCompat.getColor(this, R.color.osmo_danger))
-                gpsBanner.text = getString(R.string.gps_sync_active_banner, who)
-                gpsBanner.visibility = View.VISIBLE
-            }
-            GpsSyncState.Phase.STARTING -> {
-                gpsBanner.setBackgroundColor(ContextCompat.getColor(this, R.color.osmo_amber))
-                gpsBanner.text = getString(R.string.gps_sync_connecting_banner, who)
-                gpsBanner.visibility = View.VISIBLE
-            }
-            GpsSyncState.Phase.STOPPED -> gpsBanner.visibility = View.GONE
+    private fun renderLock() {
+        val gps = GpsSyncState.phase
+        val gpsWho = GpsSyncState.cameraName ?: getString(R.string.the_camera)
+        val streamWho = rtmpRow?.let { it.name ?: it.mac } ?: getString(R.string.the_camera)
+        val banner: Pair<Int, String>? = when {
+            gps == GpsSyncState.Phase.ACTIVE ->
+                R.color.osmo_danger to getString(R.string.gps_sync_active_banner, gpsWho)
+            gps == GpsSyncState.Phase.STARTING ->
+                R.color.osmo_amber to getString(R.string.gps_sync_connecting_banner, gpsWho)
+            rtmpStreaming -> R.color.osmo_danger to getString(R.string.rtmp_live_banner, streamWho, rtmpHost) +
+                if (rtmpBattery in 0..100) "\n" + getString(R.string.rtmp_battery, rtmpBattery) else ""
+            rtmpBusy -> R.color.osmo_amber to getString(R.string.rtmp_connecting_banner, streamWho, rtmpStep)
+            else -> null
         }
-        // Lock camera selection + rescan while the link owns the BLE: rows stop swiping, and a tap on one
-        // gets the lockout toast from onCamRowClick (onCameraChosen hard-guards too).
+        if (banner != null) {
+            lockBanner.setBackgroundColor(ContextCompat.getColor(this, banner.first))
+            lockBanner.text = banner.second
+        }
+        lockBanner.visibility = if (banner != null) View.VISIBLE else View.GONE
+        // Lock camera selection + rescan while a session holds the BLE: rows dim and stop swiping, and a
+        // tap on one gets the lockout toast from onCamRowClick (onCameraChosen hard-guards too). The
+        // streaming camera's row stays bright, under its LIVE tag.
+        val locked = banner != null
         cameraAdapter.locked = locked
-        cameraList.alpha = if (locked) 0.4f else 1f
+        cameraAdapter.liveMac = if (rtmpStreaming) rtmpRow?.mac else null
         findViewById<View>(R.id.btnRescan).apply { isEnabled = !locked; alpha = if (locked) 0.4f else 1f }
     }
 
@@ -632,9 +654,33 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             toast(getString(R.string.gps_active_select_blocked))
             return
         }
+        // Same link, same problem: an RTMP session owns the BLE GATT, and the camera is on the home
+        // network by then, so its AP isn't even reachable. Stop the stream first.
+        if (rtmpBusy || rtmpStreaming) {
+            toast(getString(R.string.rtmp_stop_first))
+            return
+        }
         val dev = r.device
         if (dev != null) onCameraChosen(dev)
         else Toast.makeText(this, getString(R.string.camera_not_in_range, r.name ?: r.mac), Toast.LENGTH_SHORT).show()
+    }
+
+    /** Swipe menu → Stream: the RTMP form. The stream takes the same BLE link a GPS-sync session holds. */
+    private fun onCamRowLivestream(r: CamRow) {
+        if (!r.model.livestream) return   // the row only offers it on models that stream; belt and braces
+        if (GpsSyncState.locked) {
+            toast(getString(R.string.gps_active_select_blocked))
+            return
+        }
+        if (rtmpBusy || rtmpStreaming) {
+            toast(getString(R.string.rtmp_stop_first))
+            return
+        }
+        if (r.device == null) {
+            Toast.makeText(this, getString(R.string.camera_not_in_range, r.name ?: r.mac), Toast.LENGTH_SHORT).show()
+            return
+        }
+        promptRtmp(r)
     }
 
     /** Swipe menu → GPS sync: connect over R-SDK (BLE only, no WiFi) via the foreground service. */
@@ -644,8 +690,21 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             toast(getString(R.string.gps_active_select_blocked))
             return
         }
-        if (r.device != null || r.saved) startGpsMode(r.mac, r.name ?: r.mac)
-        else Toast.makeText(this, getString(R.string.camera_not_in_range, r.name ?: r.mac), Toast.LENGTH_SHORT).show()
+        if (r.device == null && !r.saved) {
+            Toast.makeText(this, getString(R.string.camera_not_in_range, r.name ?: r.mac), Toast.LENGTH_SHORT).show()
+            return
+        }
+        // A livestream holds the BLE link GPS sync needs: starting GPS ends it, so ask rather than cut it.
+        if (rtmpBusy || rtmpStreaming) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.rtmp_stop_for_gps_title)
+                .setMessage(R.string.rtmp_stop_for_gps_message)
+                .setPositiveButton(R.string.rtmp_stop_button) { _, _ -> startGpsMode(r.mac, r.name ?: r.mac) }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+            return
+        }
+        startGpsMode(r.mac, r.name ?: r.mac)
     }
 
     /** Swipe menu → Delete: confirm first. The row stays open behind the dialog; any way out but Delete closes it. */
@@ -686,8 +745,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         }
         logLine("GPS sync: connecting R-SDK to $name ($mac)")
         // Cross-flow interlock: free the BLE GATT from any offload session first, so the R-SDK link
-        // owns it exclusively. Running both at once is what caused the field disconnections.
+        // owns it exclusively. Running both at once is what caused the field disconnections. An RTMP
+        // stream holds the same link, so it stops too — the camera is on the home network by then.
         teardownOffload()
+        rtmp?.stop()
         GpsService.start(this, mac, name)
         Toast.makeText(this, getString(R.string.gps_sync_starting, name), Toast.LENGTH_LONG).show()
     }
@@ -715,6 +776,227 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // here, or the next camera's pairing/REQ replies get mis-deduped against the last camera's state.
         lastPairStatus = -99; credsRequested = false; activateState = -1; reqSeen.clear()
         setConnectProgress(0)
+    }
+
+    // ---- RTMP livestream ----------------------------------------------------------------------
+
+    /** Live RTMP session, if any. One at a time: it owns the camera's BLE link while it runs. */
+    private var rtmp: RtmpStreamer? = null
+
+    /**
+     * Mimo's "Streaming Quality" is a bitrate preset — djictl exposes no quality enum, and these are
+     * the DJI app's own ballpark values.
+     */
+    private val rtmpQualities = linkedMapOf(
+        "Smooth — 2500 kbps" to 2500,
+        "HD — 4000 kbps" to 4000,
+        "High — 6000 kbps" to 6000,
+        "Max — 10000 kbps" to 10000,
+    )
+
+    /** The phone's current SSID, to save typing. Blank when we can't read it (no location permission). */
+    @Suppress("DEPRECATION") // connectionInfo still answers on every API we ship to; the replacement
+    private fun currentSsid(): String = try { // needs a NetworkCallback we have no use for here.
+        getSystemService(WifiManager::class.java)?.connectionInfo?.ssid
+            ?.removeSurrounding("\"")?.takeIf { it != "<unknown ssid>" }.orEmpty()
+    } catch (_: SecurityException) {
+        ""
+    }
+
+    /**
+     * The RTMP form: network, URL, resolution, bitrate and stabilization. The camera joins our home
+     * network here, so this must not run while an offload session is live — [startRtmp] tears it down.
+     *
+     * The form only *edits* the saved settings; everything it writes goes to prefs and [startRtmp]
+     * reads them back, so the next stream opens on the same settings. Once started, the lockout banner
+     * carries the progress and the stop control, as it does for GPS sync.
+     */
+    private fun promptRtmp(r: CamRow) {
+        // Non-null by construction: the swipe menu only offers this for a row with a live device.
+        val dev = r.device ?: return
+        val prefs = getSharedPreferences("osmosis", MODE_PRIVATE)
+        val view = layoutInflater.inflate(R.layout.dialog_rtmp, null)
+        val url = view.findViewById<EditText>(R.id.rtmpUrl)
+        val ssid = view.findViewById<EditText>(R.id.rtmpSsid)
+        val psk = view.findViewById<EditText>(R.id.rtmpPsk)
+        val resSpin = view.findViewById<Spinner>(R.id.rtmpResolution)
+        val qualSpin = view.findViewById<Spinner>(R.id.rtmpQuality)
+        val eisSpin = view.findViewById<Spinner>(R.id.rtmpEis)
+
+        url.setText(prefs.getString("rtmp_url", ""))
+        ssid.setText(prefs.getString("rtmp_ssid", currentSsid()))
+        psk.setText(prefs.getString("rtmp_psk", ""))
+
+        // Resolution / quality / EIS labels come from the protocol tables, so the dialog can't drift
+        // from the bytes on the wire.
+        val resolutions = OsmoCommands.STREAM_RESOLUTIONS.keys.toList()
+        val qualities = rtmpQualities.keys.toList()
+        resSpin.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, resolutions)
+        qualSpin.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, qualities)
+        val savedRes = prefs.getString("rtmp_res", DEFAULT_STREAM_RESOLUTION)
+        val savedQuality = prefs.getString("rtmp_quality", DEFAULT_STREAM_QUALITY)
+        resSpin.setSelection(resolutions.indexOf(savedRes).coerceAtLeast(0))
+        qualSpin.setSelection(qualities.indexOf(savedQuality).coerceAtLeast(0))
+
+        // djictl only sends SetImageStabilization to an Action 4 / Action 5 Pro; on every other model
+        // the camera keeps its own setting, so the picker is inert rather than missing.
+        val eisChoices = OsmoCommands.STREAM_EIS.keys.toList()
+        eisSpin.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, eisChoices)
+        eisSpin.setSelection(eisChoices.indexOf(prefs.getString("rtmp_eis", "Off")).coerceAtLeast(0))
+        if (r.model.djiStreamType == CameraModel.DJI_TYPE_NONE) {
+            eisSpin.isEnabled = false
+            view.findViewById<TextView>(R.id.rtmpEisLabel).text = getString(R.string.rtmp_eis_unsupported)
+        }
+
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.rtmp_title, r.name ?: r.mac))
+            .setView(view)
+            .setPositiveButton(R.string.rtmp_start_button, null)
+            .setNegativeButton(R.string.cancel, null)
+            .create()
+        // Validate before letting the dialog close: an empty URL or SSID keeps the form up.
+        dlg.setOnShowListener {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val u = url.text.toString().trim()
+                val s = ssid.text.toString().trim()
+                when {
+                    u.isEmpty() -> toast(getString(R.string.rtmp_need_url))
+                    s.isEmpty() -> toast(getString(R.string.rtmp_need_ssid))
+                    else -> {
+                        prefs.edit()
+                            .putString("rtmp_url", u)
+                            .putString("rtmp_ssid", s)
+                            .putString("rtmp_psk", psk.text.toString())
+                            .putString("rtmp_res", resSpin.selectedItem.toString())
+                            .putString("rtmp_quality", qualSpin.selectedItem.toString())
+                            .putString("rtmp_eis", eisSpin.selectedItem.toString())
+                            .apply()
+                        // From here the banner shows the progress, so the form gets out of the way.
+                        dlg.dismiss()
+                        startRtmp(r, dev)
+                    }
+                }
+            }
+        }
+        dlg.show()
+    }
+
+    // ---- RTMP session state -------------------------------------------------------------------
+
+    private var rtmpBusy = false
+    private var rtmpStreaming = false
+    private var rtmpBattery = -1
+    private var rtmpHost = ""
+
+    /** What the amber banner says the stream is doing: the streamer's latest step. */
+    private var rtmpStep = ""
+
+    /** The camera row the current stream uses: the banner names it, and its row wears the LIVE tag. */
+    private var rtmpRow: CamRow? = null
+
+    /** The stream settings the form saved; [startRtmp] reads them back. */
+    private fun rtmpPref(key: String, def: String) =
+        getSharedPreferences("osmosis", MODE_PRIVATE).getString(key, def).orEmpty()
+
+    /**
+     * Kick off the livestream sequence with whatever the dialog last saved. The camera leaves its own
+     * AP when it joins the network, which kills every offload path — hence the teardown first, and
+     * why stopping the stream is the only clean way back.
+     */
+    private fun startRtmp(r: CamRow, dev: BluetoothDevice) {
+        val ssid = rtmpPref("rtmp_ssid", "")
+        val url = rtmpPref("rtmp_url", "")
+        val psk = rtmpPref("rtmp_psk", "")
+        val resolutionByte = OsmoCommands.STREAM_RESOLUTIONS[rtmpPref("rtmp_res", DEFAULT_STREAM_RESOLUTION)] ?: 0x0A
+        val bitrateKbps = rtmpQualities[rtmpPref("rtmp_quality", DEFAULT_STREAM_QUALITY)] ?: 6000
+        val eisByte = if (r.model.djiStreamType == CameraModel.DJI_TYPE_NONE) null
+            else OsmoCommands.STREAM_EIS[rtmpPref("rtmp_eis", "Off")]
+        rtmpHost = url.substringAfter("//").substringBefore("/")
+        rtmpRow = r
+        rtmp?.stop()
+        // The stream takes the camera off its AP, so the media grid behind us is dead anyway. Switch
+        // first (it also does the teardown) so the user watches the BLE progress in the banner, not a
+        // grid that can no longer load.
+        switchToSelector()
+        logLine("RTMP: ${r.name ?: r.mac} -> \"$ssid\", ${url.substringBefore('?')} @ ${bitrateKbps}kbps")
+        val settings = RtmpStreamer.StreamSettings(
+            ssid = ssid,
+            psk = psk,
+            url = url,
+            resolutionByte = resolutionByte,
+            bitrateKbps = bitrateKbps,
+            // Mimo exposes no frame-rate setting; 30 is its default and djictl's.
+            fpsByte = OsmoCommands.STREAM_FPS_30,
+            eisByte = eisByte,
+            action5Pro = r.model.djiStreamType == CameraModel.DJI_TYPE_ACTION5_PRO,
+            pin = pinOverride ?: r.model.pairingToken,
+            identifier = if (r.model.isDrone) {
+                DronePairing.identifier(getSharedPreferences("osmosis", MODE_PRIVATE))
+            } else {
+                DjiPairMessagePayload.DEFAULT_IDENTIFIER
+            },
+        )
+        rtmpBusy = true
+        rtmpStreaming = false
+        rtmpBattery = -1
+        rtmp = RtmpStreamer(this, rtmpListenerFor(++rtmpSession))
+        rtmpStep = getString(R.string.rtmp_starting, ssid)
+        renderLock()
+        logLine("RTMP: starting…")
+        rtmp?.start(dev, settings)
+    }
+
+    /** Bumped per session so a previous streamer's late callbacks can't drive the current banner. */
+    private var rtmpSession = 0
+
+    /**
+     * A fresh listener per session: [startRtmp] ends the previous streamer first, and its queued
+     * `onDone` would otherwise land after the new one started and clear the banner.
+     */
+    private fun rtmpListenerFor(session: Int) = object : RtmpStreamer.Listener {
+        private fun live() = session == rtmpSession
+
+        override fun onLog(s: String) = logLine(s)
+
+        override fun onStep(step: String) {
+            main.post {
+                if (!live()) return@post
+                rtmpStep = step
+                renderLock()
+            }
+        }
+
+        override fun onStreaming() {
+            main.post {
+                if (!live()) return@post
+                rtmpBusy = false
+                rtmpStreaming = true
+                renderLock()
+            }
+        }
+
+        override fun onBattery(pct: Int) {
+            main.post {
+                if (!live()) return@post
+                rtmpBattery = pct
+                renderLock()
+            }
+        }
+
+        override fun onDone(reason: String) {
+            main.post {
+                if (!live()) return@post
+                rtmpBusy = false
+                rtmpStreaming = false
+                rtmpBattery = -1
+                renderLock()
+                // The banner goes with the session, so say how it ended (a stop, or why it failed).
+                toast(reason)
+                // The link is released by now, so the camera is advertising again — rescan so the list
+                // marks it in range and it can be tapped for media without restarting the app.
+                if (!isFinishing && !isDestroyed) startCameraScan(select = true)
+            }
+        }
     }
 
     private fun switchToGrid() { selectorGroup.visibility = View.GONE; gridGroup.visibility = View.VISIBLE }
@@ -2067,6 +2349,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         private const val EMPTY_LIST_USED_MB = 2_000
         /** How many filenames the bulk-delete confirmation names before it says "…and N more". */
         private const val BULK_DELETE_NAMES_SHOWN = 6
+        /** Preset labels double as the stored pref values, so the dialog and the bar's restart path
+         *  must read the same one — renaming a preset here would reset everyone's saved stream. */
+        private const val DEFAULT_STREAM_RESOLUTION = "1080p"
+        private const val DEFAULT_STREAM_QUALITY = "High — 6000 kbps"
     }
 }
 

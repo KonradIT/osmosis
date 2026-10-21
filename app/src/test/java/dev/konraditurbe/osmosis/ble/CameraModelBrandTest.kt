@@ -127,6 +127,25 @@ class CameraModelBrandTest {
     }
 
     @Test
+    fun `livestream is offered on the Action and Pocket lines only`() {
+        // Action 1, 2, 3, 4, 5 Pro and 6; Pocket 3, 4 and 4 Pro.
+        listOf(0x0006, 0x0010, 0x0012, 0x0014, 0x0015, 0x0018, 0x0020, 0x0021, 0x0022).forEach { id ->
+            assertTrue("model 0x%04x".format(id), CameraModel.resolve(id, null, Brand.DJI).livestream)
+        }
+        assertFalse(CameraModel.resolve(0x0019, "OsmoNano-C2D8", Brand.DJI).livestream)
+        assertFalse(CameraModel.resolve(0x0017, "Osmo360-1234", Brand.DJI).livestream)
+        assertFalse(CameraModel.resolve(0x0070, "1001", Brand.DJI).livestream)
+    }
+
+    @Test
+    fun `every xtra livestreams except the atto`() {
+        assertTrue(CameraModel.resolve(0x0014, "XtraEdge-1234", Brand.XTRA).livestream)
+        assertTrue(CameraModel.resolve(0x0015, "XtraEdgePro-2DCA16", Brand.XTRA).livestream)
+        assertTrue(CameraModel.resolve(0x0020, "XtraMuse-1234", Brand.XTRA).livestream)
+        assertFalse(CameraModel.resolve(0x0019, "XtraAtto-1234", Brand.XTRA).livestream)
+    }
+
+    @Test
     fun `an unknown model in the camera range still gets camera defaults`() {
         val unknown = CameraModel.resolve(0x0016, "Osmo Whatever", Brand.DJI)
         assertFalse(unknown.isDrone)
