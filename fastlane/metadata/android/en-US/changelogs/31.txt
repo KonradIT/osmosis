@@ -1,0 +1,2 @@
+- New slideout menu for non media related camera actions such as starting a GPS sync session or a livestream
+- Start a livestream on your Osmo camera, thanks to @ImaginaryResources in https://github.com/KonradIT/osmosis/pull/45
