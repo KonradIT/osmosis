@@ -68,4 +68,6 @@ class ManifestGoldenTest {
     @Test fun `pocket 3 twentynine`() = check("op3_29.bin", 9004)
     @Test fun `pocket 4`() = check("op4_45.bin", 9004)
     @Test fun `action 4 with stars`() = check("oa4_45.bin", 9004)
+    @Test fun `nano internal with a loop recording`() = check("nano_loop_internal_37.bin", 9004)
+    @Test fun `nano loop recording group-expand`() = check("nano_loop_expand.bin", 9004)
 }

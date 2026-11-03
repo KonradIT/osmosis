@@ -93,8 +93,12 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     // Burst / interval group: the frames' media + thumb paths (sub-index order) and which one is shown.
     // Enumerated up-front by MainActivity via the DUML group-expand query and passed in through the intent.
+    // A looping recording's chapters are a group too, and each has its own size and duration — the
+    // lead's record carries the whole recording's duration, so neither may be borrowed from it.
     private var groupPaths: List<String> = emptyList()
     private var groupThumbs: List<String> = emptyList()
+    private var groupSizes: LongArray = LongArray(0)
+    private var groupDurations: IntArray = IntArray(0)
     private var selectedFrame = 0
     private lateinit var burstRow: LinearLayout
     private lateinit var burstStrip: View
@@ -150,6 +154,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         // cleared once you swipe away (swiped items show the group lead as a single photo).
         groupPaths = intent.getStringArrayListExtra(EXTRA_GROUP_PATHS) ?: emptyList()
         groupThumbs = intent.getStringArrayListExtra(EXTRA_GROUP_THUMBS) ?: emptyList()
+        groupSizes = intent.getLongArrayExtra(EXTRA_GROUP_SIZES) ?: LongArray(0)
+        groupDurations = intent.getIntArrayExtra(EXTRA_GROUP_DURATIONS) ?: IntArray(0)
 
         videoView = findViewById(R.id.videoView)
         photoView = findViewById(R.id.photoView)
@@ -250,6 +256,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         file = navItems[index]
         selectedFrame = 0
         groupPaths = emptyList(); groupThumbs = emptyList()   // strip only for the initially-tapped burst
+        groupSizes = LongArray(0); groupDurations = IntArray(0)
         burstRow.removeAllViews(); burstStrip.visibility = View.GONE
         main.removeCallbacks(highlightsRunnable)
         seekBar.marks = emptyList()
@@ -283,7 +290,10 @@ class MediaPreviewActivity : AppCompatActivity() {
         refreshQueueButton()
 
         when {
-            file.isVideo -> { loadVideo(); loadHighlights() }
+            file.isVideo -> {
+                if (groupPaths.size > 1) setupBurstStrip()     // a looping recording's chapters
+                loadVideo(); loadHighlights()
+            }
             file.isImage -> {
                 resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
                 if (groupPaths.size > 1) setupBurstStrip()     // frames came from the DUML group-expand
@@ -295,18 +305,28 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     /** Write the current item's queue decision straight to the grid via the bridge (no result round-trip). */
     private fun commitQueue() {
-        val member = if (groupPaths.isNotEmpty() && selectedFrame > 0)
-            file.copy(path = groupPaths[selectedFrame], thumbPath = groupThumbs.getOrNull(selectedFrame) ?: file.thumbPath)
-        else null
+        val member = if (groupPaths.isNotEmpty()) groupMember(selectedFrame) else null
         val trim = if (hasTrim()) TrimRange(trimStartMs, trimEndMs) else null
         dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(file.path, queued, trim, member)
     }
 
-    /** The file the queue button actually acts on: the shown burst frame, else the current item. */
-    private fun queueTarget(): CameraFile =
-        if (groupPaths.isNotEmpty() && selectedFrame > 0)
-            file.copy(path = groupPaths[selectedFrame], thumbPath = groupThumbs.getOrNull(selectedFrame) ?: file.thumbPath)
-        else file
+    /**
+     * Group member [i] as a file of its own: the lead's record with the member's path and thumb, and its
+     * own size and duration where the group-expand reply carried them. Frame 0 is the lead's own file, but
+     * still takes the member's duration — on a looping recording the lead's record holds the whole
+     * recording's, which would skew a trim's size estimate. A member other than the lead drops the lead's
+     * listed proxy so the preview derives the member's own.
+     */
+    private fun groupMember(i: Int): CameraFile = file.copy(
+        path = groupPaths[i],
+        thumbPath = groupThumbs.getOrNull(i) ?: file.thumbPath,
+        sizeBytes = groupSizes.getOrNull(i)?.takeIf { it > 0 } ?: if (i == 0) file.sizeBytes else 0L,
+        durationSec = groupDurations.getOrNull(i)?.takeIf { it > 0 } ?: file.durationSec,
+        proxyPath = if (groupPaths[i] == file.path) file.proxyPath else null,
+    )
+
+    /** What is on screen, and what the queue button acts on: the selected group member, else the item. */
+    private fun shownFile(): CameraFile = if (groupPaths.isNotEmpty()) groupMember(selectedFrame) else file
 
     /**
      * ROADMAP #19: when a queued still has an unlisted RAW (`.DNG`) beside it, or a queued clip an
@@ -316,7 +336,7 @@ class MediaPreviewActivity : AppCompatActivity() {
      * cell of its own; the HEAD's Content-Length becomes its size for the progress/duplicate checks.
      */
     private fun offerSidecar() {
-        val target = queueTarget()
+        val target = shownFile()
         val sc = target.sidecarCandidate() ?: return
         val url = PathAddressing.byPath(target.storage, sc.path)
         Thread {
@@ -340,7 +360,7 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     /** Drop a companion when its parent is de-queued — silent, and a no-op if it was never added. */
     private fun dropSidecar() {
-        val sc = queueTarget().sidecarCandidate() ?: return
+        val sc = shownFile().sidecarCandidate() ?: return
         dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(sc.path, false, null, null)
     }
 
@@ -373,9 +393,22 @@ class MediaPreviewActivity : AppCompatActivity() {
         if (i == selectedFrame || i !in groupPaths.indices) return
         selectedFrame = i
         updateBurstSelection()
-        loadPhoto()          // re-fetch the chosen frame (spinner shows while it loads)
+        if (file.isVideo) switchChapter() else loadPhoto()   // spinner shows while it loads
         refreshQueueButton() // a different frame may already be saved (or not)
         if (queued) commitQueue()   // the queued frame changed — keep the grid's queue in sync
+    }
+
+    /** Stream the newly selected chapter of a looping recording. Trim marks were set against the old
+     *  chapter's timeline, so they go, along with its scrub frames and player state. */
+    private fun switchChapter() {
+        trimStartMs = -1L; trimEndMs = -1L
+        updateTrimUi()
+        scrubFrames.close()
+        hideScrubPreview()
+        main.removeCallbacks(tick)
+        runCatching { videoView.stopPlayback() }
+        spinner.visibility = ProgressBar.VISIBLE
+        loadVideo()
     }
 
     private fun updateBurstSelection() {
@@ -406,12 +439,9 @@ class MediaPreviewActivity : AppCompatActivity() {
     private val downloadedCache = HashMap<String, Boolean>()
     private val savedUriCache = HashMap<String, android.net.Uri?>()
 
-    /** The item the download button acts on: the selected burst frame, or the single file. Per-frame size
-     *  is only known for the lead (frame 0), so other frames fall back to a name-only match. */
-    private fun currentCheckFile(): CameraFile =
-        if (groupPaths.isNotEmpty())
-            file.copy(path = groupPaths[selectedFrame], sizeBytes = if (selectedFrame == 0) file.sizeBytes else 0L)
-        else file
+    /** The item the download button acts on: the selected group member, or the single file. A member the
+     *  group-expand did not size falls back to a name-only match. */
+    private fun currentCheckFile(): CameraFile = shownFile()
 
     /**
      * Gray out the download button when this exact file is already fully saved in its Osmosis collection —
@@ -555,7 +585,7 @@ class MediaPreviewActivity : AppCompatActivity() {
      */
     private fun captureFrame() {
         if (capturing || videoView.isPlaying) return
-        val f = file
+        val f = shownFile()
         val ms = videoView.currentPosition.toLong()
         capturing = true
         btnCapture.visibility = View.INVISIBLE
@@ -718,7 +748,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         renderTop()                                       // onCreate already drew the top bar
         // Try the low-res proxy first (listed .LRF/.LRV, or a derived .XRF sidecar the Xtra/Action 5
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
-        streamCandidates = file.previewCandidates()
+        streamCandidates = shownFile().previewCandidates()
         streamIdx = 0
         startStream(streamCandidates[streamIdx])
     }
@@ -841,6 +871,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         const val EXTRA_GROUP_SEL_THUMB = "group_sel_thumb"  // out: …and its thumb path
         private const val EXTRA_GROUP_PATHS = "group_paths"
         private const val EXTRA_GROUP_THUMBS = "group_thumbs"
+        private const val EXTRA_GROUP_SIZES = "group_sizes"
+        private const val EXTRA_GROUP_DURATIONS = "group_durations"
         const val EXTRA_TRIM_START = "trim_start"
         const val EXTRA_TRIM_END = "trim_end"
 
@@ -864,6 +896,8 @@ class MediaPreviewActivity : AppCompatActivity() {
                 if (group.size > 1) {
                     putStringArrayListExtra(EXTRA_GROUP_PATHS, ArrayList(group.map { it.path }))
                     putStringArrayListExtra(EXTRA_GROUP_THUMBS, ArrayList(group.map { it.thumbPath }))
+                    putExtra(EXTRA_GROUP_SIZES, group.map { it.sizeBytes }.toLongArray())
+                    putExtra(EXTRA_GROUP_DURATIONS, group.map { it.durationSec }.toIntArray())
                 }
             }
     }

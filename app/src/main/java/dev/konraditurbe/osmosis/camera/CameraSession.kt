@@ -1849,6 +1849,15 @@ class CameraSession(
             ) { head = m - 8; break }
             m++
         }
+        // A video whose guard byte the scan does not accept: anchor on the tag's FIXED position instead,
+        // the one [mediaType] and [handleCandidate] read. The chapters of a looping recording come back
+        // from a group-expand as `03 f2 19 06`, path immediately after the tag — the scan missed all
+        // six, and every chapter decoded with no size, duration or resolution (nano_loop_expand.bin).
+        // Video only (`03` before the guard byte), so a still's handle still has to pass the fit.
+        if (head < 0 && ext in VIDEO_EXTS && selfPos >= 21 && selfPos <= bytes.size &&
+            bytes[selfPos - 7] == 0x19.toByte() && bytes[selfPos - 6] == 0x06.toByte() &&
+            bytes[selfPos - 9] == 0x03.toByte()
+        ) head = selfPos - 17
         val hasMarker = head >= 0
         val isVideo = ext in VIDEO_EXTS
 

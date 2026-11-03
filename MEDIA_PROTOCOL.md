@@ -261,6 +261,18 @@ Expand a group with `0x00/0x26`:
 
 Reply: a small manifest of just that group, every frame with path, thumb and size. Decode as any manifest.
 
+**Looping video** uses the same group shape (Osmo Nano, 2026-11-03). Each chapter is `…_0037_D_NNN.MP4`.
+The camera keeps only the newest chapters, so the lowest sub-index on the card can be `_026`, not `_001`.
+
+- The list returns only the oldest kept chapter. Its `u16 @ T−6` duration is the whole kept recording
+  (`337` s over six chapters), while its size is the chapter's own.
+- Group-expand on its handle returns every chapter. The camera fills the frame limit by repeating them
+  (six chapters × 20 for a limit of 120), so dedup by path.
+- Chapter records carry `03 f2 19 06` (not `03 ff`), with the media path right after `T`. Anchor `T` at
+  `mediaPathField − 7` rather than scanning for `[ff|fe] 19 06`. Every `T`-relative field then reads byte-exact.
+- Every chapter carries the group handle (`0x40100940`), so no chapter has a delete handle of its own.
+- Fixtures: `nano_loop_internal_37.bin` (list), `nano_loop_expand.bin` (group-expand reply).
+
 #### Response to 0x00/0x26
 
 DJI CompositePack (TLV). The manifest opens with a `u32-LE` file count (`0` on Action 5/6 — count

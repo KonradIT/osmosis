@@ -107,6 +107,7 @@
     <string name="download_running">正在下载…</string>
     <string name="connected_wifi">已连接 · Wi-Fi</string>
     <string name="loading_burst">正在加载连拍…</string>
+    <string name="loading_chapters">正在加载循环录像分段…</string>
     <string name="not_connected">未连接</string>
     <string name="no_media_found">%1$s 上没有媒体文件</string>
     <string name="camera_not_activated_title">%1$s 是一台全新相机，尚未激活</string>

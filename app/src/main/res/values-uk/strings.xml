@@ -107,6 +107,7 @@
     <string name="download_running">Завантаження…</string>
     <string name="connected_wifi">Підключено · WiFi</string>
     <string name="loading_burst">Завантаження серії…</string>
+    <string name="loading_chapters">Завантаження фрагментів циклу…</string>
     <string name="not_connected">Не підключено</string>
     <string name="no_media_found">На %1$s немає медіа</string>
     <string name="camera_not_activated_title">%1$s — абсолютно нова камера, не активована</string>
