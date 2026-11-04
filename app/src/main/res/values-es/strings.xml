@@ -107,6 +107,7 @@
     <string name="download_running">Descargando…</string>
     <string name="connected_wifi">Conectado · WiFi</string>
     <string name="loading_burst">Cargando ráfaga…</string>
+    <string name="loading_chapters">Cargando fragmentos del bucle…</string>
     <string name="not_connected">Sin conexión</string>
     <string name="no_media_found">%1$s no tiene contenido</string>
     <string name="camera_not_activated_title">%1$s es una cámara nueva, sin activar</string>

@@ -107,6 +107,7 @@
     <string name="download_running">Wird heruntergeladen…</string>
     <string name="connected_wifi">Verbunden · WLAN</string>
     <string name="loading_burst">Serienaufnahme wird geladen…</string>
+    <string name="loading_chapters">Loop-Abschnitte werden geladen…</string>
     <string name="not_connected">Nicht verbunden</string>
     <string name="no_media_found">%1$s enthält keine Medien</string>
     <string name="camera_not_activated_title">%1$s ist eine brandneue Kamera, nicht aktiviert</string>

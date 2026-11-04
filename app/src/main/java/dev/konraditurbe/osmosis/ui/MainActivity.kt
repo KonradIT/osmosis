@@ -1809,7 +1809,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun openPreview(f: CameraFile) {
         val dl = datalink
         if (f.isBurst && dl != null) {
-            toast(getString(R.string.loading_burst))
+            toast(getString(if (f.isVideo) R.string.loading_chapters else R.string.loading_burst))
             Thread {
                 val frames = runCatching { dl.expandBurstGroup(f) }.getOrElse { listOf(f) }
                 main.post { launchPreview(f, frames) }
