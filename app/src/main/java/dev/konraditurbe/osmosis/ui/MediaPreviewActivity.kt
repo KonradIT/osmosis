@@ -44,7 +44,7 @@ import dev.konraditurbe.osmosis.net.ImageLoader
  * button toggles this item in the download queue, written straight to the grid via [PreviewNav].
  *
  * **Swipe to browse:** a horizontal fling moves through the grid's *filtered* list (left = next, right =
- * previous) — for photos always, for videos only while paused. The high-res file is never fetched here.
+ * previous), videos included even mid-playback. The high-res file is never fetched here.
  */
 class MediaPreviewActivity : AppCompatActivity() {
 
@@ -188,7 +188,7 @@ class MediaPreviewActivity : AppCompatActivity() {
 
         // One-time wiring; the media itself is (re)loaded per item in loadCurrent().
         setupTrimListeners()
-        installSwipeAndTap()   // tap = toggle overlays; horizontal swipe (when paused) = prev/next item
+        installSwipeAndTap()   // tap = toggle overlays; horizontal swipe = prev/next item
         btnQueue.setOnClickListener {
             queued = !queued
             commitQueue()
@@ -210,8 +210,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         sizeBytes = intent.getLongExtra(EXTRA_SIZE, 0L),
         resolution = intent.getStringExtra(EXTRA_RESOLUTION))
 
-    /** Tap the media to toggle overlays; a horizontal fling moves to the prev/next item — but only when
-     *  paused (photos are always swipeable). Swipe **left = next**, **right = previous**. A photo also
+    /** Tap the media to toggle overlays; a horizontal fling moves to the prev/next item, even while a
+     *  video plays. Swipe **left = next**, **right = previous**. A photo also
      *  pinch-zooms, and while it is zoomed the fling is suppressed so a drag pans instead of navigating. */
     private fun installSwipeAndTap() {
         val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
@@ -227,7 +227,7 @@ class MediaPreviewActivity : AppCompatActivity() {
             override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
                 if (photoZoom?.isZoomed == true) return false   // panning a magnified photo, not navigating
                 if (kotlin.math.abs(vx) < kotlin.math.abs(vy) || kotlin.math.abs(vx) < 800f) return false
-                if (navItems.isEmpty() || (file.isVideo && videoView.isPlaying)) return false
+                if (navItems.isEmpty()) return false
                 loadItem(navIndex + if (vx < 0) 1 else -1)   // swipe left = next, swipe right = previous
                 return true
             }
