@@ -36,6 +36,7 @@ The BLE `[6:8]` msg-id is encoded little-endian and echoed back verbatim by the 
 | App | `0x02` |
 | Camera | `0x01` |
 | Gimbal | `0x03` |
+| Gimbal telemetry (sender of the `0x04/…` pushes) | `0x04` |
 | Battery | `0x05` |
 | WiFi | `0x07` |
 | DM368 | `0x08` |
@@ -831,7 +832,20 @@ A GET for a pid not valid in the current state answers a single error byte (`e3`
 - DUML example: <https://b3yond.d3vl.com/duml/#550d0433020100a00002617014>
 
 ### 17. Set time & timezone
-- Cmd Set / ID: `0x00` / `0x6A`  ·  App → **receiver `0x28`** (system/RTC). Receiver `0x01` silently drops it.
+
+The camera clock stamps every recorded file. Two commands set it, and a body takes one or the other:
+
+| body | command | receiver |
+|---|---|---|
+| Osmo Nano, Xtra Edge Pro / Action 5 Pro | `0x00` / `0x6A` | `0x28` |
+| Osmo Pocket 3 | `0x00` / `0x4A` | `0x04`, then `0x28` |
+| any other body | `0x00` / `0x6A` `(unconfirmed)` | `0x28` |
+
+Send right after registration on every connect. `0x00` / `0x4B` reads the clock back.
+
+#### `0x00` / `0x6A`: unix time + zone
+
+- App → **receiver `0x28`** (system/RTC). Receiver `0x01` silently drops it.
 - Payload: `01 00` · `[unix seconds : u64-LE]` · `[UTC offset minutes : i16-LE]` · `[tz len : u8]` · `[IANA tz id, ASCII]`
 
 | bytes | field | example (`Europe/Madrid`, +120 min) |
@@ -843,8 +857,65 @@ A GET for a pid not valid in the current state answers a single error byte (`e3`
 | `13..` | IANA tz id, ASCII | `45 75 72 6f 70 65 2f 4d 61 64 72 69 64` |
 
 - Response `55 … C0 00 6A 00 01 00 …` — first payload byte `0x00` = OK.
-- Send right after registration on every connect; recorded file timestamps follow the camera clock.
 - DUML example: <https://b3yond.d3vl.com/duml/#55270415022828f740006a0100ce2a666a0000000078000d4575726f70652f4d61647269640c0e>
+- **Transport: the datalink or BLE.** Over BLE, write the bare DUML frame to `fff5` after pairing; the `00 01 00` reply arrives as a notification, and no WiFi join is needed. Mimo only uses the datalink.
+- Both transports move the clock.
+- DUML example over BLE (2026-11-21 17:12:18, `Europe/Madrid`, +60 min): <https://b3yond.d3vl.com/duml/#5527041502286a8140006a0100e2c2016b000000003c000d4575726f70652f4d61647269646364>
+
+| bytes | field | BLE example |
+|---|---|---|
+| `00` | start of frame | `55` |
+| `01-02` | length (10 bit) + version | `27 04` (39 B, v1) |
+| `03` | header CRC8 | `15` |
+| `04` | sender | `02` (app) |
+| `05` | receiver | `28` (system/RTC: type `0x08`, id 1) |
+| `06-07` | sequence, `u16-LE` | `6a 81` |
+| `08` | type | `40` (request) |
+| `09` `10` | cmd set, cmd id | `00` `6a` |
+| `11-36` | payload, as above | `01 00` · `e2 c2 01 6b 00 00 00 00` · `3c 00` · `0d` · `Europe/Madrid` |
+| `37-38` | CRC16 | `63 64` |
+
+#### OP3 specific: `0x00` / `0x4A`: date fields + UTC offset (Pocket 3)
+
+- App → **receiver `0x04`** (gimbal telemetry), then the same payload to **receiver `0x28`** (system/RTC), about a second apart.
+- Payload, 9 B, camera-local time:
+
+| bytes | field | example (2026-08-17 12:54:13, +120 min) |
+|---|---|---|
+| `00-01` | year, `u16-LE` | `ea 07` (= 2026) |
+| `02` `03` | month, day | `08 11` (= 17 August) |
+| `04` `05` `06` | hour, minute, second | `0c 36 0d` (= 12:54:13) |
+| `07-08` | UTC offset minutes, `i16-LE` | `78 00` (= 120) |
+
+- Response payload `00` = OK from each receiver. `0x04` answers with type `0x80`, `0x28` with `0xC0`.
+- Mimo sends a Pocket 3 these two frames and no `0x6A`.
+- DUML examples: to `0x04` <https://b3yond.d3vl.com/duml/#551604fc0204df9740004aea0708110c360d78000c9e>, to `0x28` <https://b3yond.d3vl.com/duml/#551604fc0228139840004aea0708110c360e78003aa9>
+
+> [!NOTE]
+> Everything here comes from one Mimo capture; the clock was never read back. On a Pocket 3 these are `(unconfirmed)`:
+> - that `0x4A` moves the clock when Osmosis sends it;
+> - whether both receivers are needed, or one alone is enough;
+> - whether it also takes `0x6A`, which is all Osmosis sent it before;
+> - whether `0x4B` reads its clock;
+> - `0x4A` over BLE;
+> - the Xtra Muse rebadge.
+
+#### `0x00` / `0x4B`: read the clock
+
+- Empty payload  ·  App → **receiver `0x28`**. Receiver `0x01` does not answer it, and nothing answers `0x02` / `0x55`.
+- Reply, 10 B, camera-local time:
+
+| bytes | field | example |
+|---|---|---|
+| `00` | status, `0x00` = OK | `00` |
+| `01-02` | year, `u16-LE` | `ea 07` (= 2026) |
+| `03` `04` | month, day | `0b 15` (= 21 November) |
+| `05` `06` `07` | hour, minute, second | `11 0b 31` (= 17:11:49) |
+| `08-09` | unknown | `00 00` |
+
+- Bytes `08-09` stay `00 00` with the zone set to +60 min: they are not the UTC offset that `0x6A` carries.
+- DUML examples: request <https://b3yond.d3vl.com/duml/#550d04330228118140004b1123>, reply <https://b3yond.d3vl.com/duml/#5517043828021181c0004b00ea070b15110b3100007d96>
+- No status push carries the clock, and Mimo never sends this command. The only other trace of the clock is the timestamp of a freshly recorded file.
 
 ---
 
