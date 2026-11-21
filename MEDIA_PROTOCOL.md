@@ -168,6 +168,7 @@ concatenate chunks in arrival order.
 |---|---|
 | `+0` | `0x4A` |
 | `+1` | subtype: `0x04` stream start · `0x01` data chunk · `0x03` stream end. Only `0x01` carries bytes. |
+| `+2` | `u16-LE`: low 12 bits = payload length, bit `0x1000` = final data chunk |
 | `+4` | request counter echoed from query `@4` |
 | `+6` | `u16-LE` seq, restarts per page |
 
@@ -182,6 +183,18 @@ concatenate chunks in arrival order.
 > a race. Allow **~1.7 s** after the playback confirmation before the first query, or re-ask any store
 > that came back empty. Seen on a Nano's dock SD and on an Action 4 queried during capture.
 
+> [!IMPORTANT]
+> **Each query opens a transfer, and `4a040e10 <counter:u16> 00000000 01000000` releases it.** Mimo
+> sends the release with the query's own counter once that answer's data is in, and only then asks the
+> next store (Nano: query 2.42 s, data 2.47 s, release 2.66 s). It is the same `0x4a` lifecycle a drone
+> uses ([§28](#28-get-media-list-drone)). Do not send it on a timer.
+>
+> - After its data the camera sends a `4A 03` state frame and repeats it until released: 12 times in
+>   both raw captures, where counter 2 never was.
+> - An Action 6 answered a populated card with `4A 03` frames and **no data**, 15 across two queries,
+>   while listing its internal store normally. Osmosis answers that with the drone's `4A 02` proceed
+>   and holds the release. `(unconfirmed)`: no capture of the official app in that state.
+
 #### Filter by kind, favourite or highlight
 
 Filtering is done by the camera: a filtered query returns up to 45 *matching* records from the whole
@@ -193,7 +206,7 @@ store, not a filtered slice of the newest 45. Both masks set plus `@37 = 02` ret
 One query returns the newest 45 files. Older pages need playback mode and a handle cursor.
 
 1. Enter playback ([Holding playback mode](#holding-playback-mode)). Without it every query re-returns the newest 45.
-2. Per page send three frames: `query(cursor=1)` → `trigger` → `query(cursor=page)`. The second query's cursor selects the page. Give the two queries different counters at `@4`.
+2. Per page send three frames: `query(cursor=1)` → `release` → `query(cursor=page)`. The second query's cursor selects the page. Give the two queries different counters at `@4`. The release closes the first query's transfer: send it after that answer is in.
 
 | page | cursor `@10–13` | returns |
 |---|---|---|
@@ -209,7 +222,7 @@ One query returns the newest 45 files. Older pages need playback mode and a hand
 - Pages run either on a fresh registered session each, or inline on one session with a correct `ackSeq` ([Datalink transport](#datalink-transport--sequencing)).
 
 DUML examples:
-- trigger (`4a040e10`): <https://b3yond.d3vl.com/duml/#551b0475020100a04000264a040e10010000000000010000008d86>
+- release (`4a040e10`, counter 1): <https://b3yond.d3vl.com/duml/#551b0475020100a04000264a040e10010000000000010000008d86>
 - next page (cursor `0x401036c0`): <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000c03610402d000d0100ffffffffffffffff000100000000000000000000000000a7d3>
 - page after (cursor `0x40102b80`): <https://b3yond.d3vl.com/duml/#553704f9020100a04000264a002a10010000000000802b10402d000d0100ffffffffffffffff0001000000000000000000000000007701>
 
@@ -217,7 +230,7 @@ DUML examples:
 import struct
 
 _LIST    = bytes.fromhex("4a002a10010000000000010000002d000d0100ffffffffffffffff000100000000000000000000000000")
-_TRIGGER = bytes.fromhex("4a040e1001000000000001000000")
+_RELEASE = bytes.fromhex("4a040e1001000000000001000000")   # releases the transfer of counter 1
 VIDEO_HANDLE_BASE = 0x40000000
 
 def list_cmd(cursor: int) -> bytes:
@@ -236,7 +249,7 @@ def all_media(send_duml, collect_manifest, open_session):
     while cursor is not None:
         open_session()
         send_duml(0x00, 0x26, list_cmd(1))
-        send_duml(0x00, 0x26, _TRIGGER)
+        send_duml(0x00, 0x26, _RELEASE)          # once the first query's answer is in, not on a timer
         send_duml(0x00, 0x26, list_cmd(cursor))
         page = collect_manifest()
         for f in page:

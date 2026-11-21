@@ -184,11 +184,82 @@ class CameraSession(
     }
     private val lastSlices = HashMap<Int, SliceInfo>()
 
+    /**
+     * How far the camera has got in answering one list query, read off its `0x00/0x27` frames in
+     * arrival order by [answerState]. It decides when that query's transfer may be released.
+     *
+     *  - [SILENT]: nothing under this counter yet.
+     *  - [WAITING]: `4A 03` state frames and no data. An Action 6 answered its card this way, 15 state
+     *    frames across two queries and never a chunk, while the same pass listed 45 internal files
+     *    (issue #53). A drone raises this frame before its data and waits for a `4A 02` proceed.
+     *  - [EMPTY]: a `4A 04` and no data, the answer of a store with nothing mounted (Nano, Xtra).
+     *  - [STREAMING]: data chunks, the last one not in yet.
+     *  - [DONE]: the chunk flagged final arrived, or a state frame followed the data.
+     */
+    internal enum class Answer { SILENT, WAITING, EMPTY, STREAMING, DONE }
+
+    /**
+     * When to release the SD query's transfer, decided once per collect step.
+     *
+     * The release is the `4A 04` frame this file called the "trigger" and sent on a timer, one step
+     * after the query whatever had come back. In Mimo it belongs to a transfer: it carries that query's
+     * counter and goes out once its data is in (`mimo_nano_delete.pcap`: query 2.42 s, data 2.47 s,
+     * release 2.66 s), and only then is the next store asked.
+     *
+     * [next] keeps the old timing when the answer is already there, so nothing changes for a card that
+     * answers at once: the release never goes out before [minStep]. Past that it waits for the answer
+     * to finish. A stream that loses its final chunk is released after [quietSteps] steps without a new
+     * record, a camera that only raises state frames is told to proceed once and given [proceedWait]
+     * steps to start sending, and nothing holds the transfer past [maxSteps].
+     *
+     * The proceed is unconfirmed on an Osmo body. It is the drone's lifecycle, sent here only in the
+     * one case that otherwise lists no card at all.
+     */
+    internal class SdTransfer(
+        private val minStep: Int,
+        private val quietSteps: Int,
+        private val proceedWait: Int,
+        private val maxSteps: Int,
+    ) {
+        enum class Action { WAIT, PROCEED, RELEASE }
+
+        var released = false
+            private set
+        private var proceededAt = -1
+        private var lastRecords = -1
+        private var quiet = 0
+
+        /** [step] counts collect steps since the query went out; [records] is the SD records in so far. */
+        fun next(step: Int, answer: Answer, records: Int): Action {
+            if (released) return Action.WAIT
+            quiet = if (records == lastRecords) quiet + 1 else 0
+            lastRecords = records
+            if (answer == Answer.WAITING && proceededAt < 0) {
+                proceededAt = step
+                return Action.PROCEED
+            }
+            val due = step >= maxSteps || when (answer) {
+                Answer.DONE, Answer.EMPTY -> true
+                Answer.STREAMING -> quiet >= quietSteps
+                Answer.WAITING -> step - proceededAt >= proceedWait
+                Answer.SILENT -> false
+            }
+            if (step < minStep || !due) return Action.WAIT
+            released = true
+            return Action.RELEASE
+        }
+    }
+
     // Request counters we put at byte 4 of each 0x00/0x26, echoed back at sub-header byte 4 of every
     // 0x00/0x27 chunk answering it. Counter 1 is the SD query, counter 2 the internal one; each carries
     // its store's newest-page selector on the first load and that store's page cursor thereafter.
     private val SD_QUERY_CTR = 1
     private val INTERNAL_QUERY_CTR = 2
+    // The SD query's transfer control frames, both carrying its counter at byte 4. They are the `0x4a`
+    // family a drone uses (DroneManifest.listAck / transferGo, pinned there against DJI Fly's bytes):
+    // `4A 04` releases a transfer, `4A 02` answers a state frame raised before any data.
+    internal val SD_RELEASE = hex("4a040e1001000000000001000000")
+    internal val SD_PROCEED = hex("4a020f100100000000000000000000")
     // Frame limit for a burst/interval group-expand query (byte 14). Generous — covers long interval
     // timelapses; any spill into older files is filtered out by the group base name. See expandBurstGroup.
     private val GROUP_EXPAND_LIMIT = 120
@@ -293,32 +364,74 @@ class CameraSession(
         sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
 
     /**
-     * The fast initial load: the proven 3-command sequence for the newest ~45 files, no playback mode
-     * needed. Older pages are lazy — the grid's infinite scroll calls [fetchNextPage].
+     * The fast initial load: SD query, release of its transfer, internal query, for the newest ~45
+     * files of each store. Older pages are lazy — the grid's infinite scroll calls [fetchNextPage].
      */
     private fun queryNewestPage(): List<CameraFile> {
         // Byte-identical to the proven newest-page blob (PaginationTest pins it); built through listCmd
         // so a debug page size reaches the first page too.
         sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, NEWEST_SD), receiverType = 0x01, receiverId = 0)
         val blob = java.io.ByteArrayOutputStream()
+        val sd = sdTransferByBatch()
+        var internalAskedAt = -1
         var lastCount = -1
         var stable = 0
         for (batch in 0 until 15) {
             for (r in recvAll(800)) blob.write(r); sendAck()
             holdPlayback()
-            if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"),
-                receiverType = 0x01, receiverId = 0)
-            if (batch == 2) sendDuml(0x00, 0x26, listCmd(INTERNAL_QUERY_CTR, NEWEST_INTERNAL),
-                receiverType = 0x01, receiverId = 0)
+            // The internal store is asked one batch after the SD transfer is released, and the release
+            // waits for the SD answer ([SdTransfer]). With a card that answers at once that is the
+            // release on batch 1 and the query on batch 2, as it always was.
+            if (internalAskedAt < 0) {
+                if (sd.released) {
+                    sendDuml(0x00, 0x26, listCmd(INTERNAL_QUERY_CTR, NEWEST_INTERNAL),
+                        receiverType = 0x01, receiverId = 0)
+                    internalAskedAt = batch
+                } else stepSdTransfer(sd, batch, blob.toByteArray())
+            }
             val count = distinctPaths(blob)
             if (count != lastCount) log("datalink: $count files (batch $batch)")
             onFetchProgress?.invoke((55 + batch * 6).coerceAtMost(95))
             // Done when the camera has closed both answers; otherwise wait for the count to settle.
-            if (batch >= 3 && streamsEnded(blob.toByteArray(), SD_QUERY_CTR, INTERNAL_QUERY_CTR)) break
-            if (batch >= 4 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
+            // Neither test may fire before the internal store has been asked and had a batch to answer.
+            val asked = internalAskedAt >= 0
+            if (asked && batch > internalAskedAt && streamsEnded(blob.toByteArray(), SD_QUERY_CTR, INTERNAL_QUERY_CTR)) break
+            if (asked && batch > internalAskedAt + 1 && count > 0 && count == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = count
         }
         return collectStores(retrySdIfNotReady(blob))
+    }
+
+    private fun sdTransferByBatch() = SdTransfer(
+        minStep = 1, quietSteps = 1, proceedWait = SD_PROCEED_WAIT_BATCHES, maxSteps = SD_HOLD_MAX_BATCHES)
+
+    private fun sdTransferByTick() = SdTransfer(
+        minStep = 1, quietSteps = STREAM_QUIET_TICKS, proceedWait = SD_PROCEED_WAIT_TICKS, maxSteps = SD_HOLD_MAX_TICKS)
+
+    /**
+     * One collect step of the SD transfer's lifecycle: tell a camera that is waiting to proceed, or
+     * release the transfer once [sd] says its answer is in. True on the step the release goes out.
+     *
+     * [from] is where this query's frames start in [raw], for a blob that already holds an earlier
+     * answer under the same counter (the SD retry).
+     */
+    private fun stepSdTransfer(sd: SdTransfer, step: Int, raw: ByteArray, from: Int = 0): Boolean {
+        val answer = answerState(raw, SD_QUERY_CTR, from)
+        val records = countMediaPaths(manifestBytes(raw, requestCtr = SD_QUERY_CTR))
+        when (sd.next(step, answer, records)) {
+            SdTransfer.Action.PROCEED -> {
+                log("datalink: SD list raised a state frame before any data — sending proceed (4A 02)")
+                sendDuml(0x00, 0x26, SD_PROCEED, receiverType = 0x01, receiverId = 0)
+            }
+            SdTransfer.Action.RELEASE -> {
+                if (answer == Answer.WAITING || answer == Answer.SILENT)
+                    log("datalink: SD list still ${answer.name.lowercase()} — releasing its transfer unanswered")
+                sendDuml(0x00, 0x26, SD_RELEASE, receiverType = 0x01, receiverId = 0)
+                return true
+            }
+            SdTransfer.Action.WAIT -> {}
+        }
+        return false
     }
 
     /**
@@ -339,11 +452,12 @@ class CameraSession(
         if (manifestBytes(first, requestCtr = SD_QUERY_CTR).isNotEmpty()) return first
         log("datalink: SD store answered empty — re-asking once (it may not have been mounted yet)")
         sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, NEWEST_SD), receiverType = 0x01, receiverId = 0)
+        val sd = sdTransferByBatch()
         for (batch in 0 until 6) {
             for (r in recvAll(700)) blob.write(r); sendAck()
             holdPlayback()
-            if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"),
-                receiverType = 0x01, receiverId = 0)
+            // Judge this query by its own frames: the blob still holds the first, empty answer.
+            if (!sd.released) stepSdTransfer(sd, batch, blob.toByteArray(), from = first.size)
         }
         val again = blob.toByteArray()
         val n = countMediaPaths(manifestBytes(again, requestCtr = SD_QUERY_CTR))
@@ -365,27 +479,29 @@ class CameraSession(
     /**
      * Fetch the next OLDER page for the grid's infinite scroll, returning ONLY the newly-seen files
      * (empty when exhausted). Pagination (from a DJI-Mimo pcap): enter PLAYBACK MODE (0x02/0x0c=01 01 00
-     * 01), then per page query(cursor=1) → trigger → query(cursor=[oldest video handle], 4-byte LE at
-     * bytes 10-13). The camera drops the datalink after ~2 pages and any keepalive drifts udpSeq out of
-     * window, so each call runs in a FRESH registered session (like the delete flow), then restores the
-     * browse keep-alive. Blocking; call off the UI thread.
+     * 01), then per page query(SD cursor) → release of that transfer once it has answered ([SdTransfer])
+     * → query(internal cursor), each cursor a 4-byte LE handle at bytes 10-13. The camera drops the
+     * datalink after ~2 pages and any keepalive drifts udpSeq out of window, so each call runs in a
+     * FRESH registered session (like the delete flow), then restores the browse keep-alive. Blocking;
+     * call off the UI thread.
      */
     @Synchronized
     override fun fetchNextPage(): List<CameraFile> {
         if (!moreAvailable) return emptyList()
 
         // Inline on the live session first (playback held) — the win that makes scroll instant (#12).
-        // Same frame sequence as the fresh path: query(sdCursor) → trigger → query(internalCursor). Run
-        // stepPagination (which advances the cursors) ONLY on a non-empty decode, so a failed inline query
-        // falls through to the fresh path without double-advancing.
+        // Same frame sequence as the fresh path: query(sdCursor) → release of that transfer once its
+        // answer is in → query(internalCursor). Run stepPagination (which advances the cursors) ONLY on
+        // a non-empty decode, so a failed inline query falls through to the fresh path without
+        // double-advancing.
         if (keepAliveOn) {
             // A two-store page can take several seconds: the Xtra answered the internal query ~2.5 s
             // after the SD one on a newest-page load. The old 4 s deadline cut such pages short.
             val blob = runManifestQuery(
                 listCmd(SD_QUERY_CTR, sdCursor),
-                hex("4a040e1001000000000001000000"),
                 listCmd(INTERNAL_QUERY_CTR, internalCursor),
-                timeoutMs = PAGE_STREAM_TIMEOUT_MS)
+                timeoutMs = PAGE_STREAM_TIMEOUT_MS,
+                sdList = true)
             val page = blob?.let { collectStores(it) } ?: emptyList()
             // A truncated slice is not a page: taking it would make the count rule call the library
             // finished. Re-ask in a fresh session instead, whose 800 ms windows and end-frame check
@@ -422,15 +538,23 @@ class CameraSession(
         for (b in 0 until 2) { recvAll(250); sendAck() }
         val blob = java.io.ByteArrayOutputStream()
         sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, sdCursor), receiverType = 0x01, receiverId = 0)
+        val sd = sdTransferByBatch()
+        var internalAskedAt = -1
         var lastCount = -1; var stable = 0
         for (batch in 0 until 12) {
             for (r in recvAll(800)) blob.write(r); sendAck()
-            if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"), receiverType = 0x01, receiverId = 0)
-            if (batch == 2) sendDuml(0x00, 0x26, listCmd(INTERNAL_QUERY_CTR, internalCursor),
-                receiverType = 0x01, receiverId = 0)                                    // page selector
+            // As in [queryNewestPage]: release the SD transfer once its answer is in, then ask internal.
+            if (internalAskedAt < 0) {
+                if (sd.released) {
+                    sendDuml(0x00, 0x26, listCmd(INTERNAL_QUERY_CTR, internalCursor),
+                        receiverType = 0x01, receiverId = 0)                            // page selector
+                    internalAskedAt = batch
+                } else stepSdTransfer(sd, batch, blob.toByteArray())
+            }
             val c = distinctPaths(blob)
-            if (batch >= 3 && streamsEnded(blob.toByteArray(), SD_QUERY_CTR, INTERNAL_QUERY_CTR)) break
-            if (batch >= 4 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
+            val asked = internalAskedAt >= 0
+            if (asked && batch > internalAskedAt && streamsEnded(blob.toByteArray(), SD_QUERY_CTR, INTERNAL_QUERY_CTR)) break
+            if (asked && batch > internalAskedAt + 1 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
             lastCount = c
         }
         val page = collectStores(blob.toByteArray())
@@ -745,11 +869,13 @@ class CameraSession(
         val replySet: Int, val replyCmd: Int, val deadlineMs: Long,
         val primeFrames: List<ByteArray> = emptyList(),  // extra frames, one per tick after the query (stream priming)
         val stream: Boolean = false,        // true = collect the 0x00/0x27 manifest stream until it settles
+        val sdTransfer: SdTransfer? = null, // set = the query is an SD list: release its transfer first, then prime
     ) {
         val blob = java.io.ByteArrayOutputStream()   // raw datagrams for a stream query
         @Volatile var reply: ByteArray? = null
         @Volatile var done = false
         var ticks = 0; var lastCount = -1; var stable = 0
+        var primeFrom = 0                   // the tick the prime frames follow: 0, or the SD release's
     }
     private val cmdQueue = java.util.concurrent.ConcurrentLinkedQueue<PendingCmd>()
     @Volatile private var awaitingCmd: PendingCmd? = null   // in flight, session-thread owned
@@ -776,13 +902,20 @@ class CameraSession(
      * then [trigger] one tick later, collect the `0x00/0x27` stream until the file count settles, and return
      * the raw blob (feed to `manifestBytes` + `decodeManifest`). Null if the keep-alive isn't running.
      */
-    fun runManifestQuery(payload: ByteArray, vararg primeFrames: ByteArray, timeoutMs: Long = 4000): ByteArray? {
+    fun runManifestQuery(
+        payload: ByteArray, vararg primeFrames: ByteArray, timeoutMs: Long = 4000, sdList: Boolean = false,
+    ): ByteArray? {
         // Completion is decided on the keep-alive tick: the camera's own `end` frame for every counter it
         // opened, else the path count sitting still for STREAM_QUIET_TICKS, else [timeoutMs] — and a
         // deadline hit hands back whatever arrived, which the page step then checks for truncation.
+        //
+        // With [sdList], [payload] is the SD list query: its transfer is released when its answer is in
+        // ([stepSdTransfer]) and the [primeFrames] follow that release, one per tick. Without it the
+        // prime frames go out one per tick straight after the query.
         if (!keepAliveOn) return null
         val c = PendingCmd(0x00, 0x26, payload, 0x01, 0, 2, 0x00, 0x27,
-            System.currentTimeMillis() + timeoutMs, primeFrames = primeFrames.toList(), stream = true)
+            System.currentTimeMillis() + timeoutMs, primeFrames = primeFrames.toList(), stream = true,
+            sdTransfer = if (sdList) sdTransferByTick() else null)
         cmdQueue.add(c)
         while (!c.done && System.currentTimeMillis() < c.deadlineMs + 600) runCatching { Thread.sleep(30) }
         return c.reply
@@ -995,15 +1128,18 @@ class CameraSession(
                         if (c.stream) {
                             for (r in dg) c.blob.write(r)
                             c.ticks++
-                            if (c.ticks in 1..c.primeFrames.size)       // send each prime frame one tick apart
-                                sendDuml(c.set, c.cmd, c.primeFrames[c.ticks - 1], receiverType = c.rType, receiverId = c.rId, cmdType = c.cType)
+                            val sd = c.sdTransfer
+                            if (sd != null && !sd.released) {           // hold the prime frames for the SD release
+                                if (stepSdTransfer(sd, c.ticks, c.blob.toByteArray())) c.primeFrom = c.ticks
+                            } else if (c.ticks - c.primeFrom in 1..c.primeFrames.size)   // then one prime frame per tick
+                                sendDuml(c.set, c.cmd, c.primeFrames[c.ticks - c.primeFrom - 1], receiverType = c.rType, receiverId = c.rId, cmdType = c.cType)
                             val cnt = distinctPaths(c.blob)
                             // First choice: the camera closed every answer it opened (`4A 03` end frame per
                             // counter). Second: the count has not moved for STREAM_QUIET_TICKS. The old
                             // 2-tick (400 ms) quiet test fired inside a mid-stream pause and returned a
                             // page missing its last chunks — the oldest records — which the short-page
                             // rule then read as the end of the library.
-                            val allSent = c.ticks >= c.primeFrames.size + 1
+                            val allSent = (sd == null || sd.released) && c.ticks >= c.primeFrom + c.primeFrames.size + 1
                             if (allSent && cnt > 0 && streamsEnded(c.blob.toByteArray())) {
                                 c.reply = c.blob.toByteArray(); c.done = true; awaitingCmd = null
                             } else if (allSent && cnt > 0 && cnt == c.lastCount) {
@@ -1455,7 +1591,8 @@ class CameraSession(
         // i.e. the camera OPENED the SD transfer and then streamed no data and no end frame — it answered
         // "nothing there". A missing ctr1 entirely would mean the query never got served, which is ours
         // to fix; `start` with no `data` is the camera's answer and is not a bug.
-        if (sd.isEmpty()) log("datalink: SD slice empty — reply frames by request counter: ${chunkCensus(raw)}")
+        if (sd.isEmpty()) log("datalink: SD slice empty — reply frames by request counter: ${chunkCensus(raw)}" +
+            "; SD control frames: ${controlFrames(raw, SD_QUERY_CTR)}")
         val ambiguous = sd.isNotEmpty() && internal.isNotEmpty() &&
             sd.map { it.path }.toSet() == internal.map { it.path }.toSet()
         if ((sd.isEmpty() && internal.isEmpty()) || ambiguous) {
@@ -1538,6 +1675,59 @@ class CameraSession(
             i += len
         }
         return tally
+    }
+
+    /** Visit every `0x00/0x27` `4A` frame in [raw] from offset [from] on, in arrival order, by payload offset. */
+    private inline fun forEachListFrame(raw: ByteArray, from: Int = 0, visit: (payloadAt: Int) -> Unit) {
+        var i = from
+        while (i + 13 <= raw.size) {
+            if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
+            val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
+            if (len < 13 || i + len > raw.size) { i++; continue }
+            if ((raw[i + 9].toInt() and 0xFF) == 0x00 && (raw[i + 10].toInt() and 0xFF) == 0x27 &&
+                len - 13 >= 10 && (raw[i + 11].toInt() and 0xFF) == 0x4A
+            ) visit(i + 11)
+            i += len
+        }
+    }
+
+    /**
+     * Where the camera is in answering request [ctr] — see [Answer]. Arrival order is what separates the
+     * cases: a state frame after the data closes the answer, the same frame with no data before it is
+     * the camera waiting.
+     *
+     * The last data chunk carries `0x1000` in the sub-header's `u16` at `+2`. It is set on the final
+     * chunk of both raw captures (`nano_45.bin`, `xtra_13.bin`) and on no other.
+     */
+    internal fun answerState(raw: ByteArray, ctr: Int, from: Int = 0): Answer {
+        var start = false; var state = false; var data = false; var closed = false
+        forEachListFrame(raw, from) { p ->
+            if ((raw[p + 4].toInt() and 0xFF) == ctr) when (raw[p + 1].toInt() and 0xFF) {
+                0x04 -> start = true
+                0x03 -> { state = true; if (data) closed = true }
+                0x01 -> { data = true; closed = (raw[p + 3].toInt() and 0x10) != 0 }
+            }
+        }
+        return when {
+            data -> if (closed) Answer.DONE else Answer.STREAMING
+            start -> Answer.EMPTY
+            state -> Answer.WAITING
+            else -> Answer.SILENT
+        }
+    }
+
+    /**
+     * The control frames (everything but data) the camera sent under request [ctr], as distinct
+     * sub-headers with a count, e.g. `4a030a00010000000000×15`. Diagnostic only: the four bytes after
+     * the counter are the transfer state, which a frame count alone does not show.
+     */
+    private fun controlFrames(raw: ByteArray, ctr: Int): String {
+        val seen = LinkedHashMap<String, Int>()
+        forEachListFrame(raw) { p ->
+            if ((raw[p + 4].toInt() and 0xFF) == ctr && (raw[p + 1].toInt() and 0xFF) != 0x01)
+                seen.merge((p until p + 10).joinToString("") { "%02x".format(raw[it]) }, 1, Int::plus)
+        }
+        return seen.entries.joinToString(" ") { (frame, n) -> "$frame×$n" }.ifEmpty { "none" }
     }
 
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
@@ -2290,6 +2480,17 @@ class CameraSession(
          * between the SD and internal answers, or inside one, returned a page missing its tail.
          */
         private const val STREAM_QUIET_TICKS = 5
+
+        /**
+         * Limits on holding the SD transfer open before releasing it ([SdTransfer]), in collect steps:
+         * how long a camera gets to start sending after a proceed, and the longest a transfer is held
+         * with nothing settled. A batch is a ~800 ms receive (first load, fresh-session page, SD retry),
+         * a tick the keep-alive's 200 ms (inline page), so both pairs come to ~1.6 s and ~3–4 s.
+         */
+        private const val SD_PROCEED_WAIT_BATCHES = 2
+        private const val SD_HOLD_MAX_BATCHES = 4
+        private const val SD_PROCEED_WAIT_TICKS = 8
+        private const val SD_HOLD_MAX_TICKS = 15
 
         /** Deadline for an inline two-store page. A newest-page load on an Xtra takes ~4.5 s. */
         private const val PAGE_STREAM_TIMEOUT_MS = 12_000L
