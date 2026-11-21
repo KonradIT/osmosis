@@ -167,7 +167,7 @@ concatenate chunks in arrival order.
 | sub-header | field |
 |---|---|
 | `+0` | `0x4A` |
-| `+1` | subtype: `0x04` stream start · `0x01` data chunk · `0x03` stream end. Only `0x01` carries bytes. |
+| `+1` | subtype: `0x04` stream start · `0x01` data chunk · `0x03` transfer state. Only `0x01` carries bytes. |
 | `+2` | `u16-LE`: low 12 bits = payload length, bit `0x1000` = final data chunk |
 | `+4` | request counter echoed from query `@4` |
 | `+6` | `u16-LE` seq, restarts per page |
@@ -189,11 +189,19 @@ concatenate chunks in arrival order.
 > next store (Nano: query 2.42 s, data 2.47 s, release 2.66 s). It is the same `0x4a` lifecycle a drone
 > uses ([§28](#28-get-media-list-drone)). Do not send it on a timer.
 >
-> - After its data the camera sends a `4A 03` state frame and repeats it until released: 12 times in
->   both raw captures, where counter 2 never was.
-> - An Action 6 answered a populated card with `4A 03` frames and **no data**, 15 across two queries,
->   while listing its internal store normally. Osmosis answers that with the drone's `4A 02` proceed
->   and holds the release. `(unconfirmed)`: no capture of the official app in that state.
+> - Release every query, the second store's too. After its data the camera sends a `4A 03` state frame
+>   and repeats it until released: 12 times in both raw captures, where counter 2 never was.
+> - **`4A 03` is a state frame, not an end marker.** An Action 6 raises it *before* a store's data on
+>   most older pages. Read as "this answer is closed" it ends the page early: that body returned its
+>   internal store with 31 of 45 records, then with none, and the empty answer was taken for the end of
+>   the store. An answer is complete on the chunk flagged final (`+2` bit `0x1000`), or when every
+>   record the header declares has arrived.
+> - **A store that answers with state frames and no data has not run out.** Ask it again. Only a
+>   `4A 04` start frame with no data means there is nothing on it.
+> - When the state frame comes first, Osmosis sends the drone's `4A 02` proceed and holds the release.
+>   On an Action 6 (firmware `01.05.08.03`) the card's list followed within ~2–3.6 s on four pages out
+>   of four. Whether the data would have come without the proceed is `(unconfirmed)`: no capture of
+>   the official app in that state, and a client that sends no proceed got the same pages on a retry.
 
 #### Filter by kind, favourite or highlight
 
@@ -217,7 +225,7 @@ One query returns the newest 45 files. Older pages need playback mode and a hand
 - Only handles `≥ 0x40000000` advance the cursor; a low-namespace photo handle stalls paging.
 - Consecutive pages overlap by one boundary file; dedup by media path.
 - **End of library = the `0c 01` TLV**.
-- **Completeness:** the manifest's leading `u32-LE` count is the number of records in *this page* (45 on a full page), not the library size. Fewer records than declared = the collector stopped before the last chunks arrived; on a newest-first list the missing tail is the oldest files. Wait for the `4A 03` end frame of every counter before decoding — a store with nothing on it sends `start` only and never ends.
+- **Completeness:** the manifest's leading `u32-LE` count is the number of records in *this page* (45 on a full page), not the library size. Fewer records than declared = the collector stopped before the last chunks arrived; on a newest-first list the missing tail is the oldest files. Wait for every counter's final chunk (`+2` bit `0x1000`) before decoding, not for a `4A 03`, which can precede the data. A store with nothing on it sends `start` only.
 - A two-store page can take ~4.5 s (Xtra: the internal answer follows the SD one by ~2.5 s). A collector that returns after 400 ms of quiet, or at a 4 s deadline, hands back a cut page.
 - Pages run either on a fresh registered session each, or inline on one session with a correct `ackSeq` ([Datalink transport](#datalink-transport--sequencing)).
 

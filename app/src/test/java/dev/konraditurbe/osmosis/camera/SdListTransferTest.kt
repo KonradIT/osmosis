@@ -1,8 +1,8 @@
 package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.camera.CameraSession.Answer
-import dev.konraditurbe.osmosis.camera.CameraSession.SdTransfer
-import dev.konraditurbe.osmosis.camera.CameraSession.SdTransfer.Action
+import dev.konraditurbe.osmosis.camera.CameraSession.ListTransfer
+import dev.konraditurbe.osmosis.camera.CameraSession.ListTransfer.Action
 import dev.konraditurbe.osmosis.drone.DroneManifest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -40,8 +40,9 @@ class SdListTransferTest {
     private fun state(ctr: Int) = frame(0x03, ctr)
     private fun data(ctr: Int, final: Boolean = false) = frame(0x01, ctr, ByteArray(40) { 0x20 }, final)
 
-    /** The batch-paced transfer the first load uses: release no earlier than step 1. */
-    private fun transfer() = SdTransfer(minStep = 1, quietSteps = 1, proceedWait = 2, maxSteps = 4)
+    /** A batch-paced transfer: release no earlier than step 1. */
+    private fun transfer(hold: Boolean = true) =
+        ListTransfer(ctr = 1, minStep = 1, quietSteps = 1, proceedWait = 2, maxSteps = 4, hold = hold)
 
     // ---- reading the answer ------------------------------------------------------------------------
 
@@ -65,12 +66,34 @@ class SdListTransferTest {
     }
 
     @Test
-    fun `an answer is done at its final chunk or at a state frame after its data`() {
+    fun `an answer is done at its final chunk, and a state frame never closes it`() {
         assertEquals("mid-stream", Answer.STREAMING, s.answerState(data(1) + data(1), 1))
         assertEquals("final chunk", Answer.DONE, s.answerState(data(1) + data(1, final = true), 1))
-        assertEquals("state after data", Answer.DONE, s.answerState(data(1) + state(1), 1))
+        assertEquals("final chunk, then the state frames that follow it", Answer.DONE,
+            s.answerState(data(1) + data(1, final = true) + state(1) + state(1), 1))
         // The waiting camera that then starts sending is streaming, not done: its state frames came first.
         assertEquals("state before data", Answer.STREAMING, s.answerState(state(1) + state(1) + data(1), 1))
+    }
+
+    /**
+     * Issue #53, second log. With the card listing at last, the internal store came back with 31 of 45
+     * records on one page and none on the last, each time "ended": a state frame under its counter had
+     * been read as the end of an answer that was still arriving, or had not begun.
+     */
+    @Test
+    fun `a state frame in the middle of a stream is not its end`() {
+        assertEquals(Answer.STREAMING, s.answerState(data(2) + data(2) + state(2), 2))
+        assertEquals("and the rest still counts", Answer.DONE,
+            s.answerState(data(2) + state(2) + data(2, final = true), 2))
+    }
+
+    /** The internal query follows the SD one on the same blob, where an earlier transfer may still be talking. */
+    @Test
+    fun `the internal answer is judged from where its query went out`() {
+        val before = data(1) + data(1, final = true) + state(2)      // a state frame left over under counter 2
+        assertEquals("nothing of the new answer yet", Answer.SILENT, s.answerState(before, 2, from = before.size))
+        assertEquals(Answer.WAITING, s.answerState(before + state(2), 2, from = before.size))
+        assertEquals(Answer.DONE, s.answerState(before + state(2) + data(2, final = true), 2, from = before.size))
     }
 
     /** The SD retry appends to a blob that already holds the first, empty answer under the same counter. */
@@ -134,6 +157,24 @@ class SdListTransferTest {
         assertEquals(Action.RELEASE, t.next(4, Answer.SILENT, 0))
     }
 
+    /** The limit is for silence only. An Action 6 took 3.6 s over one card page; a cap would have cut it. */
+    @Test
+    fun `a stream that keeps growing is never cut by the silence limit`() {
+        val t = transfer()
+        for (step in 0..9) assertEquals("step $step", Action.WAIT, t.next(step, Answer.STREAMING, step * 5))
+        assertEquals(Action.RELEASE, t.next(10, Answer.DONE, 45))
+    }
+
+    /** A store past its end marker, or never populated, keeps the old timing: step 1, no proceed, no waiting. */
+    @Test
+    fun `a store with nothing older to give is released on step one whatever it says`() {
+        for (answer in Answer.values()) {
+            val t = transfer(hold = false)
+            assertEquals("$answer, step 0", Action.WAIT, t.next(0, answer, 0))
+            assertEquals("$answer, step 1", Action.RELEASE, t.next(1, answer, 0))
+        }
+    }
+
     // ---- the frames ----------------------------------------------------------------------------------
 
     /** The release is the frame this file always sent; the proceed is the drone's, for counter 1. */
@@ -142,5 +183,15 @@ class SdListTransferTest {
         assertEquals("4a040e1001000000000001000000", s.SD_RELEASE.joinToString("") { "%02x".format(it) })
         assertArrayEquals(DroneManifest.listAck(1), s.SD_RELEASE)
         assertArrayEquals(DroneManifest.transferGo(1), s.SD_PROCEED)
+    }
+
+    /** The internal store's transfer is released and proceeded with its own counter, 2. */
+    @Test
+    fun `each store's control frames carry its own counter`() {
+        assertArrayEquals(s.SD_RELEASE, s.listRelease(1))
+        assertArrayEquals(DroneManifest.listAck(2), s.listRelease(2))
+        assertArrayEquals(DroneManifest.transferGo(2), s.listProceed(2))
+        assertEquals("the SD frame itself is left alone", "4a040e1001000000000001000000",
+            s.SD_RELEASE.joinToString("") { "%02x".format(it) })
     }
 }
