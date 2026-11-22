@@ -192,16 +192,19 @@ concatenate chunks in arrival order.
 > - Release every query, the second store's too. After its data the camera sends a `4A 03` state frame
 >   and repeats it until released: 12 times in both raw captures, where counter 2 never was.
 > - **`4A 03` is a state frame, not an end marker.** An Action 6 raises it *before* a store's data on
->   most older pages. Read as "this answer is closed" it ends the page early: that body returned its
->   internal store with 31 of 45 records, then with none, and the empty answer was taken for the end of
->   the store. An answer is complete on the chunk flagged final (`+2` bit `0x1000`), or when every
->   record the header declares has arrived.
+>   some older pages, for either store and not the same pages each time: the card on four pages of four
+>   in one walk; in the next the card on two of five and the internal store on one. Read as "this
+>   answer is closed" it ends the page early: that body returned its internal store with 31 of 45
+>   records, then with none, and the empty answer was taken for the end of the store. An answer is
+>   complete on the chunk flagged final (`+2` bit `0x1000`), or when every record the header declares
+>   has arrived. Read that way, the same body listed both stores down to their `0c 01` end marker.
 > - **A store that answers with state frames and no data has not run out.** Ask it again. Only a
 >   `4A 04` start frame with no data means there is nothing on it.
 > - When the state frame comes first, Osmosis sends the drone's `4A 02` proceed and holds the release.
->   On an Action 6 (firmware `01.05.08.03`) the card's list followed within ~2–3.6 s on four pages out
->   of four. Whether the data would have come without the proceed is `(unconfirmed)`: no capture of
->   the official app in that state, and a client that sends no proceed got the same pages on a retry.
+>   On an Action 6 (firmware `01.05.08.03`) the full page followed every time: the card's within
+>   ~1.7–3.6 s on six pages, the internal store's within ~0.6 s on one. Whether the data would have
+>   come without the proceed is `(unconfirmed)`: no capture of the official app in that state, and a
+>   client that sends no proceed got the same pages on a retry.
 
 #### Filter by kind, favourite or highlight
 
