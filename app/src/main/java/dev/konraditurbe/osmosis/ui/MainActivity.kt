@@ -123,6 +123,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private var datalinkStarted = false
     /** Why the process is not bound to the camera network, or null when it is. See [BindFailure]. */
     private var cameraBindFailure: BindFailure? = null
+    /** The datalink never answered on this join: [reportUnreachable] ran, and a rejoin would be pointless. */
+    private var cameraUnreachable = false
     private var wifiRejoins = 0
     private var resumeDownloadOnRejoin = false
 
@@ -1322,7 +1324,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         setConnectProgress(35) // requesting the WiFi join
         logLine("WiFi flow: ssid=\"$ssid\" passLen=${pass.length}")
         datalinkStarted = false; wifiRejoins = 0; resumeDownloadOnRejoin = false
-        cameraBindFailure = null
+        cameraBindFailure = null; cameraUnreachable = false
         val joiner = ApJoiner(this, object : ApJoiner.Listener {
             override fun onLog(s: String) = logLine(s)
             override fun onFailed(reason: String) { logLine(reason); main.post { onWifiJoinFailed() } }
@@ -1359,6 +1361,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 main.post {
                     wifiUp = false
                     if (!offloadMode) return@post
+                    // A rejoin restores HTTP for a grid that has a live session behind it. Here nothing
+                    // ever answered, so it would only bring back an AP we cannot talk to (#32).
+                    if (cameraUnreachable) {
+                        logLine("WiFi: AP gone — not rejoining, the camera never answered over it")
+                        return@post
+                    }
                     // Remember to pick the transfer back up: the in-flight run is about to fail out
                     // with ENONET and its own resume loop can't help — with no network it moves zero
                     // bytes, trips the "no progress" guard, and pauses on the first attempt.
@@ -1501,6 +1509,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * refusal is the cause (#32), and it is the user's to fix: a VPN, ad blocker or firewall app.
      */
     private fun reportUnreachable() {
+        cameraUnreachable = true
         if (isFinishing || isDestroyed) return
         val bind = cameraBindFailure
         if (bind == null) {
