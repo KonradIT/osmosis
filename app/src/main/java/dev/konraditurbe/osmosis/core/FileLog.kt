@@ -58,8 +58,21 @@ object FileLog {
                 file = f
                 writer = BufferedWriter(FileWriter(f, true))
                 writeLocked("=== saving logs to ${f.absolutePath} ===")
+                writeLocked(environmentLine(ctx))
             }.onFailure { android.util.Log.e("Osmosis", "FileLog.start failed", it) }
         }
+    }
+
+    /**
+     * Which build and which Android produced the log, so a tester's log is not read against the wrong
+     * code. Deliberately no device model: this file is shared publicly.
+     */
+    private fun environmentLine(ctx: Context): String {
+        val app = runCatching {
+            val p = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+            "${p.versionName} (${p.longVersionCode})"
+        }.getOrDefault("?")
+        return "app $app · Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})"
     }
 
     fun stop() {

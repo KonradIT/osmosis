@@ -110,6 +110,9 @@
     <string name="loading_chapters">Cargando fragmentos del bucle…</string>
     <string name="not_connected">Sin conexión</string>
     <string name="no_media_found">%1$s no tiene contenido</string>
+    <string name="camera_unreachable">No se pudo contactar con %1$s por Wi-Fi</string>
+    <string name="camera_network_blocked_title">Android bloqueó la conexión con la cámara</string>
+    <string name="camera_network_blocked_message">El teléfono se conectó a %1$s, pero Android no deja que Osmosis envíe nada por esa red, así que la cámara nunca respondió.\n\nSuele deberse a una VPN, un bloqueador de anuncios, un filtro DNS o una app de cortafuegos. Desactívala y vuelve a conectar.</string>
     <string name="camera_not_activated_title">%1$s es una cámara nueva, sin activar</string>
     <string name="camera_not_activated_message">Actívala una vez en DJI Mimo. Por desgracia este paso es obligatorio; después puedes desinstalar Mimo.</string>
 

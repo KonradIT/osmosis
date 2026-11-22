@@ -48,6 +48,7 @@ import dev.konraditurbe.osmosis.duml.DjiPairMessagePayload
 import dev.konraditurbe.osmosis.duml.OsmoCommands
 import dev.konraditurbe.osmosis.stream.RtmpStreamer
 import dev.konraditurbe.osmosis.net.ApJoiner
+import dev.konraditurbe.osmosis.net.BindFailure
 import dev.konraditurbe.osmosis.net.HttpClient
 import dev.konraditurbe.osmosis.camera.CameraSession
 import dev.konraditurbe.osmosis.core.MediaSession
@@ -120,6 +121,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private var wifiUp = false
     /** True once the first join has kicked off [startDatalink]; a later join is a rejoin, not a start. */
     private var datalinkStarted = false
+    /** Why the process is not bound to the camera network, or null when it is. See [BindFailure]. */
+    private var cameraBindFailure: BindFailure? = null
     private var wifiRejoins = 0
     private var resumeDownloadOnRejoin = false
 
@@ -1319,16 +1322,23 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         setConnectProgress(35) // requesting the WiFi join
         logLine("WiFi flow: ssid=\"$ssid\" passLen=${pass.length}")
         datalinkStarted = false; wifiRejoins = 0; resumeDownloadOnRejoin = false
+        cameraBindFailure = null
         val joiner = ApJoiner(this, object : ApJoiner.Listener {
             override fun onLog(s: String) = logLine(s)
             override fun onFailed(reason: String) { logLine(reason); main.post { onWifiJoinFailed() } }
             // Both callbacks arrive on a ConnectivityManager thread; hop to main so the download /
             // AP-loss flags stay single-threaded and the check-and-set in onDownloadClicked is safe.
-            override fun onNetwork(network: Network, link: LinkProperties?) {
+            override fun onNetwork(network: Network, link: LinkProperties?, bindFailure: BindFailure?) {
                 val ip4 = link?.linkAddresses?.map { it.address }
                     ?.firstOrNull { it is java.net.Inet4Address }
+                // Logged because every request goes to a hardcoded 192.168.2.1: a camera network
+                // whose gateway is anything else would fail the same way an unbound process does.
+                val gateway = link?.routes
+                    ?.firstOrNull { it.isDefaultRoute && it.gateway is java.net.Inet4Address }
+                    ?.gateway?.hostAddress
                 main.post {
                     wifiUp = true
+                    cameraBindFailure = bindFailure
                     // A second onAvailable is a rejoin. Do NOT re-run startDatalink: it would re-fetch
                     // the whole manifest and rebuild the grid, throwing away the user's queue and
                     // scroll position mid-transfer. Downloads only need HTTP, which the rebind in
@@ -1341,7 +1351,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     }
                     datalinkStarted = true
                     setConnectProgress(58) // WiFi joined + bound
-                    logLine("WiFi link: ip=${ip4?.hostAddress}")
+                    logLine("WiFi link: ip=${ip4?.hostAddress} gateway=$gateway")
                     startDatalink()
                 }
             }
@@ -1422,10 +1432,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     pendingSession = null
                     datalink = dl
                     dev.konraditurbe.osmosis.net.Highlights.provider = { h -> dl.getHighlights(h) }
-                    // Always: it holds the AP up, polls status for the pill, and holds playback (#12).
-                    // Gating on files.isNotEmpty() left an empty camera (e.g. an Action 6 with no media)
-                    // with a dead pill — status is only parsed in this loop.
-                    dl.startKeepAlive()
+                    // Whenever the camera answered: it holds the AP up, polls status for the pill, and
+                    // holds playback (#12). Gating on files.isNotEmpty() left an empty camera (e.g. an
+                    // Action 6 with no media) with a dead pill — status is only parsed in this loop.
+                    // Not when nothing answered: the socket is already closed, and the loop's playback
+                    // entry would log a camera "not answering" commands it never received (#32).
+                    val reached = dl.handshakeOk
+                    if (reached) dl.startKeepAlive()
                     // Storage (/v2 mount) is resolved per file from its handle's store bit (internal
                     // 0x40000000 → storage 1, else 0), confirmed by one HEAD per store. See resolveStorage.
                     storageForBit.clear()
@@ -1434,7 +1447,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         fixed.groupBy { it.storage }.entries.sortedBy { it.key }
                             .joinToString(", ") { (s, list) -> "storage=$s (${list.size} files)" } +
                         (if (dl.moreAvailable) " · more on scroll" else ""))
-                    main.post { showGrid(fixed) }
+                    main.post { showGrid(fixed, reached = reached) }
                 }.start()
     }
 
@@ -1482,9 +1495,33 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             .show()
     }
 
+    /**
+     * The phone joined the camera's Wi-Fi, but nothing answered the datalink on either port. Says so,
+     * instead of reporting an empty camera. When Android also refused to bind us to that network, that
+     * refusal is the cause (#32), and it is the user's to fix: a VPN, ad blocker or firewall app.
+     */
+    private fun reportUnreachable() {
+        if (isFinishing || isDestroyed) return
+        val bind = cameraBindFailure
+        if (bind == null) {
+            logLine("No media listed: the camera never answered over Wi-Fi, so this says nothing about its card.")
+            toast(getString(R.string.camera_unreachable, pillName()))
+            return
+        }
+        logLine("No media listed: nothing reached the camera, because Android would not route this app " +
+            "over its network (${bind.describe()}).")
+        AlertDialog.Builder(this)
+            .setTitle(R.string.camera_network_blocked_title)
+            .setMessage(getString(R.string.camera_network_blocked_message, offloadSsid))
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
     // ---- media grid + download ---------------------------------------------
 
-    private fun showGrid(files: List<CameraFile>, preserveFilters: Boolean = false) {
+    /** @param reached false when the datalink never handshook, so an empty [files] means "unreachable",
+     *  not "empty camera". */
+    private fun showGrid(files: List<CameraFile>, preserveFilters: Boolean = false, reached: Boolean = true) {
         // Reaching here = pairing + WiFi + datalink all worked → remember this camera, show the grid.
         setConnectProgress(100) // first media in — connection complete
         currentAddress?.let {
@@ -1505,6 +1542,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
             imageLoader?.shutdown(); imageLoader = null
             metaLoader?.shutdown(); metaLoader = null
             updateDownloadFab()        // nothing to download; drop any queue carried from the old camera
+            if (!reached) { reportUnreachable(); return }
             // "No media" and "media the camera will not list" look identical on screen, and the
             // camera itself can tell them apart: it reports each store's used space in the same
             // session. Real content behind a zero-length list is a card the camera is not indexing —
