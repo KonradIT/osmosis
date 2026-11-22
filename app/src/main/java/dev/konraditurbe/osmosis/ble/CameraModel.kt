@@ -63,11 +63,22 @@ data class CameraModel(
         const val DJI_TYPE_ACTION4 = 4
         const val DJI_TYPE_ACTION5_PRO = 5
 
+        /**
+         * The first Osmo Action. DJI's table folds three classic advert ids into its one product type
+         * (40): `0x06`, `0x07` and `0x82`. [BleAdvert] maps the product type to `0x06`; a tester's unit
+         * (issue #32, 2026-11-22) advertises the classic `0x82` under company id `0xE5C0`.
+         *
+         * `0x82` has to be listed: it sits above [DRONE_ID_FLOOR], and unlisted it was taken for an
+         * aircraft — `DJI FLY` pairing, no BLE creds, a udp/9003 datalink that never answers. Builds up
+         * to 1.3.3 only escaped that because they ignored `0xE5C0` and resolved the camera by name.
+         * Offload keeps the camera defaults (9004 + poke, WPA2), which is what those builds listed with.
+         */
+        private val OSMO_ACTION = CameraModel("Osmo Action", livestream = true)
+
         private val BY_ID: Map<Int, CameraModel> = mapOf(
-            // The first Osmo Action, by the id BleAdvert maps its product type to (no hardware has
-            // confirmed it). It has no offload config of its own, so it keeps the defaults it got while
-            // unlisted; it's here so it can stream.
-            0x0006 to CameraModel("Osmo Action", livestream = true),
+            0x0006 to OSMO_ACTION,
+            0x0007 to OSMO_ACTION,
+            0x0082 to OSMO_ACTION,   // hardware-observed: OsmoAction-FB74FD, mfr[cid=e5c0 8200…]
             0x0010 to CameraModel("Osmo Action 2", livestream = true),
             0x0012 to CameraModel("Osmo Action 3", livestream = true),
             // Tester-confirmed 2026-08-24: pair, BLE creds, a WPA2 AP, datalink on 9004.
@@ -164,8 +175,9 @@ data class CameraModel(
         /**
          * Model ids at or above this are treated as aircraft when we don't recognise them.
          *
-         * A **guess**, and flagged as one: every camera we have ever seen sits in `0x10`–`0x21`, and
-         * both drones we have seen sit at `0x70` and `0x7e`. It exists because the fallback has to pick
+         * A **guess**, and flagged as one: almost every camera we have seen sits in `0x10`–`0x22`, and
+         * both drones we have seen sit at `0x70` and `0x7e`. The exception is the Osmo Action 1 at
+         * `0x82`, which is why it is listed in [BY_ID] explicitly — anything listed there wins. It exists because the fallback has to pick
          * *something*, and picking "camera" for an aircraft fails at the very first step — a drone
          * releases its WiFi credentials only for the `DJI FLY` pairing token, so an unknown drone
          * treated as a camera never even gets on its network, and the log says nothing more useful than

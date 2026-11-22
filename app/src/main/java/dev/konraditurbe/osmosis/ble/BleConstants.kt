@@ -26,7 +26,11 @@ object BleConstants {
     // folds both formats back into this one id space. Names here are for the scan log; offload
     // capabilities per model live in CameraModel. Nano/Action 5 Pro verified on hardware.
     val MODEL_NAMES: Map<Int, String> = mapOf(
-        0x0006 to "OsmoAction",   // Action 1 — unconfirmed here, no hardware
+        // Action 1: DJI folds three classic ids into one product type. Only 0x82 has been seen, on a
+        // tester's unit (issue #32) advertising under company id 0xE5C0.
+        0x0006 to "OsmoAction",
+        0x0007 to "OsmoAction",
+        0x0082 to "OsmoAction",
         0x0010 to "OsmoAction2",
         0x0012 to "OsmoAction3",
         0x0014 to "OsmoAction4",
