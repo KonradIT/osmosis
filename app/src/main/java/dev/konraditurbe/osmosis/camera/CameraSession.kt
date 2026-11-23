@@ -2,6 +2,7 @@ package dev.konraditurbe.osmosis.camera
 
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.StorageRules
+import dev.konraditurbe.osmosis.duml.ClockSync
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import dev.konraditurbe.osmosis.net.DumlSession
 import dev.konraditurbe.osmosis.net.DumlTransport
@@ -26,6 +27,8 @@ class CameraSession(
     log: (String) -> Unit,
     port: Int = 9004,
     tcpPoke: Boolean = true,
+    /** The body sets its clock with `0x00/0x4A` rather than `0x00/0x6A` (CameraModel.dateTimeClock). */
+    private val dateTimeClock: Boolean = false,
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
     /**
@@ -2515,27 +2518,31 @@ class CameraSession(
     }
 
     /**
-     * Set the camera clock + timezone to the phone's (DUML **0x00/0x6a**, from a Mimo capture):
-     * `01 00` · **unix seconds** (u64-LE) · **UTC offset minutes** (u16-LE, signed) · `len:u8` ·
-     * IANA tz id ASCII (e.g. `Europe/Madrid`). Fire-and-forget on connect so recorded file timestamps
-     * match the phone. Best-effort — a failure never blocks the media list.
+     * Set the camera clock + timezone to the phone's on connect, so recorded file timestamps match
+     * the phone. Which command goes out depends on the body ([ClockSync], MEDIA_PROTOCOL §17):
+     * `0x00/0x6A` to the system/RTC subsystem (receiver `0x28` = id 1, type 0x08, the same one
+     * `0x00/0x99` subscribes to; the file/media receiver `0x01` silently drops it), or on a Pocket 3
+     * `0x00/0x4A` to the gimbal (`0x04`) and then the system.
+     *
+     * Best-effort: a failure never blocks the media list. The log line reports what the camera
+     * answered to each frame (first reply byte `00` = OK), not merely that the frame went out.
      */
     private fun syncTime() {
         val nowMs = System.currentTimeMillis()
         val tz = java.util.TimeZone.getDefault()
-        val nowSec = nowMs / 1000L
-        val offMin = tz.getOffset(nowMs) / 60000                  // signed minutes east of UTC
-        val tzId = tz.id.toByteArray(Charsets.US_ASCII)
-        val b = java.io.ByteArrayOutputStream()
-        b.write(0x01); b.write(0x00)
-        for (k in 0 until 8) b.write(((nowSec ushr (k * 8)) and 0xFF).toInt())   // unix seconds, u64-LE
-        b.write(offMin and 0xFF); b.write((offMin shr 8) and 0xFF)              // UTC offset (min), u16-LE
-        b.write(tzId.size); b.write(tzId)
-        // Receiver 0x28 = (id 1 << 5) | type 0x08 — the system/RTC subsystem (same one 0x00/0x99
-        // subscribes to). Mimo addresses SetTime here; the file/media receiver (0x01) silently drops it.
-        sendDuml(0x00, 0x6a, b.toByteArray(), receiverType = 0x08, receiverId = 1)
-        recvAll(300); sendAck()
-        log("datalink: time synced (UTC offset ${offMin}min), unix $nowSec")
+        val answers = ClockSync.commands(dateTimeClock, nowMs, tz).map { c ->
+            sendDuml(0x00, c.cmd, c.payload, receiverType = c.receiverType, receiverId = c.receiverId)
+            val reply = findReply(recvAll(300), 0x00, c.cmd)
+            sendAck()
+            "0x00/0x%02x→0x%02x ".format(c.cmd, c.receiver) + when {
+                reply == null -> "no reply"
+                reply[0].toInt() == 0 -> "ok"
+                else -> "refused " + reply.joinToString("") { "%02x".format(it) }
+            }
+        }
+        val synced = answers.all { it.endsWith(" ok") }
+        log("datalink: time ${if (synced) "synced" else "NOT confirmed"} " +
+            "(UTC offset ${tz.getOffset(nowMs) / 60000}min), unix ${nowMs / 1000L}: ${answers.joinToString(", ")}")
     }
 
     /**

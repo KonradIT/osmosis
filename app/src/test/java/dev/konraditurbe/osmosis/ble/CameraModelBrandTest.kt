@@ -145,6 +145,19 @@ class CameraModelBrandTest {
         assertFalse(CameraModel.resolve(0x0019, "XtraAtto-1234", Brand.XTRA).livestream)
     }
 
+    /** Mimo sets a Pocket 3's clock with 0x00/0x4A and every other body's with 0x00/0x6A. */
+    @Test
+    fun `only the Pocket 3 sets its clock with the date-time command`() {
+        assertTrue(CameraModel.resolve(0x0020, "OsmoPocket3-C285", Brand.DJI).dateTimeClock)
+        assertTrue("resolved by name, no mfr data", CameraModel.resolve(null, "OsmoPocket3-C285", Brand.DJI).dateTimeClock)
+        assertTrue("the Muse is a rebadged Pocket 3", CameraModel.resolve(0x0020, "XtraMuse-1234", Brand.XTRA).dateTimeClock)
+        listOf(0x0014, 0x0015, 0x0018, 0x0019, 0x0021, 0x0022, 0x0070).forEach { id ->
+            assertFalse("model 0x%04x".format(id), CameraModel.resolve(id, null, Brand.DJI).dateTimeClock)
+        }
+        assertFalse(CameraModel.resolve(0x0015, "XtraEdgePro-2DCA16", Brand.XTRA).dateTimeClock)
+        assertFalse(CameraModel.DEFAULT.dateTimeClock)
+    }
+
     @Test
     fun `an unknown model in the camera range still gets camera defaults`() {
         val unknown = CameraModel.resolve(0x0016, "Osmo Whatever", Brand.DJI)

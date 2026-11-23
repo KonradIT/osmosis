@@ -1403,7 +1403,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
                             if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)
-                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke)
+                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke, m.dateTimeClock)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
                         // Publish before the fetch, not after: fetchFileList owns the next 10-20 s and

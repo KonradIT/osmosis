@@ -37,6 +37,11 @@ data class CameraModel(
     // Action 1 through 6, the Pocket 3, 4 and 4 Pro, and their Xtra rebadges, which inherit it from the
     // DJI twin in resolve(). Not the Nano (so not the Atto either), the 360 or the drones.
     val livestream: Boolean = false,
+    // The clock is set with `0x00/0x4A` (local date fields, to the gimbal and then the system
+    // subsystem) instead of `0x00/0x6A` (unix seconds). Mimo sends a Pocket 3 only the former; whether
+    // that body takes `0x6A` at all is unconfirmed. See ClockSync and MEDIA_PROTOCOL.md §17. The Xtra
+    // Muse inherits it from its DJI twin in resolve(), untested.
+    val dateTimeClock: Boolean = false,
 ) {
     /** The SetPairingPIN token this device expects: a drone only releases WiFi creds to "DJI FLY". */
     val pairingToken: String get() = if (isDrone) "DJI FLY" else "osmo"
@@ -101,7 +106,9 @@ data class CameraModel(
             // Tester-confirmed on 9004; its _OP3-suffixed
             // naming decodes in full (path + ext + delete handle). Note: rejects 0x53/0x10 (e0) but its
             // AP comes up anyway via the 0x00/0x2b session, so the wake is belt-and-suspenders here.
-            0x0020 to CameraModel("Osmo Pocket 3", verified = true, singleSdStorage = true, livestream = true),
+            0x0020 to CameraModel(
+                "Osmo Pocket 3", verified = true, singleSdStorage = true, livestream = true, dateTimeClock = true,
+            ),
             // Tester-confirmed 2026-08-08 on Android 10 (our minSdk): connect, a 45-file internal
             // manifest, playback held, and downloads the tester rated "same or maybe faster than
             // Mimo". Its `0x02/0xdc` reports real capacity, unlike the Nano's. Note it advertises
