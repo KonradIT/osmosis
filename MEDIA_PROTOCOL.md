@@ -5,7 +5,7 @@ QuickTransfer-capable drones. Two transports:
 
 | transport | carrier | use |
 |---|---|---|
-| **BLE** | write GATT `fff5`, notify `fff4` | pairing, wake, WiFi credentials, settings |
+| **BLE** | write GATT `fff5`, notify `fff4` | pairing, wake, WiFi credentials, settings, status pushes |
 | **Datalink** | UDP, DUML in `[8B udp hdr][12B routing hdr][frame]` | media list, HTTP offload, control, status |
 
 The BLE `[6:8]` msg-id is encoded little-endian and echoed back verbatim by the camera.
@@ -18,6 +18,12 @@ The BLE `[6:8]` msg-id is encoded little-endian and echoed back verbatim by the 
 > - `fff5` is WRITE_NO_RSP only (`props=0x36`).
 > - Every app→camera frame uses `cmd_type 0x40`.
 > - MTU **500**. At 517 the camera stops answering every request.
+
+That gate is on requests. Unsolicited pushes need only the `fff4` CCCD:
+
+- They start before the `01 00` write: always on a Pocket 3, often on the Action 5 Pro, Action 6, Osmo 360 and Xtra Edge Pro.
+- They start before pairing: status ([§18](#18-camera-status)), storage ([§19](#19-sd--storage)), battery ([§20](#20-battery--power)) and, on a Pocket 3, gimbal telemetry. A Nano sends nothing until it is addressed.
+- Every notification arrives on `fff4`. None has been seen on `fff5`, paired or not.
 > - Wait for the `0x07/0x45` pairing reply (up to ~250 ms) before sending the wake.
 > - LE encryption/bonding is not required.
 
@@ -78,7 +84,8 @@ id, not name — bodies get renamed.
 | DJI Neo 2 | `0x007e` | *(varies)* | **9003** | **no** | WPA2 |
 
 - **Osmo Action (1)** uses the index-based list ([§1](#1-get-media-list), "Parsed — index-based") and addresses media by numeric index.
-- **Osmo 360** pairs and hands over credentials but its AP never comes up; it does not reach the datalink. It advertises an extra `fff7` characteristic.
+- **Osmo 360** pairs and hands over credentials but its AP never comes up; it does not reach the datalink.
+- **`fff7`** is an extra characteristic in the `fff0` service on the Osmo Nano, Osmo Action 6 and Osmo 360. The Osmo Action (1), Action 4, Action 5 Pro, Xtra Edge Pro, Pocket 3, Pocket 4 Pro and Neo 2 expose `fff3`, `fff4`, `fff5` only. Its purpose is unknown.
 - **Mavic 3 / Neo 2** are aircraft: `udp/9003`, no poke, `0x51` session-open first ([§27](#27-session-open-0x51--required-before-anything-else-mavic-3), [§27a](#27a-neo-2--the-same-transport-a-different-unlock)).
 - **Xtra Edge Pro** is an Action 5 Pro rebrand with the same model id. Distinguish it by OUI `EC:9E:EA`. Datalink on `10004`, no poke. Answers nothing on camera-control cmdset `0x02` ([§10–17](#camera-control)).
 - **Two advert formats.** Pocket 4 carries the classic model byte. Pocket 4 Pro uses the newer form: flag bit at payload byte 5 marks a 16-bit product type at bytes 10–11 (`218` = Pocket 4 Pro). A client reading only the classic field sees `0x0000` for the Pro.
@@ -119,7 +126,7 @@ id, not name — bodies get renamed.
 | Osmo Action 6 | 40 B, `stores=2` | card block matches its own screen |
 | Osmo Pocket 4 | 40 B, `stores=2` | two-store body even with no card — first block reads `0/0` |
 
-Dock and charging bytes (`0x0D/0x02 @27`, `@32`) are Nano-specific. Voltage, current and percent are portable.
+Voltage, current and percent in `0x0D/0x02` are portable. `@27` is a bitfield that is non-zero on every body, and only the Nano's dock reading of it is mapped ([§20](#20-battery--power)).
 
 ### Behavioural quirks
 
@@ -926,16 +933,33 @@ Xtra  40 B  11 12 02 00 00 02 | 00000000 00000000 | … 0101 | 54bf0000 16bf0000
 > media list can reach.
 
 ### 20. Battery / power
-- Cmd Set / ID: `0x0D` / `0x02`  ·  Battery(`0x05`, id 0) → App  ·  ~1 Hz push, 34 B
+- Cmd Set / ID: `0x0D` / `0x02`  ·  Battery(`0x05`, id 0) → App(`0x02`) or receiver `0x25`  ·  ~1 Hz push, 34 B
+- Over BLE it starts once `fff4` is subscribed, before pairing: Action 5 Pro, Action 6, Osmo 360, Xtra Edge Pro, Pocket 3. A Nano sends nothing until it is addressed.
 
 | offset | type | field |
 |---|---|---|
 | `@1` | `u16-LE` | pack voltage, mV |
 | `@5` | `i32-LE` | current, mA (`+` charging, `−` discharging) |
-| `@17` | `u16-LE` | temperature, °C×10 `(unconfirmed)` |
+| `@17` | `u16-LE` | temperature, °C×10 `(unconfirmed)`. Reads 23–54 across eight models, highest on a docked Nano |
 | `@20` | `u8` | charge percent |
-| `@27` | `u8` | dock attached (`0x40` docked) — Nano only |
+| `@27` | `u8` bitfield | `0x40` external power `(unconfirmed)` · `0x20` set on every body but the Nano, meaning unknown · `0x80` seen once on an Action 6 |
+| `@28` | `u8` | `04` in the frame addressed to App, `00` in the one addressed to `0x25` |
 | `@32` | `u8` | taking charge (`1`/`0`) — Nano only |
+| `@33` | `u8` | `01` on a Nano; reported `01` on an Action 5 Pro, Action 6 and Osmo 360. Meaning unknown |
+
+**`@27`.** `0x40` is set on a docked Nano (`0x40`) and on a Pocket 4 Pro taking charge (`0x60`), and clear on every body that was draining (`0x20`; `0x00` on an undocked Nano). On the Nano it means the dock; elsewhere it tracks external power in the few frames seen.
+
+> [!WARNING]
+> Never read "docked" as `@27 != 0`. Every body but the Nano reports `0x20` there with nothing attached. Test bit `0x40`, and only on a Nano call it a dock.
+
+**Two frames, told apart by the receiver byte.** `@28` follows the receiver without exception:
+
+| receiver | `@28` | seen on |
+|---|---|---|
+| App `0x02` | `04` (`05` once) | Nano, Pocket 3, Pocket 4 Pro, Action 4; also Action 5 Pro, Action 6, Xtra Edge Pro |
+| `0x25` (type `0x05`, id 1) | `00` | Action 5 Pro, Action 6, Osmo 360, Xtra Edge Pro |
+
+A client that only accepts pushes addressed to `0x02` misses the `0x25` frame.
 
 The dock is not a separate DUML device; `@27`/`@32` are its only signal. The dock's own charge level
 and its SD capacity are not reported.
@@ -987,6 +1011,7 @@ margin). ConnectToWiFi ([§23](#23-connecttowifi)) is not part of this flow.
 
 > [!NOTE]
 > The Nano drops an idle paired link after ~5–6 s; keep the `01 01` ping running all session.
+> An unpaired link is not dropped: a Nano held one for 38 s, silent throughout `(unconfirmed)`.
 
 ### 22. SetPairingPIN
 - Cmd Set / ID: `0x07` / `0x45`  ·  App → WiFi(`0x07`)  ·  BLE
