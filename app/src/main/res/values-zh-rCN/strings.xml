@@ -49,7 +49,8 @@
 
     <!-- Wi-Fi join failed dialog -->
     <string name="couldnt_join_wifi">无法加入 %1$s</string>
-    <string name="wifi_join_failed_message">加入相机 Wi-Fi 失败。通常是保存的密码已过期——例如相机恢复出厂设置后会重新生成密码。是否重新输入密码并重试？</string>
+    <string name="wifi_join_failed_message">Android 无法加入相机的 Wi-Fi，且没有说明原因。通常是相机 Wi-Fi 尚未就绪，或连接提示被关闭了。密码错误（例如相机重置后）也会表现为同样的情况。</string>
+    <string name="try_again">重试</string>
     <string name="wifi_join_failed_wpa_message">此手机通过 WPA3 和 WPA2 均无法加入 %1$s——很可能是手机自身的 Wi-Fi 兼容性限制，而非密码问题。你仍可重新输入密码以排除该可能。</string>
     <string name="reenter_password">重新输入密码</string>
     <string name="back_to_cameras">返回相机列表</string>
@@ -111,6 +112,7 @@
     <string name="not_connected">未连接</string>
     <string name="no_media_found">%1$s 上没有媒体文件</string>
     <string name="camera_unreachable">无法通过 Wi-Fi 连接到 %1$s</string>
+    <string name="camera_not_serving_files">此相机尚未通过 Wi-Fi 提供文件，因此无法预览和下载。</string>
     <string name="camera_network_blocked_title">Android 阻止了相机连接</string>
     <string name="camera_network_blocked_message">手机已加入 %1$s，但 Android 不允许 Osmosis 通过该网络发送数据，因此相机始终没有响应。\n\n这通常是 VPN、广告拦截、DNS 过滤或防火墙类应用导致的。请将其关闭，然后重新连接。</string>
     <string name="camera_not_activated_title">%1$s 是一台全新相机，尚未激活</string>

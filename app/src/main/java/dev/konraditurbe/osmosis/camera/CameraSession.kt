@@ -38,7 +38,23 @@ class CameraSession(
      * could do it, and it is not a tester's job to run an experiment we can't yet exonerate.
      */
     private val probeTransfers: Boolean = false,
+    /**
+     * Switch the work mode to get `:80` listening, instead of entering playback (`CameraModel.httpViaWorkMode`,
+     * the Osmo Action 1). See [openHttpViaWorkMode].
+     */
+    private val httpViaWorkMode: Boolean = false,
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
+
+    init { logWorkMode = httpViaWorkMode }
+
+    /** The work mode that opened `:80` this session, held for browse and restored on teardown. */
+    @Volatile private var httpWorkMode: Int? = null
+
+    /** What the camera was in before we touched it, for [close] to put back. */
+    @Volatile private var originalWorkMode: Int? = null
+
+    @Volatile override var httpServing: Boolean? = null
+        private set
 
     /**
      * Remaining hex-dump budget for this session, in bytes of manifest.
@@ -350,7 +366,10 @@ class CameraSession(
         // make a moment later, it is idempotent, and [startKeepAlive] skips it when it already holds.
         // Runs on this thread, which is the session thread and the only one sending right now, so the
         // sequence-interleaving rule that puts this on the keep-alive thread still holds.
-        enterPlaybackConfirmed()
+        //
+        // Not on a work-mode camera: an Action 1 answers 0x02/0x0c with 0xe0 every time, and the
+        // 0x01/0x01 fallback after it never moved one either. Its list works without playback.
+        if (!httpViaWorkMode) enterPlaybackConfirmed()
 
         // No retry on an empty answer, deliberately. There WAS one, added for a log where a camera
         // handshook, streamed status and served no media across several connects — but the cause was
@@ -378,9 +397,179 @@ class CameraSession(
         noteEndedStores(files, sdOldest != null, intOldest != null)
         log("datalink: parsed ${files.size} media files (newest page; ${cursorLog()}; more=$moreAvailable)")
         logPageEvidence(files, files, NEWEST_SD, NEWEST_INTERNAL)
+        // After the list, not before it: the list is known to work in the mode the camera wakes up in,
+        // so a mode switch that misbehaves (or takes the AP down) still leaves the user with a grid.
+        // Mimo switches first and lists second; that order is worth trying once HTTP is proven.
+        if (httpViaWorkMode) openHttpViaWorkMode(ip, files.firstOrNull { it.isIndexed })
         onFetchProgress?.invoke(100)
         return files
     }
+
+    /**
+     * Get the camera's HTTP file server listening by switching its **work mode** (`0x02/0x10`), the
+     * way DJI Mimo does before it reads files off an Osmo Action 1 (see [WorkMode]).
+     *
+     * Reads the current mode first, so teardown can put it back. Then it tries each of
+     * [WorkMode.HTTP_CANDIDATES] in turn, checking after each whether `:80` accepts a connection, and
+     * stops at the first that does. That mode is kept for the session: the downloader and the preview
+     * both use `/v1` on `:80`. If no mode opens the port, the original mode goes back straight away and
+     * [httpServing] is false, which tells the UI not to offer downloads that can't work.
+     *
+     * On success it also asks for the first 64 bytes of one clip ([probeHttpFetch]), so a single log
+     * shows both whether the port opens and whether `/v1` hands over the file.
+     *
+     * Runs on the session thread before the keep-alive starts, so it can send without racing the
+     * keep-alive's sequence numbers. Every frame is a documented mode set or read. Nothing writes to the card.
+     */
+    private fun openHttpViaWorkMode(ip: String, sample: CameraFile?) {
+        log("datalink: --- work mode → HTTP: looking for the mode that opens :80 ---")
+        parseStatus(recvAll(150))
+        if (portOpen(ip)) {
+            log("datalink: :80 already open (camera reports ${WorkMode.name(workModeReported)}) — no mode switch needed")
+            httpServing = true
+            probeHttpFetch(ip, sample)
+            return
+        }
+        originalWorkMode = readWorkMode() ?: workModeReported
+        log("datalink: work mode before switching: ${WorkMode.name(originalWorkMode)} " +
+            "(GetMode said ${WorkMode.name(lastGetMode)}, status push says ${WorkMode.name(workModeReported)})")
+        var changedMode = false
+        for (mode in WorkMode.HTTP_CANDIDATES) {
+            if (mode == originalWorkMode) continue      // already in it, and :80 was refused above
+            val status = setWorkMode(mode)
+            if (status != null && status != 0) {
+                log("datalink:   SetMode ${WorkMode.name(mode)} ($mode) refused (0x%02x)".format(status))
+                continue
+            }
+            changedMode = true
+            parseStatus(recvAll(300))
+            log("datalink:   SetMode ${WorkMode.name(mode)} ($mode) → ${if (status == null) "no reply" else "ok"}; " +
+                "camera reports ${WorkMode.name(workModeReported)}")
+            val openAfter = waitForPort(ip, PORT_WAIT_MS)
+            if (openAfter != null) {
+                httpWorkMode = mode
+                httpServing = true
+                log("datalink: --- :80 OPEN ${openAfter}ms after SetMode ${WorkMode.name(mode)} — " +
+                    "HTTP media is reachable, report this ---")
+                probeHttpFetch(ip, sample)
+                return
+            }
+            log("datalink:   :80 still refused ${PORT_WAIT_MS}ms after SetMode ${WorkMode.name(mode)}")
+        }
+        httpServing = false
+        log("datalink: --- no work mode opened :80 (tried ${WorkMode.HTTP_CANDIDATES.joinToString { WorkMode.name(it) }}) ---")
+        val back = originalWorkMode
+        if (changedMode && back != null) {
+            val status = setWorkMode(back)
+            log("datalink: work mode restored to ${WorkMode.name(back)} " +
+                "(${if (status == null) "no reply" else "0x%02x".format(status)})")
+        } else if (changedMode) {
+            log("datalink: original work mode unknown — leaving the camera as it is")
+        }
+    }
+
+    /** The last `0x02/0x11` answer, for the log line that compares it against the status push. */
+    private var lastGetMode: Int? = null
+
+    /** `0x02/0x11`: the camera's work mode, or null if it didn't answer. */
+    private fun readWorkMode(): Int? {
+        sendDuml(0x02, 0x11, ByteArray(0), receiverType = 0x01, receiverId = 0)
+        val deadline = System.nanoTime() + 1_500_000_000L
+        while (System.nanoTime() < deadline) {
+            val dg = recvAll(150)
+            parseStatus(dg)
+            val reply = findReply(dg, 0x02, 0x11)
+            if (reply != null) {
+                lastGetMode = WorkMode.parseGetReply(reply)
+                if (lastGetMode == null) log("datalink: GetMode reply not understood: ${reply.hexStr()}")
+                sendAck()
+                return lastGetMode
+            }
+            sendAck()
+        }
+        log("datalink: GetMode (0x02/0x11) — no reply")
+        return null
+    }
+
+    /**
+     * `0x02/0x10`: switch the work mode. Returns the reply's status byte (0 = ok), or null when nothing
+     * came back within 3 s. That timeout is DJI Fly's own for this command: a mode switch is slow.
+     */
+    private fun setWorkMode(mode: Int): Int? {
+        sendDuml(0x02, 0x10, WorkMode.setPayload(mode), receiverType = 0x01, receiverId = 0)
+        val deadline = System.nanoTime() + 3_000_000_000L
+        var beat = 0
+        while (System.nanoTime() < deadline) {
+            val dg = recvAll(150)
+            parseStatus(dg)
+            val reply = findReply(dg, 0x02, 0x10)
+            sendAck()
+            if (reply != null) return reply[0].toInt() and 0xFF
+            if (++beat % 6 == 0) holdPlayback()     // the ~1 Hz presence beat, so the session holds
+        }
+        return null
+    }
+
+    /** One TCP connect to `:80`. A closed port refuses in milliseconds, so this is cheap to repeat. */
+    private fun portOpen(ip: String): Boolean = runCatching {
+        java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, 80), 1500); true }
+    }.getOrDefault(false)
+
+    /** Poll `:80` for up to [budgetMs], keeping the session alive between tries. Ms until open, or null. */
+    private fun waitForPort(ip: String, budgetMs: Long): Long? {
+        val t0 = System.currentTimeMillis()
+        while (System.currentTimeMillis() - t0 < budgetMs) {
+            if (portOpen(ip)) return System.currentTimeMillis() - t0
+            parseStatus(recvAll(500)); sendAck(); holdPlayback()
+        }
+        return null
+    }
+
+    /**
+     * With `:80` open, ask for the first 64 bytes of [sample] and log what comes back: the status
+     * code, the headers that matter, and whether the bytes start an MP4 (`ftyp` at offset 4).
+     *
+     * `/v1?file_index=` first, the route Mimo's request objects imply and the one the downloader uses.
+     * If that doesn't come back as 2xx, it tries the static DCF path that the Action 2 firmware's
+     * lighttpd config pointed at, so one tester log settles which of the two this camera serves.
+     */
+    private fun probeHttpFetch(ip: String, sample: CameraFile?) {
+        if (sample == null) { log("datalink: http probe skipped — no indexed file in the list"); return }
+        val v1 = dev.konraditurbe.osmosis.dcf.DcfUrls.of(sample.fileIndex)
+        if (httpRange(ip, v1, sample.name)) return
+        httpRange(ip, "/" + sample.path, sample.name)
+    }
+
+    /** One ranged GET, logged in one line. True when it came back 2xx. */
+    private fun httpRange(ip: String, path: String, name: String): Boolean {
+        val t0 = System.currentTimeMillis()
+        return runCatching {
+            val c = java.net.URL("http://$ip$path").openConnection() as java.net.HttpURLConnection
+            try {
+                c.connectTimeout = 3000; c.readTimeout = 5000
+                c.setRequestProperty("Range", "bytes=0-63")
+                val code = c.responseCode
+                val head = if (code in 200..299) c.inputStream.use { s ->
+                    val buf = ByteArray(64); var n = 0
+                    while (n < buf.size) { val r = s.read(buf, n, buf.size - n); if (r < 0) break; n += r }
+                    buf.copyOf(n)
+                } else ByteArray(0)
+                val ftyp = head.size >= 8 && String(head, 4, 4, Charsets.US_ASCII) == "ftyp"
+                log("datalink: http GET $path ($name) → $code in ${System.currentTimeMillis() - t0}ms · " +
+                    "type=${c.contentType} len=${c.getHeaderField("Content-Length")} " +
+                    "range=${c.getHeaderField("Content-Range")} server=${c.getHeaderField("Server")} · " +
+                    "first ${head.size}B ${head.copyOf(minOf(16, head.size)).hexStr()}" +
+                    if (ftyp) " — MP4 ftyp, the file itself" else "")
+                code in 200..299
+            } finally { c.disconnect() }
+        }.getOrElse {
+            log("datalink: http GET $path ($name) → ${it.javaClass.simpleName}: ${it.message} " +
+                "(${System.currentTimeMillis() - t0}ms)")
+            false
+        }
+    }
+
+    private fun ByteArray.hexStr() = joinToString("") { "%02x".format(it) }
 
     /**
      * One `0x00/0x88` presence beat, sent from inside a collect loop.
@@ -610,7 +799,8 @@ class CameraSession(
     /** One older page in a fresh playback session; advances both cursors + [moreAvailable]; returns new files. */
     private fun freshSessionPage(ip: String): List<CameraFile> {
         if (!openAndRegister(ip, subscribe = false)) { log("datalink: next-page open FAILED"); return emptyList() }
-        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)     // enter playback
+        if (httpViaWorkMode) ensureHttpWorkMode()
+        else sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)     // enter playback
         for (b in 0 until 2) { recvAll(250); sendAck() }
         val blob = java.io.ByteArrayOutputStream()
         sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, sdCursor), receiverType = 0x01, receiverId = 0)
@@ -1205,7 +1395,9 @@ class CameraSession(
             // playbackHeld instead was wrong — that flag survives a re-registration, so a refreshed
             // session (the delete flow) would have skipped entry on a body that drops the mode when
             // the old session goes away, and written outside playback believing it held.
-            enterPlaybackConfirmed()
+            // A work-mode camera skips playback (it refuses 0x02/0x0c) and re-checks its mode instead:
+            // after a re-registration (delete, fresh page) the switch may not have survived the socket.
+            if (httpViaWorkMode) ensureHttpWorkMode() else enterPlaybackConfirmed()
             while (keepAliveOn) {
                 runCatching {
                     val dg = recvAll(200)
@@ -1317,6 +1509,17 @@ class CameraSession(
                 playbackHeld = false
                 log("datalink: playback mode released")
             }
+            // Same for a work-mode switch: put the camera back in the mode we found it in, so it isn't
+            // left serving files (and out of its capture mode) after we've gone.
+            val back = originalWorkMode
+            if (releasePlaybackOnExit && httpWorkMode != null && back != null) {
+                runCatching {
+                    sendDuml(0x02, 0x10, WorkMode.setPayload(back), receiverType = 0x01, receiverId = 0)
+                    recvAll(150)
+                }
+                httpWorkMode = null
+                log("datalink: work mode restored to ${WorkMode.name(back)}")
+            }
             playbackReleased = true
         }.apply { isDaemon = true; name = "datalink-keepalive" }.start()
     }
@@ -1330,7 +1533,7 @@ class CameraSession(
      * nothing worse than a camera sitting in playback until it sleeps.
      */
     override fun close() {
-        if (playbackHeld && keepAliveOn) {
+        if ((playbackHeld || (httpWorkMode != null && originalWorkMode != null)) && keepAliveOn) {
             releasePlaybackOnExit = true
             keepAliveOn = false
             val deadline = System.currentTimeMillis() + 500
@@ -1900,42 +2103,20 @@ class CameraSession(
     }
 
     /**
-     * Is the Action 1's HTTP server **state-gated behind playback mode**?
+     * Put the work mode that opened `:80` back after a re-registration, if the camera has left it.
      *
-     * ROADMAP #6's leading hypothesis: `:80` is enabled by the `duss_proxy` plugin and `dji_media_server`
-     * handles `enter_playback` / "switch workmode", so the port should only listen once the camera is in
-     * playback. Every attempt so far has been made with the camera in whatever mode it woke up in, and
-     * `:80` refused — which is consistent with the hypothesis but never actually tested it.
-     *
-     * So: enter playback with the command we **already send to every other Osmo** for pagination
-     * (`0x02/0x0c` `01 01 00 01`), then try to open a socket to `:80` and say what happened. Unlike the
-     * `0x4a` transfer probe this is not a speculative frame — it is a documented command this camera
-     * family accepts, and a TCP connect that either completes or doesn't.
-     *
-     * Read-only, and the result is one line either way.
+     * The delete and the fresh-page fallback close the socket and register again. Closing the socket is
+     * what takes the newer cameras out of playback, so the Action 1 may drop its mode the same way.
+     * Reads the status push first and only sends when the mode has actually changed. No-op when no mode
+     * was found.
      */
-    private fun probeHttpAfterPlayback(ip: String) {
-        log("datalink: entering playback mode, then testing :80 (ROADMAP #6 — is HTTP gated on playback?)")
-        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)
-        recvAll(600); sendAck()
-        for (attempt in 1..3) {
-            val t0 = System.currentTimeMillis()
-            val result = runCatching {
-                java.net.Socket().use { s ->
-                    s.connect(java.net.InetSocketAddress(ip, 80), 2000)
-                    "OPEN"
-                }
-            }.getOrElse { "${it.javaClass.simpleName}: ${it.message}" }
-            val ms = System.currentTimeMillis() - t0
-            log("datalink:   :80 attempt $attempt after playback → $result (${ms}ms)")
-            if (result == "OPEN") {
-                log("datalink: --- :80 IS OPEN once in playback mode — HTTP media is reachable, report this ---")
-                return
-            }
-            recvAll(700); sendAck()   // keep the session alive between tries; the port may open late
-        }
-        log("datalink: --- :80 still refused in playback mode. That weakens the playback-gating theory, " +
-            "though it does not rule out a further activation step ---")
+    private fun ensureHttpWorkMode() {
+        val mode = httpWorkMode ?: return
+        parseStatus(recvAll(200))
+        if (workModeReported == mode) return
+        val status = setWorkMode(mode)
+        log("datalink: work mode was ${WorkMode.name(workModeReported)} after re-registering — " +
+            "SetMode ${WorkMode.name(mode)} again → ${if (status == null) "no reply" else "0x%02x".format(status)}")
     }
 
     /**
@@ -2004,7 +2185,6 @@ class CameraSession(
         val dcf = DcfRecords.decodeAction1(bytes)
         if (dcf.isNotEmpty()) {
             log("datalink: decoded ${dcf.size} DCF index records${storeTag(store)} (older Osmo Action generation)")
-            tx.peerIp?.let { probeHttpAfterPlayback(it) }
             if (probeTransfers) probeTransferKinds(dcf.first().fileIndex)
             return dcf.map { it.toCameraFile() }
         }
@@ -2712,6 +2892,12 @@ class CameraSession(
 
         /** Consecutive pages a store may go unanswered before its paging is given up on. */
         private const val UNANSWERED_PAGE_LIMIT = 2
+
+        /**
+         * How long `:80` gets to start listening after a work-mode switch. A guess: the switch itself
+         * has a 3 s reply budget in DJI Fly, and a web server coming up behind it may lag that.
+         */
+        private const val PORT_WAIT_MS = 5000L
 
         /**
          * Deadline for an inline two-store page. A newest-page load on an Xtra takes ~4.5 s; a page on

@@ -777,7 +777,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 if (open) startStream(streamCandidates[streamIdx])
                 else {
                     plog("preview: $ip:80 refused — not attempting to stream (camera is not serving HTTP)")
-                    showStatus("This camera isn't serving media over HTTP yet.\nPreview and download aren't available on it.")
+                    showStatus(getString(R.string.camera_not_serving_files))
                 }
             }
         }.start()

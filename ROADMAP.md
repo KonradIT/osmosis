@@ -15,10 +15,16 @@ listed. Recognising `0xE5C0` for the Pocket 4 Pro exposed `0x82`, which sits abo
 and was taken for an aircraft: `DJI FLY` pairing, no BLE creds, a udp/9003 datalink that never answers,
 "no media". `0x06`/`0x07`/`0x82` are now all mapped to the Osmo Action.
 
-**Branch: `support-osmo-action-1`**, merged up to main: the index decoder on the DCF seam, the 65-byte
-stride confirmed on a second camera, a `:80` check after entering playback, and `DcfTransferProbe`
-(opt-in, `--ez probe4a true`). The probe has run once, on 1.3.1: base `0x20` answered with a `release`
-and nothing else, and the camera started rebooting on that build, so it is off by default.
+**Branch: `support-osmo-action-1`**, rebased on main: the index decoder on the DCF seam, the 65-byte
+stride confirmed on a second camera, and `DcfTransferProbe` (opt-in, `--ez probe4a true`). The probe
+has run once, on 1.3.1: base `0x20` answered with a `release` and nothing else, and the camera started
+rebooting on that build, so it is off by default.
+
+**Approach: HTTP `/v1`, not a datalink file transfer.** On 1.5.1-action1 (issue #32) the list worked,
+`0x02/0x0c` playback came back `0xe0` on every attempt, and `:80` refused connections in ~10 ms. Mimo
+switches this camera's **work mode** (`0x02/0x10`) to TRANSCODE before it reads files, so 1.5.1-action1.2
+stops entering playback on the Action 1 and tries each candidate mode (`camera/WorkMode.kt`) until `:80`
+opens, then fetches the first 64 bytes of a clip over `/v1` (and the static DCF path as a fallback).
 
 **Blockers:** none any more. Unblocked 2026-08-07 — a decompiled DJI-derived app's media layer turns out
 to be index-based as well, so the download path can be read off rather than guessed at. Two smaller

@@ -49,7 +49,8 @@
 
     <!-- Wi-Fi join failed dialog -->
     <string name="couldnt_join_wifi">Couldn\'t join %1$s</string>
-    <string name="wifi_join_failed_message">The camera Wi-Fi join failed. This usually means the saved password is out of date — e.g. after a camera factory reset. Re-enter it and try again?</string>
+    <string name="wifi_join_failed_message">Android couldn\'t join the camera\'s Wi-Fi, and it doesn\'t say why. Usually the camera\'s Wi-Fi wasn\'t up yet or the connection prompt was dismissed. A wrong password (for example after a camera reset) looks the same.</string>
+    <string name="try_again">Try again</string>
     <string name="wifi_join_failed_wpa_message">This phone couldn\'t join %1$s over either WPA3 or WPA2 — likely a Wi-Fi compatibility limit on the phone, not the password. You can still re-enter the password to rule it out.</string>
     <string name="reenter_password">Re-enter password</string>
     <string name="back_to_cameras">Back to cameras</string>
@@ -113,6 +114,7 @@
     <string name="not_connected">Not connected</string>
     <string name="no_media_found">%1$s has no media on it</string>
     <string name="camera_unreachable">Couldn\'t reach %1$s over Wi-Fi</string>
+    <string name="camera_not_serving_files">This camera isn\'t serving its files over Wi-Fi yet, so preview and download aren\'t available.</string>
     <string name="camera_network_blocked_title">Android blocked the camera connection</string>
     <string name="camera_network_blocked_message">The phone joined %1$s, but Android wouldn\'t let Osmosis send anything over that network, so the camera never answered.\n\nThis is usually caused by a VPN, ad blocker, DNS filter or firewall app. Turn it off, then connect again.</string>
     <string name="camera_not_activated_title">%1$s is a brand new camera, not activated</string>

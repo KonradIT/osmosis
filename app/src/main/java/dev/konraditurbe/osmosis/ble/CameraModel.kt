@@ -37,6 +37,10 @@ data class CameraModel(
     // Action 1 through 6, the Pocket 3, 4 and 4 Pro, and their Xtra rebadges, which inherit it from the
     // DJI twin in resolve(). Not the Nano (so not the Atto either), the 360 or the drones.
     val livestream: Boolean = false,
+    // The camera's HTTP file server only listens once its work mode is switched with `0x02/0x10`
+    // (see camera/WorkMode). The Osmo Action 1 refuses the `0x02/0x0c` playback entry, so on this model
+    // the session skips playback and searches for the work mode that opens `:80` instead.
+    val httpViaWorkMode: Boolean = false,
 ) {
     /** The SetPairingPIN token this device expects: a drone only releases WiFi creds to "DJI FLY". */
     val pairingToken: String get() = if (isDrone) "DJI FLY" else "osmo"
@@ -72,8 +76,11 @@ data class CameraModel(
          * aircraft — `DJI FLY` pairing, no BLE creds, a udp/9003 datalink that never answers. Builds up
          * to 1.3.3 only escaped that because they ignored `0xE5C0` and resolved the camera by name.
          * Offload keeps the camera defaults (9004 + poke, WPA2), which is what those builds listed with.
+         *
+         * [httpViaWorkMode]: on 1.5.1-action1 the list worked, but `0x02/0x0c` came back `0xe0` on every
+         * attempt and `:80` refused connections. Mimo switches this camera's work mode to TRANSCODE.
          */
-        private val OSMO_ACTION = CameraModel("Osmo Action", livestream = true)
+        private val OSMO_ACTION = CameraModel("Osmo Action", livestream = true, httpViaWorkMode = true)
 
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0006 to OSMO_ACTION,

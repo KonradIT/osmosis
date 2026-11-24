@@ -1413,7 +1413,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         // This is the only place in the app that decides which of the two it is.
                         val c: MediaSession =
                             if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)
-                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke, probe4a)
+                            else CameraSession(::logLine, m.datalinkPort, m.tcpPoke, probe4a,
+                                httpViaWorkMode = m.httpViaWorkMode)
                         c.onStatus = { s -> main.post { onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
                         // Publish before the fetch, not after: fetchFileList owns the next 10-20 s and
@@ -1472,8 +1473,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     /**
      * WiFi join failed (WifiNetworkSpecifier `onUnavailable` — wrong password, AP down, or the user
      * dismissed the system dialog; Android can't tell them apart). If we joined with a *saved*
-     * password, the usual cause is a stale one — the camera was factory-reset and regenerated it — so
-     * offer to re-enter it and retry, instead of silently stranding the saved camera. The AP is still
+     * password, offer a plain retry first and re-entering it second (a stale password after a factory
+     * reset is one cause, not the usual one), instead of silently stranding the saved camera. The AP is still
      * up from the ConnectToWiFi we just sent, so retrying the join alone (no re-pair) works once the
      * password is right. First-time cameras (no saved password) already prompt up front, so there's
      * nothing stale to fix — just leave the user on the selector.
@@ -1498,10 +1499,18 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val bothSecuritiesTried = currentModel.wpa3 && wpa3FallbackDone
         val message = if (bothSecuritiesTried) getString(R.string.wifi_join_failed_wpa_message, offloadSsid)
         else getString(R.string.wifi_join_failed_message)
+        // "Try again" comes first, with the same password. Android reports a join that timed out
+        // exactly like a wrong password, and the timeout is the common case: an Action 1 tester's first
+        // join timed out after 47 s, the app asked for the password, and the same 8 characters went
+        // straight in on the retry (#32).
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.couldnt_join_wifi, offloadSsid))
             .setMessage(message)
-            .setPositiveButton(R.string.reenter_password) { _, _ ->
+            .setPositiveButton(R.string.try_again) { _, _ ->
+                logLine("Retrying Wi-Fi join with the same password…")
+                startWifiFlow(offloadSsid, offloadPass)
+            }
+            .setNeutralButton(R.string.reenter_password) { _, _ ->
                 promptPasswordFor(addr) {
                     offloadPass = savedPassFor(addr)
                     logLine("Retrying Wi-Fi join with the updated password…")
@@ -2067,6 +2076,14 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val keys = ad.selectedKeys()
         if (jobs.isEmpty()) {
             logLine("No files queued (tap a cell to preview + queue).")
+            return
+        }
+        // A camera that has to be switched into serving files, where the switch didn't open :80 (the
+        // Osmo Action 1). Every request would be refused, and the downloader would read each refusal as
+        // a dropped link and retry it five times. Say so once instead.
+        if (datalink?.httpServing == false) {
+            logLine("Download not attempted: the camera isn't serving files over HTTP (no work mode opened :80).")
+            toast(getString(R.string.camera_not_serving_files))
             return
         }
         val trimmed = jobs.count { it.trim != null }

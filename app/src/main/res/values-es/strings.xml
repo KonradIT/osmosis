@@ -49,7 +49,8 @@
 
     <!-- Wi-Fi join failed dialog -->
     <string name="couldnt_join_wifi">No se pudo conectar a %1$s</string>
-    <string name="wifi_join_failed_message">No se pudo conectar al Wi-Fi de la cámara. Suele deberse a que la contraseña guardada está desactualizada, p. ej. tras restablecer la cámara de fábrica. ¿Volver a introducirla e intentarlo de nuevo?</string>
+    <string name="wifi_join_failed_message">Android no pudo conectarse al Wi-Fi de la cámara y no indica el motivo. Normalmente el Wi-Fi de la cámara aún no estaba listo o se cerró la solicitud de conexión. Una contraseña incorrecta (p. ej., tras restablecer la cámara) se ve igual.</string>
+    <string name="try_again">Reintentar</string>
     <string name="wifi_join_failed_wpa_message">Este teléfono no pudo conectarse a %1$s ni por WPA3 ni por WPA2: probablemente sea una limitación de compatibilidad Wi-Fi del teléfono, no de la contraseña. Aun así puedes volver a introducir la contraseña para descartarlo.</string>
     <string name="reenter_password">Volver a introducir la contraseña</string>
     <string name="back_to_cameras">Volver a las cámaras</string>
@@ -111,6 +112,7 @@
     <string name="not_connected">Sin conexión</string>
     <string name="no_media_found">%1$s no tiene contenido</string>
     <string name="camera_unreachable">No se pudo contactar con %1$s por Wi-Fi</string>
+    <string name="camera_not_serving_files">Esta cámara aún no ofrece sus archivos por Wi-Fi, así que la vista previa y la descarga no están disponibles.</string>
     <string name="camera_network_blocked_title">Android bloqueó la conexión con la cámara</string>
     <string name="camera_network_blocked_message">El teléfono se conectó a %1$s, pero Android no deja que Osmosis envíe nada por esa red, así que la cámara nunca respondió.\n\nSuele deberse a una VPN, un bloqueador de anuncios, un filtro DNS o una app de cortafuegos. Desactívala y vuelve a conectar.</string>
     <string name="camera_not_activated_title">%1$s es una cámara nueva, sin activar</string>
