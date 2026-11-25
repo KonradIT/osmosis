@@ -8,13 +8,8 @@ package dev.konraditurbe.osmosis.dcf
  * a numbered directory (100–999) holding numbered files (1–9999). DJI packs that pair, plus which store
  * it lives on, into the single 32-bit `file_index` its `/v1` endpoint takes.
  *
- * This is **not drone-specific**. Two very different devices address media this way:
- *  - **drones** (Mavic 3 family) — 94-byte manifest records, see [DcfRecords.decodeDrone];
- *  - the **Osmo Action 1** — 65-byte index records over the same `/v1` endpoint, see
- *    [DcfRecords.ACTION1_STRIDE] and MEDIA_PROTOCOL.md §1 ("Parsed — index-based").
- *
- * Everything else in the app addresses media by *path* over `/v2?storage=N&path=…` instead. Keeping the
- * two schemes in separate packages is the point: a path-based camera never touches this file.
+ * Mavic 3 drones and the original Osmo Action both list packed DCF indices.
+ * [DcfAddressing] chooses the HTTP URL independently of how the index was listed.
  *
  * ### Packed `file_index`
  * ```
@@ -50,13 +45,12 @@ object DcfIndex {
         index != 0L && dir(index) in 100..999 && file(index) in 1..9999
 
     /** `100MEDIA` — the on-card directory name for [index]'s directory number. */
-    fun dirName(index: Long): String = "%dMEDIA".format(dir(index))
+    fun dirName(index: Long): String = "%dMEDIA".format(java.util.Locale.ROOT, dir(index))
 
     /** `DJI_0554.MP4` — DJI's on-card naming convention, rebuilt from the index (no name is transmitted). */
-    fun fileName(index: Long, ext: String): String = "DJI_%04d.%s".format(file(index), ext)
+    fun fileName(index: Long, ext: String): String = "DJI_%04d.%s".format(java.util.Locale.ROOT, file(index), ext)
 
-    /** `DCIM/100MEDIA/DJI_0554.MP4`. Display and download naming only — it is **not** a URL these
-     *  devices answer; see [DcfUrls]. */
+    /** The conventional on-card path for an indexed record, e.g. `DCIM/100MEDIA/DJI_0554.MP4`. */
     fun path(index: Long, ext: String): String = "DCIM/${dirName(index)}/${fileName(index, ext)}"
 
     /**
@@ -72,8 +66,6 @@ object DcfIndex {
      * FAT stores wall-clock with no zone, so it's interpreted in the phone's local time — the same
      * assumption the camera path makes for its filename timestamps.
      *
-     * Not universal across DCF devices: the Osmo Action 1's records carry plain unix seconds in the same
-     * position, so callers pick the encoding per record layout rather than assuming FAT.
      */
     fun fatToEpoch(v: Long): Long {
         if (v == 0L) return 0L

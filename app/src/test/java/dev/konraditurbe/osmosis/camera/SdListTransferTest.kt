@@ -30,11 +30,7 @@ class SdListTransferTest {
             0x4A, sub.toByte(), (lenFlags and 0xFF).toByte(), (lenFlags shr 8).toByte(),
             ctr.toByte(), 0, 0, 0, 0, 0,
         ) + chunk
-        val len = payload.size + 13
-        return byteArrayOf(
-            0x55, (len and 0xFF).toByte(), ((len shr 8) and 0x03).toByte(), 0x00,
-            0x01, 0x02, 0x03, 0x04, 0x00, 0x00, 0x27,
-        ) + payload + byteArrayOf(0, 0)
+        return dev.konraditurbe.osmosis.duml.DjiMessage(0x0201, 0x0403, 0x270000, payload).encode()
     }
 
     private fun state(ctr: Int) = frame(0x03, ctr)

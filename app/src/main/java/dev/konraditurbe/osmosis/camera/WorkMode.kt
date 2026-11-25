@@ -6,15 +6,8 @@ package dev.konraditurbe.osmosis.camera
  * This is how the older Osmo generation switches what the camera is doing, and DJI Mimo sends this
  * switch before it reads files off an Osmo Action 1. Its album calls
  * `DJICameraAC101ModeInfo.H2(CameraWorkMode.TRANSCODE)`, not the `0x02/0x0c` playback entry that the
- * newer cameras use. An Action 1 answers that playback entry with `0xe0` every time (issue #32), and
- * `:80` refuses connections in ~10 ms. So the camera's TCP stack is up, but nothing listens on the port
- * until something switches the mode.
- *
- * **Wire values are DJI's on-the-wire enum**, taken from DJI Fly 1.21.4: `DataCameraGetMode.MODE`,
- * which `DataCameraSetMode.doPack` sends as a single byte. They are not Mimo's KeyValue
- * `CameraWorkMode`, an SDK-level enum whose TRANSCODE is 7 (`NEW_PLAYBACK` on the wire). Mimo maps that
- * enum to the wire inside its packed native library, where it can't be read. So [HTTP_CANDIDATES] tries
- * both readings.
+ * newer cameras use. Testers saw the camera refuse HTTP in each tested mode.
+ * SetMode uses the one-byte wire values from DJI Fly's DataCameraGetMode.MODE.
  *
  * The camera also reports its mode unprompted, at byte 4 of the `0x02/0x80` status push (Fly's
  * `DataCameraGetPushStateInfo.getMode` reads `get(4, 1)`), so a switch can be confirmed without polling.
@@ -29,18 +22,6 @@ object WorkMode {
     const val DOWNLOAD = 6
     const val NEW_PLAYBACK = 7
     const val BROADCAST = 8
-
-    /**
-     * Modes to try, in order, until `:80` opens.
-     *
-     * - [TRANSCODE] first: it is the mode Mimo names for the Action 1's album, by its wire value.
-     * - [NEW_PLAYBACK] second: Mimo's own number for TRANSCODE (7), in case its mapping passes it through.
-     * - [DOWNLOAD] and [PLAYBACK] last: the other two modes DJI defines for getting media off a camera.
-     *
-     * Every value here is a mode DJI's own apps set. [TUNING], [SAVE_POWER] and [BROADCAST] are left out
-     * on purpose, because nothing suggests they serve files and SAVE_POWER could take the Wi-Fi down.
-     */
-    val HTTP_CANDIDATES = listOf(TRANSCODE, NEW_PLAYBACK, DOWNLOAD, PLAYBACK)
 
     fun name(mode: Int?): String = when (mode) {
         null -> "unknown"

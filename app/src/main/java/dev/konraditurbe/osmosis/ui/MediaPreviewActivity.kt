@@ -1,5 +1,6 @@
 package dev.konraditurbe.osmosis.ui
 
+import dev.konraditurbe.osmosis.dcf.DcfAddressing.Route
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -97,6 +98,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     // The grid's filtered list + our index in it, so a swipe (when paused) moves to the prev/next item.
     private var navItems: List<CameraFile> = emptyList()
     private var navIndex = -1
+    private val mediaAvailable get() = intent.getBooleanExtra(EXTRA_MEDIA_AVAILABLE, true)
+    private val datalinkOriginal get() = intent.getBooleanExtra(EXTRA_DATALINK_ORIGINALS, false) && file.isActionDcf
     private var queued = false
     private var resTag: String? = null // resolution label, from the manifest (video enum / photo W×H)
     private var streamCandidates: List<String> = emptyList() // preview URLs, cheapest first
@@ -221,7 +224,13 @@ class MediaPreviewActivity : AppCompatActivity() {
         intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY),
         handle = intent.getLongExtra(EXTRA_HANDLE, 0L),
         sizeBytes = intent.getLongExtra(EXTRA_SIZE, 0L),
-        resolution = intent.getStringExtra(EXTRA_RESOLUTION))
+        resolution = intent.getStringExtra(EXTRA_RESOLUTION),
+        durationSec = intent.getIntExtra(EXTRA_DURATION, 0),
+        mtimeEpoch = intent.getLongExtra(EXTRA_MTIME, 0L),
+        mediaType = intent.getIntExtra(EXTRA_TYPE, -1),
+        fileIndex = intent.getLongExtra(EXTRA_FILE_INDEX, 0L),
+        segmentIndex = intent.getIntExtra(EXTRA_SEGMENT, 0),
+        dcfRoute = Route.values().firstOrNull { it.name == intent.getStringExtra(EXTRA_ROUTE) } ?: Route.V1)
 
     /** Tap the media to toggle overlays; a horizontal fling moves to the prev/next item, even while a
      *  video plays. Swipe **left = next**, **right = previous**. A photo also
@@ -282,10 +291,11 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     /** Load whatever [file] currently points at — queue/trim state comes live from the grid (PreviewNav). */
     private fun loadCurrent() {
-        queued = dev.konraditurbe.osmosis.net.PreviewNav.isQueued?.invoke(file.path) ?: false
-        val t = dev.konraditurbe.osmosis.net.PreviewNav.trimFor?.invoke(file.path)
+        queued = dev.konraditurbe.osmosis.net.PreviewNav.isQueued?.invoke(file.albumKey) ?: false
+        val t = if (mediaAvailable) dev.konraditurbe.osmosis.net.PreviewNav.trimFor?.invoke(file.albumKey) else null
         trimStartMs = t?.startMs ?: -1L; trimEndMs = t?.endMs ?: -1L
-        resTag = null
+        resTag = if (file.isVideo) dev.konraditurbe.osmosis.core.VideoFormats.label(file.resolution)
+            else file.resolution?.replace("x", "×")
 
         videoView.visibility = View.GONE
         photoView.visibility = View.GONE
@@ -294,7 +304,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         // `controls` is the whole bottom overlay — it also holds the queue button and the burst strip,
         // so it stays up for a still. Only [trimRow], the scrubber/transport/trim block inside it, is
         // video-only. Hiding the container instead took "Add to Queue" down with it on every photo.
-        trimRow.visibility = if (file.isVideo) View.VISIBLE else View.GONE
+        trimRow.visibility = if (mediaAvailable && file.isVideo) View.VISIBLE else View.GONE
         controls.visibility = View.VISIBLE
         topInfo.visibility = View.VISIBLE
 
@@ -303,12 +313,13 @@ class MediaPreviewActivity : AppCompatActivity() {
         refreshQueueButton()
 
         when {
+            datalinkOriginal -> showStatus(getString(R.string.datalink_original_available))
+            !mediaAvailable -> showStatus(getString(R.string.camera_not_serving_files))
             file.isVideo -> {
                 if (groupPaths.size > 1) setupBurstStrip()     // a looping recording's chapters
                 loadVideo(); loadHighlights()
             }
             file.isImage -> {
-                resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
                 if (groupPaths.size > 1) setupBurstStrip()     // frames came from the DUML group-expand
                 loadPhoto()
             }
@@ -320,7 +331,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private fun commitQueue() {
         val member = if (groupPaths.isNotEmpty()) groupMember(selectedFrame) else null
         val trim = if (hasTrim()) TrimRange(trimStartMs, trimEndMs) else null
-        dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(file.path, queued, trim, member)
+        dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(file.albumKey, queued, trim, member)
     }
 
     /**
@@ -349,6 +360,7 @@ class MediaPreviewActivity : AppCompatActivity() {
      * cell of its own; the HEAD's Content-Length becomes its size for the progress/duplicate checks.
      */
     private fun offerSidecar() {
+        if (!mediaAvailable) return
         val target = shownFile()
         val sc = target.sidecarCandidate() ?: return
         val url = PathAddressing.byPath(target.storage, sc.path)
@@ -462,7 +474,7 @@ class MediaPreviewActivity : AppCompatActivity() {
      */
     private fun refreshQueueButton() {
         val f = currentCheckFile()
-        val name = f.name
+        val name = f.albumKey
         if (!hasTrim() && !downloadedCache.containsKey(name)) {
             Thread {
                 // One query answers both questions — the row's existence grays out Download, and its id
@@ -476,8 +488,8 @@ class MediaPreviewActivity : AppCompatActivity() {
             }.start()
         }
         val alreadySaved = !hasTrim() && downloadedCache[name] == true
-        btnQueue.isEnabled = !alreadySaved
-        btnQueue.alpha = if (alreadySaved) 0.5f else 1f
+        btnQueue.isEnabled = (mediaAvailable || datalinkOriginal) && !alreadySaved
+        btnQueue.alpha = if (btnQueue.isEnabled) 1f else 0.5f
         btnQueue.text = if (alreadySaved) getString(R.string.already_downloaded) else queueLabel()
 
         // Share/Edit act on the saved copy, so they only exist once there is one — and they follow the
@@ -633,7 +645,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         topInfo.visibility = if (show) View.VISIBLE else View.GONE
         savedActions.visibility = if (show && savedUri != null) View.VISIBLE else View.GONE
         controls.visibility = if (show) View.VISIBLE else View.GONE
-        trimRow.visibility = if (show && file.isVideo) View.VISIBLE else View.GONE
+        trimRow.visibility = if (show && mediaAvailable && file.isVideo) View.VISIBLE else View.GONE
     }
 
     /** Keep the scrubber + current-time in sync while playing (skipped while the user is dragging). */
@@ -653,7 +665,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     /** id · date · <resolution>·<fps> — the 4-digit media ID (seq), not the raw filename. */
     private fun renderTop() {
         val resFps = listOfNotNull(resTag, file.resLabel).joinToString("·").ifBlank { "—" }
-        val id = "%04d".format(file.seq)
+        val id = file.displayNumber
         val name = if (groupPaths.isNotEmpty()) "$id  (${selectedFrame + 1}/${groupPaths.size})" else id
         topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
     }
@@ -768,12 +780,13 @@ class MediaPreviewActivity : AppCompatActivity() {
         // each candidate for a full 30 s before reporting `what=1 extra=-2147483648`, so a two-candidate
         // list is a minute of spinner and then a generic failure. A refused connect is instant and
         // says something specific.
+        val requested = shownFile()
         Thread {
             val open = runCatching {
                 java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, 80), 2500); true }
             }.getOrDefault(false)
             main.post {
-                if (isFinishing) return@post
+                if (isFinishing || requested != shownFile()) return@post
                 if (open) startStream(streamCandidates[streamIdx])
                 else {
                     plog("preview: $ip:80 refused — not attempting to stream (camera is not serving HTTP)")
@@ -888,6 +901,14 @@ class MediaPreviewActivity : AppCompatActivity() {
         private const val CAPTURE_OK_MS = 1_200L
 
         const val EXTRA_PATH = "path"
+        private const val EXTRA_FILE_INDEX = "file_index"
+        private const val EXTRA_SEGMENT = "segment_index"
+        private const val EXTRA_ROUTE = "dcf_route"
+        private const val EXTRA_TYPE = "media_type"
+        private const val EXTRA_MTIME = "mtime"
+        private const val EXTRA_DURATION = "duration"
+        private const val EXTRA_DATALINK_ORIGINALS = "datalink_originals"
+        private const val EXTRA_MEDIA_AVAILABLE = "media_available"
         private const val EXTRA_STORAGE = "storage"
         private const val EXTRA_SIZE = "size"    // full manifest byte size → already-downloaded check
         private const val EXTRA_HANDLE = "handle"    // video handle → highlight pull (0x02/0xff)
@@ -909,8 +930,17 @@ class MediaPreviewActivity : AppCompatActivity() {
         /** [group] = a burst/interval group's frames (from DatalinkClient.expandBurstGroup), sub-index
          *  order, [file] being the lead; empty/size-1 for a normal file → no strip. */
         fun intent(ctx: Context, ip: String, file: CameraFile, position: Int, queued: Boolean,
-                   trim: TrimRange?, group: List<CameraFile> = emptyList()) =
+                   trim: TrimRange?, group: List<CameraFile> = emptyList(), mediaAvailable: Boolean = true,
+                   datalinkOriginals: Boolean = false) =
             Intent(ctx, MediaPreviewActivity::class.java).apply {
+                putExtra(EXTRA_FILE_INDEX, file.fileIndex)
+                putExtra(EXTRA_SEGMENT, file.segmentIndex)
+                putExtra(EXTRA_ROUTE, file.dcfRoute.name)
+                putExtra(EXTRA_TYPE, file.mediaType)
+                putExtra(EXTRA_MTIME, file.mtimeEpoch)
+                putExtra(EXTRA_DURATION, file.durationSec)
+                putExtra(EXTRA_DATALINK_ORIGINALS, datalinkOriginals)
+                putExtra(EXTRA_MEDIA_AVAILABLE, mediaAvailable)
                 putExtra(EXTRA_PATH, file.path)
                 putExtra(EXTRA_STORAGE, file.storage)
                 putExtra(EXTRA_SIZE, file.sizeBytes)

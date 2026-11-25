@@ -5,24 +5,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/**
- * `0x02/0x10` / `0x02/0x11` and the mode byte in the `0x02/0x80` push. The wire values are DJI Fly's
- * `DataCameraGetMode.MODE`; nothing here has been checked against an Action 1 yet. These pin the shapes,
- * so a tester log can be read against what we know we sent.
- */
 class WorkModeTest {
 
     @Test
     fun `SetMode body is the wire mode as one byte`() {
         assertArrayEquals(byteArrayOf(0x03), WorkMode.setPayload(WorkMode.TRANSCODE))
         assertArrayEquals(byteArrayOf(0x07), WorkMode.setPayload(WorkMode.NEW_PLAYBACK))
-    }
-
-    @Test
-    fun `TRANSCODE by its wire value is tried first, and no mode that could cut the Wi-Fi is tried`() {
-        assertEquals(WorkMode.TRANSCODE, WorkMode.HTTP_CANDIDATES.first())
-        for (unsafe in listOf(WorkMode.TUNING, WorkMode.SAVE_POWER, WorkMode.BROADCAST))
-            assert(unsafe !in WorkMode.HTTP_CANDIDATES) { "${WorkMode.name(unsafe)} must not be swept" }
     }
 
     @Test

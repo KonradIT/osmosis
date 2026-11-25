@@ -20,6 +20,19 @@ class Action1ListPipelineTest {
     private val raw = javaClass.classLoader!!.getResourceAsStream("manifests/action1_7.bin")!!.readBytes()
 
     @Test
+    fun `a start byte in the UDP header cannot hide an Action 1 album reply`() {
+        val s = CameraSession(log = {})
+        val start = (0..raw.size - 13).first { i ->
+            raw[i] == 0x55.toByte() && raw[i + 9] == 0.toByte() && raw[i + 10] == 0x27.toByte() &&
+                raw[i + 11] == 0x4a.toByte() && raw[i + 12] == 1.toByte()
+        }
+        val prefix = byteArrayOf(0x55, 0x60, 4, 0)
+        val framed = raw.copyOfRange(0, start) + prefix + raw.copyOfRange(start, raw.size)
+        assertEquals(s.collectStoresForTest(raw), s.collectStoresForTest(framed))
+        assertEquals(CameraSession.Answer.DONE, s.answerState(framed, 1))
+    }
+
+    @Test
     fun `the raw capture splits into seven SD files and an empty internal store`() {
         val files = CameraSession(log = {}).collectStoresForTest(raw)
         assertEquals(7, files.size)

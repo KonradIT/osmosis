@@ -12,9 +12,6 @@ import dev.konraditurbe.osmosis.core.MediaAddressing
  *
  * `storage` is a **mount index resolved by probing**, not a fixed SD/internal mapping: an Xtra served
  * its SD at 0 and internal at 1, a Nano serves its only store at 1. See `StorageRules`.
- *
- * Nothing here knows about DCF indices, and [DcfAddressing][dev.konraditurbe.osmosis.dcf.DcfAddressing]
- * knows nothing about paths.
  */
 object PathAddressing : MediaAddressing {
 

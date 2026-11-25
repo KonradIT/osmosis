@@ -542,15 +542,66 @@ for f in media_files:
 
 #### Parsed — index-based (Osmo Action 1/2/3)
 
-Header `[u32-LE count][u32-LE total_size]`, then fixed 65 B records, no path strings; files are keyed by `FileIndex`.
+The list begins with a little-endian record count and total byte length (including the 8-byte
+header). Each record has an 18-byte prefix. Action 1 captures have 47 extension bytes per record
+for a 65-byte stride. For an identified older Action, read the extension length on each record.
 
-| offset | type | field |
+| Offset within record | Type | Field |
 |---|---|---|
-| `[0:4]` | u32-LE | Unix timestamp |
-| `[8:12]` | u32-LE | **FileIndex** (`0x640251`…) |
-| `[10:14]` | 2×u16-LE | DCF dir / file number (`100` = `100MEDIA`) |
-| `[19:23]` | u32-LE | video UUID (Amba `DjiMovDmx`) |
-| `[38:42]` | u32-LE | size (~KB) |
+| +0 | u32 LE | Local FAT date and time, two-second precision |
+| +4 | u32 LE | Size in bytes |
+| +8 | u32 LE | DCF index. Storage in bits 31–30, directory in 29–16, file number in 15–0 |
+| +12 | u16 LE | Video duration in whole seconds |
+| +14 | u8 | Video frame-rate code in bits 5–0 |
+| +15 | u8 | Video resolution code |
+| +16 | u8 | Media type (0 JPEG, 1 DNG, 2 MOV, 3 MP4) |
+| +17 | u8 | Extension area length |
+| +18 onward | Tagged fields | Tag 3 carries the favourite flag. Tag 10 carries the segment sub-index (u16), duration in milliseconds (u32), and a timing parameter (u32). |
+
+The Action 1 firmware confirms these fields in `DjiTransSrv_SendListFrag` and
+`DjiTransSrv_VideoMiscInfoGet`. The video UUID and millisecond duration appear at +19 and +38
+in the seven-clip fixture. Their offsets depend on which tags precede them. [DJI descriptor definitions](https://github.com/dji-sdk/Onboard-SDK/blob/master/osdk-core/modules/inc/filemgr/impl/dji_file_mgr_internal_define.hpp)
+
+The DCF index identifies the album item independently of the download transport. Mimo 2.10.9
+selects indexed HTTP v1 for Action 2 and path-based HTTP v2 for Action 3. Osmosis retains physical
+paths supplied by a path-based manifest. Action 1 original transfers over HTTP still need hardware
+verification. [Firmware and transport findings](ROADMAP.md#6-older-osmo-action-cameras)
+
+#### Action 1 original download over the datalink
+
+When HTTP cannot serve an original, the Action 1 uses the paired album session on UDP 9004.
+Osmosis opens one file transfer when the user requests a download. It sends a 48-byte
+`4a 20` request on `00/26`. Mimo 2.10.9 builds it at `0x130c090` in `libdjisdk_jni.so`.
+The following offsets are measured from the start of the envelope.
+
+| Offset | Field | Original request |
+|---:|---|---|
+| 10 | u32 file index | Includes the drive bits |
+| 14 | u16 file count | 1 |
+| 16 | u8 subtype | 0 |
+| 17 | u8 sub-index | 0 |
+| 18 | u32 file offset | Number of original bytes already saved |
+| 22 | u32 requested bytes | `ffffffff` to EOF, or an explicit byte count |
+| 26 | u32 extended sub-index | 0 |
+| 30 | u16 segment | Listed segment index |
+| 32 | 16 reserved bytes | Zero |
+
+In retail AC101 firmware V01.10.00.40 the file handler reads the segment at `0x47ccdc`.
+It opens the selected file, checks the offset against EOF and adds 13 to the transfer length at
+`0x47cb54`. The sender at `0x475ab4` emits `4a 21` frames with up to 993 data bytes each.
+Chunk zero contains a 13-byte header with the total transfer length at +4, file index at +8 and
+a zero byte at +12. The first four bytes are unused here. The final frame sets flag `0x1000`.
+A range whose header would overflow the camera's 32-bit length is split into two requests.
+
+Osmosis validates both DUML checksums and the transfer ID, reassembles frames across UDP envelopes
+and writes contiguous chunks in sequence. It verifies the file index, manifest size and initial media
+signature before accepting a new original. On loss it sends `4a 02` with the first missing chunk,
+followed by a count and up to three pairs of missing chunk indices and lengths. It sends `4a 24`
+on completion or abandonment. A partial stays pending in MediaStore for the next download attempt.
+
+The local Mavic 3 capture `mavic3_media_browse.pcap` has a 16,824-byte JPEG thumbnail in transfer
+`0x12` that exercises this framing. An Android 14 emulator verified the original-file path with a
+simulated Action 1. An original from a stock Action 1 still needs hardware confirmation.
 
 ### 1a. Unlisted sidecar files (`.DNG` / `.WAV`)
 

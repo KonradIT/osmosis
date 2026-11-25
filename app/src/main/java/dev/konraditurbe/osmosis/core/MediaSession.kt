@@ -30,13 +30,15 @@ interface MediaSession {
     /** Another, older page is likely to exist — drives the grid's infinite scroll. */
     val moreAvailable: Boolean
 
-    /**
-     * Whether the device's HTTP media server is listening. True or false only on a device that has
-     * to be switched into serving files and where the session tried (the Osmo Action 1). Null where
-     * nobody checked, which is every device that always serves.
-     */
+    /** Whether a listed original passed the session's HTTP check. Null if no check was needed. */
     val httpServing: Boolean? get() = null
 
+
+    /** Available for listed Action 1 originals when the camera does not serve them over HTTP. */
+    val datalinkOriginals: Boolean get() = false
+
+    fun downloadOriginal(file: CameraFile, offset: Long, output: java.io.OutputStream,
+                         progress: (Long) -> Unit): Boolean = false
 
     /** Connect and return the newest page. Empty on failure. Blocking. */
     fun fetchFileList(ip: String): List<CameraFile>

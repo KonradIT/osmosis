@@ -58,6 +58,7 @@ class Action1SecondCameraTest {
 
     @Test fun `the timestamp is a real date, not a mis-read field`() {
         val r = DcfRecords.decodeAction1(manifest).single()
-        assertEquals(1_558_610_985L, r.mtimeEpoch)   // 2019-05-23 — an Action 1 whose clock was never set
+        val expected = java.time.LocalDateTime.of(2026, 7, 6, 16, 33, 18)
+        assertEquals(expected.atZone(java.time.ZoneId.systemDefault()).toEpochSecond(), r.mtimeEpoch)
     }
 }

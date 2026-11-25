@@ -1,5 +1,6 @@
 package dev.konraditurbe.osmosis.core
 
+import dev.konraditurbe.osmosis.dcf.DcfAddressing
 import dev.konraditurbe.osmosis.dcf.DcfIndex
 
 /**
@@ -50,13 +51,9 @@ data class CameraFile(
     // lives on the same store, so the caller resolves [storage] once per group instead of once per
     // manifest (which used to stamp one store on everything and 404 the other half).
     val group: Int = 0,
-    // DCF-INDEXED DEVICES ONLY (0 on a path-based camera). Drones — and the Osmo Action 1 — address
-    // media by a packed numeric index instead of a path, served at `/v1?file_index=N` rather than
-    // `/v2?…&path=…`. The [path] above is synthesised from this index for display/naming only — it is
-    // NOT a URL these devices answer. See [DcfIndex], [DcfUrls] and MEDIA_PROTOCOL.md §29.
+    // Packed storage, directory and file number in a DCF album record.
     val fileIndex: Long = 0L,
-    // Modification time, unix seconds — drones put it straight in the manifest record, where cameras
-    // encode it in the filename ([timestamp]). 0 = unknown.
+    // Unix seconds converted from the camera's local FAT date and time.
     val mtimeEpoch: Long = 0L,
     // True when [storage] came from the store-specific query that returned this record, rather than
     // from a handle-bit guess confirmed by a HEAD. Set by CameraSession.collectStores; when it is set
@@ -110,8 +107,11 @@ data class CameraFile(
      * CameraFile positionally.
      */
     val handleCandidate: Long = 0L,
+    val dcfRoute: DcfAddressing.Route = DcfAddressing.Route.V1,
+    /** Sub-index from the DCF video metadata. Zero selects the base file. */
+    val segmentIndex: Int = 0,
 ) {
-    /** DCF-index-addressed media, fetched over `/v1` rather than by path over `/v2`. */
+    /** A record identified by its packed DCF file index. */
     val isIndexed: Boolean get() = fileIndex != 0L
 
     /**
@@ -120,7 +120,14 @@ data class CameraFile(
      * payload slot — only the number in it differs — so the UI treats them uniformly. 0 when neither
      * exists: a Pocket 3 still with no marker, which stays non-deletable.
      */
-    val opHandle: Long get() = if (handle != 0L) handle else if (isIndexed) fileIndex else 0L
+    val opHandle: Long get() = when {
+        handle != 0L -> handle
+        isIndexed && !isActionDcf -> fileIndex
+        else -> 0L
+    }
+
+    /** Action DCF descriptors carry a file type. Multiple segments can share one command index. */
+    val isActionDcf: Boolean get() = isIndexed && mediaType >= 0
 
     /**
      * Deletable when it has an address the delete command can name and nothing disqualifies it. For a
@@ -129,6 +136,9 @@ data class CameraFile(
      * deletable — delete stays on verified addresses.
      */
     val deletable: Boolean get() = opHandle != 0L && !handleShared
+
+    /** Stable selection key when SD and internal storage contain the same DCF filename. */
+    val albumKey: String get() = if (isActionDcf) "$fileIndex:$segmentIndex" else path
 
     val name: String get() = path.substringAfterLast('/')
     val ext: String get() = name.substringAfterLast('.', "").uppercase()
@@ -156,12 +166,16 @@ data class CameraFile(
     /** 3-digit burst/interval sub-index (`…_0286_D_001.JPG` → 1), or 0 if this isn't a group frame. */
     val subIndex: Int get() = Regex("""_(\d{3})\.\w+$""").find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
     /** The shared name-prefix that groups burst/interval frames (everything before `_NNN.ext`), or null. */
-    val groupKey: String? get() = Regex("""^(.+)_\d{3}\.\w+$""").find(name)?.groupValues?.get(1)
+    val groupKey: String? get() = if (isIndexed) null else Regex("""^(.+)_\d{3}\.\w+$""").find(name)?.groupValues?.get(1)
     /** A burst/interval frame — its name carries a `_NNN` sub-index. The manifest lists ONLY the group's
      *  first frame (`…_0286_D_001.JPG`) and standalone photos have no suffix, so this is the reliable
      *  burst signal (→ the 🎞️ badge). The other frames aren't in the manifest — the viewer enumerates
      *  them by probing `_002…` on open (see MediaPreviewActivity.probeBurstFrames). */
     val isBurst: Boolean get() = groupKey != null
+
+    val displayNumber: String get() = if (isActionDcf && segmentIndex > 0)
+        "%04d_%03d".format(java.util.Locale.ROOT, seq, segmentIndex)
+    else "%04d".format(seq)
 
     /** Human date: from the 14-digit filename timestamp (cameras), else the manifest mtime (drones). */
     val dateTaken: String get() = timestamp.takeIf { it.length == 14 }?.let {
@@ -193,6 +207,7 @@ data class CameraFile(
      * deletable). See ROADMAP #19 / MEDIA_PROTOCOL §19.
      */
     fun sidecarCandidate(): CameraFile? {
+        if (isIndexed) return null
         val kind = when (ext) {
             "JPG", "JPEG" -> "DNG"
             "MP4", "MOV" -> "WAV"
@@ -212,4 +227,13 @@ data class CameraFile(
          */
         const val EXIF_THUMB = "exif:"
     }
+}
+
+/** File signatures shared by HTTP and datalink original downloads. */
+internal fun CameraFile.matchesOriginalPrefix(bytes: ByteArray): Boolean = when {
+    isVideo && bytes.size >= 8 -> String(bytes, 4, 4, Charsets.US_ASCII) in setOf("ftyp", "moov", "mdat", "wide")
+    ext == "JPG" && bytes.size >= 3 -> bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte() && bytes[2] == 0xff.toByte()
+    ext == "DNG" && bytes.size >= 4 -> bytes.copyOf(4).contentEquals(byteArrayOf(73, 73, 42, 0)) ||
+        bytes.copyOf(4).contentEquals(byteArrayOf(77, 77, 0, 42))
+    else -> false
 }

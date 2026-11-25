@@ -37,11 +37,10 @@ data class CameraModel(
     // Action 1 through 6, the Pocket 3, 4 and 4 Pro, and their Xtra rebadges, which inherit it from the
     // DJI twin in resolve(). Not the Nano (so not the Atto either), the 360 or the drones.
     val livestream: Boolean = false,
-    // The camera's HTTP file server only listens once its work mode is switched with `0x02/0x10`
-    // (see camera/WorkMode). The Osmo Action 1 refuses the `0x02/0x0c` playback entry, so on this model
-    // the session skips playback and searches for the work mode that opens `:80` instead.
-    val httpViaWorkMode: Boolean = false,
+    val legacyAlbum: LegacyActionAlbum? = null,
 ) {
+    enum class LegacyActionAlbum { ACTION_1, ACTION_2, ACTION_3 }
+
     /** The SetPairingPIN token this device expects: a drone only releases WiFi creds to "DJI FLY". */
     val pairingToken: String get() = if (isDrone) "DJI FLY" else "osmo"
 
@@ -77,17 +76,17 @@ data class CameraModel(
          * to 1.3.3 only escaped that because they ignored `0xE5C0` and resolved the camera by name.
          * Offload keeps the camera defaults (9004 + poke, WPA2), which is what those builds listed with.
          *
-         * [httpViaWorkMode]: on 1.5.1-action1 the list worked, but `0x02/0x0c` came back `0xe0` on every
+         * On 1.5.1-action1 the list worked, but `0x02/0x0c` came back `0xe0` on every
          * attempt and `:80` refused connections. Mimo switches this camera's work mode to TRANSCODE.
          */
-        private val OSMO_ACTION = CameraModel("Osmo Action", livestream = true, httpViaWorkMode = true)
+        private val OSMO_ACTION = CameraModel("Osmo Action", livestream = true, legacyAlbum = LegacyActionAlbum.ACTION_1)
 
         private val BY_ID: Map<Int, CameraModel> = mapOf(
             0x0006 to OSMO_ACTION,
             0x0007 to OSMO_ACTION,
             0x0082 to OSMO_ACTION,   // hardware-observed: OsmoAction-FB74FD, mfr[cid=e5c0 8200…]
-            0x0010 to CameraModel("Osmo Action 2", livestream = true),
-            0x0012 to CameraModel("Osmo Action 3", livestream = true),
+            0x0010 to CameraModel("Osmo Action 2", livestream = true, legacyAlbum = LegacyActionAlbum.ACTION_2),
+            0x0012 to CameraModel("Osmo Action 3", livestream = true, legacyAlbum = LegacyActionAlbum.ACTION_3),
             // Tester-confirmed 2026-08-24: pair, BLE creds, a WPA2 AP, datalink on 9004.
             // Thanks to Ave for sending over the golden test files. All verified against the actual hardware.
             // Everything seems to work as expected.
@@ -223,6 +222,7 @@ data class CameraModel(
                 n.contains("action4") || n.contains("edge") -> BY_ID.getValue(0x0014)
                 n.contains("action3") -> BY_ID.getValue(0x0012)
                 n.contains("action2") -> BY_ID.getValue(0x0010)
+                n.substringBefore('-') in setOf("osmoaction", "osmoaction1") -> OSMO_ACTION
                 else -> DEFAULT.copy(name = name?.takeIf { it.isNotBlank() } ?: DEFAULT.name)
             }
         }

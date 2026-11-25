@@ -238,6 +238,17 @@ class DumlTransport(
 
     // ---- receive -----------------------------------------------------------------------------------
 
+    /** A bulk sender can fill its window and go quiet until our ACK. Keep the socket poll short
+     * during that transfer so a quiet window does not add the normal 200 ms browse timeout. */
+    internal fun <T> withDownloadPolling(read: () -> T): T {
+        val socket = sock
+        val previous = socket.soTimeout
+        socket.soTimeout = 30
+        return try { read() } finally {
+            runCatching { socket.soTimeout = previous }
+        }
+    }
+
     fun recvAll(durationMs: Long): List<ByteArray> {
         val out = ArrayList<ByteArray>()
         val deadline = System.nanoTime() + durationMs * 1_000_000
@@ -256,9 +267,11 @@ class DumlTransport(
                 // [sendAck] echoes them back, and the peer will not keep streaming a window it does not
                 // see acknowledged. Video window end at [10:12], download window end at [18:20] — the
                 // download one is what the media manifest streams on.
-                if (data.size == 34 && (data[6].toInt() and 0xFF) == 0x01) {
-                    peerCursor = (data[10].toInt() and 0xFF) or ((data[11].toInt() and 0xFF) shl 8)
-                    peerDownloadCursor = (data[18].toInt() and 0xFF) or ((data[19].toInt() and 0xFF) shl 8)
+                forEachEnvelope(data) { at, length ->
+                    if (length == 34 && data[at + 6] == 1.toByte()) {
+                        peerCursor = u16(data, at + 10)
+                        peerDownloadCursor = u16(data, at + 18)
+                    }
                 }
             } catch (_: java.net.SocketTimeoutException) {
                 // keep polling until the deadline
@@ -300,6 +313,20 @@ class DumlTransport(
     // ---- frame scanning (pure) ---------------------------------------------------------------------
 
     companion object {
+        internal fun u16(bytes: ByteArray, at: Int) =
+            (bytes[at].toInt() and 255) or ((bytes[at + 1].toInt() and 255) shl 8)
+
+        /** AC101 sometimes puts a 34-byte window update and a data envelope in one UDP datagram. */
+        internal inline fun forEachEnvelope(bytes: ByteArray, visit: (Int, Int) -> Unit) {
+            var at = 0
+            while (at + 8 <= bytes.size) {
+                val length = u16(bytes, at) and 0x7fff
+                if (length < 8 || length > bytes.size - at) return
+                visit(at, length)
+                at += length
+            }
+        }
+
 
         /**
          * The 8-byte transport header: `[u16 flag|total][u16 session][u16 seq][u8 pktType][u8 xor]`,

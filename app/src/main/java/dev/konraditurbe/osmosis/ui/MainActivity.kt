@@ -1335,9 +1335,15 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         logLine("WiFi flow: ssid=\"$ssid\" passLen=${pass.length}")
         datalinkStarted = false; wifiRejoins = 0; resumeDownloadOnRejoin = false
         cameraBindFailure = null; cameraUnreachable = false
-        val joiner = ApJoiner(this, object : ApJoiner.Listener {
+        var disconnectedGrid: MediaGridAdapter? = null
+        var restoreCaptureMode: Int? = null
+        lateinit var joiner: ApJoiner
+        joiner = ApJoiner(this, object : ApJoiner.Listener {
             override fun onLog(s: String) = logLine(s)
-            override fun onFailed(reason: String) { logLine(reason); main.post { onWifiJoinFailed() } }
+            override fun onFailed(reason: String) {
+                logLine(reason)
+                main.post { if (apJoiner === joiner) onWifiJoinFailed() }
+            }
             // Both callbacks arrive on a ConnectivityManager thread; hop to main so the download /
             // AP-loss flags stay single-threaded and the check-and-set in onDownloadClicked is safe.
             override fun onNetwork(network: Network, link: LinkProperties?, bindFailure: BindFailure?) {
@@ -1349,12 +1355,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     ?.firstOrNull { it.isDefaultRoute && it.gateway is java.net.Inet4Address }
                     ?.gateway?.hostAddress
                 main.post {
+                    if (apJoiner !== joiner) return@post
                     wifiUp = true
                     cameraBindFailure = bindFailure
-                    // A second onAvailable is a rejoin. Do NOT re-run startDatalink: it would re-fetch
-                    // the whole manifest and rebuild the grid, throwing away the user's queue and
-                    // scroll position mid-transfer. Downloads only need HTTP, which the rebind in
-                    // onAvailable has just restored.
+                    // AC101 invalidates its UDP session on loss. Other cameras retain their HTTP queue.
                     if (datalinkStarted) {
                         logLine("WiFi: rejoined (ip=${ip4?.hostAddress}) — grid kept; " +
                             "list/delete/paging may need a fresh Offload")
@@ -1364,11 +1368,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     datalinkStarted = true
                     setConnectProgress(58) // WiFi joined + bound
                     logLine("WiFi link: ip=${ip4?.hostAddress} gateway=$gateway")
-                    startDatalink()
+                    startDatalink(disconnectedGrid, restoreCaptureMode)
                 }
             }
             override fun onLost() {
                 main.post {
+                    if (apJoiner !== joiner) return@post
                     wifiUp = false
                     if (!offloadMode) return@post
                     // A rejoin restores HTTP for a grid that has a live session behind it. Here nothing
@@ -1381,12 +1386,30 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     // with ENONET and its own resume loop can't help — with no network it moves zero
                     // bytes, trips the "no progress" guard, and pauses on the first attempt.
                     if (downloadRunning) resumeDownloadOnRejoin = true
+                    val action1 = currentModel.legacyAlbum == CameraModel.LegacyActionAlbum.ACTION_1
+                    if (action1) {
+                        // AC101 matches the peer address and session ID before accepting an ACK.
+                        // A new Android Network needs a new socket and a fresh album session.
+                        if (datalink != null) disconnectedGrid = adapter
+                        val interrupted = (pendingSession ?: datalink) as? CameraSession
+                        if (interrupted != null) restoreCaptureMode = interrupted.captureModeToRestore
+                        datalinkGen.incrementAndGet()
+                        pendingSession?.close()
+                        pendingSession = null
+                        datalink?.close()
+                        datalink = null
+                        datalinkStarted = false
+                        updateDownloadFab()
+                    }
                     if (wifiRejoins >= MAX_WIFI_REJOINS) {
                         logLine("WiFi: AP gone and $MAX_WIFI_REJOINS rejoin attempts used — " +
                             "giving up, tap Offload to restart")
                         return@post
                     }
                     wifiRejoins++
+                    if (action1) {
+                        gattClient?.writeCommand(dev.konraditurbe.osmosis.duml.OsmoCommands.session5310())
+                    }
                     logLine("WiFi: AP gone — rejoining (attempt $wifiRejoins/$MAX_WIFI_REJOINS)")
                     if (apJoiner?.rejoin() != true) logLine("WiFi: nothing to rejoin")
                 }
@@ -1399,7 +1422,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
 
     /** Open the datalink and fetch the media list. Split out of the join callback so the `nojoin`
      *  debug path can run it against whatever network is already current. */
-    private fun startDatalink() {
+    private fun startDatalink(rejoinGrid: MediaGridAdapter? = null, restoreCaptureMode: Int? = null) {
+                val previousDepth = rejoinGrid?.totalFiles() ?: 0
+                val previousSession = datalink
+                val model = currentModel
                 val gen = datalinkGen.incrementAndGet()
                 Thread {
                     // Datalink port + poke come from the model AND brand: 10004/no-poke was only ever
@@ -1414,11 +1440,12 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         val c: MediaSession =
                             if (m.isDrone) DroneSession(::logLine, m.datalinkPort, bleDroneSerial)
                             else CameraSession(::logLine, m.datalinkPort, m.tcpPoke, probe4a,
-                                httpViaWorkMode = m.httpViaWorkMode)
-                        c.onStatus = { s -> main.post { onCameraStatus(s) } }
+                                legacyAlbum = m.legacyAlbum, restoreAfterRejoin = restoreCaptureMode)
+                        c.onStatus = { s -> main.post { if (gen == datalinkGen.get()) onCameraStatus(s) } }
                         c.onFetchProgress = { fp -> setConnectProgress(60 + fp * 38 / 100) } // 60→98
                         // Publish before the fetch, not after: fetchFileList owns the next 10-20 s and
                         // teardown has to be able to close this socket during it.
+                        if (gen != datalinkGen.get()) return c to emptyList()
                         pendingSession = c
                         val f = runCatching { c.fetchFileList("192.168.2.1") }
                             .getOrElse { logLine("datalink error: ${it.message}"); emptyList() }
@@ -1433,11 +1460,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         return true
                     }
 
-                    datalink?.close()
-                    var (dl, files) = open(currentModel)
+                    previousSession?.close()
+                    var (dl, files) = open(model)
                     if (superseded(dl)) return@Thread
                     if (!dl.handshakeOk) {
-                        val alt = currentModel.alternate()
+                        val alt = model.alternate()
                         logLine("datalink: nothing answered on udp/${currentModel.datalinkPort} — trying udp/${alt.datalinkPort}")
                         runCatching { dl.close() }
                         val retry = open(alt)
@@ -1448,9 +1475,6 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                         )
                     }
                     if (superseded(dl)) return@Thread
-                    pendingSession = null
-                    datalink = dl
-                    dev.konraditurbe.osmosis.net.Highlights.provider = { h -> dl.getHighlights(h) }
                     // Whenever the camera answered: it holds the AP up, polls status for the pill, and
                     // holds playback (#12). Gating on files.isNotEmpty() left an empty camera (e.g. an
                     // Action 6 with no media) with a dead pill — status is only parsed in this loop.
@@ -1460,15 +1484,51 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     if (reached) dl.startKeepAlive()
                     // Storage (/v2 mount) is resolved per file from its handle's store bit (internal
                     // 0x40000000 → storage 1, else 0), confirmed by one HEAD per store. See resolveStorage.
+                    val listed = files.toMutableList()
+                    while (listed.size < previousDepth && dl.moreAvailable && gen == datalinkGen.get()) {
+                        val older = runCatching { dl.fetchNextPage() }.getOrElse { emptyList() }
+                        if (older.isEmpty()) break
+                        listed.addAll(older)
+                    }
+                    if (superseded(dl)) return@Thread
                     storageForBit.clear()
-                    val fixed = applyStorageAndSort(files)
+                    val fixed = applyStorageAndSort(listed)
                     logLine("MANIFEST: ${fixed.size} files — " +
                         fixed.groupBy { it.storage }.entries.sortedBy { it.key }
                             .joinToString(", ") { (s, list) -> "storage=$s (${list.size} files)" } +
                         (if (dl.moreAvailable) " · more on scroll" else ""))
-                    main.post { showGrid(fixed, reached = reached) }
+                    main.post {
+                        if (superseded(dl)) return@post
+                        pendingSession = null
+                        datalink = dl
+                        dev.konraditurbe.osmosis.net.Highlights.provider = { h -> dl.getHighlights(h) }
+                        if (rejoinGrid == null) showGrid(fixed, reached = reached)
+                        else restoreActionAlbum(rejoinGrid, fixed, reached)
+                        maybeResumeAfterRejoin()
+                    }
                 }.start()
     }
+
+    private fun restoreActionAlbum(previous: MediaGridAdapter, files: List<CameraFile>, reached: Boolean) {
+        val scroll = grid.layoutManager?.onSaveInstanceState()
+        val queued = previous.selectedEntries()
+        val visible = if (reached) files else previous.allFilesSnapshot()
+        showGrid(visible, preserveFilters = true, reached = reached)
+        val refreshed = adapter ?: return
+        for ((old, trim) in queued) {
+            val file = refreshed.fileForPath(old.albumKey) ?: continue
+            if (file.path == old.path && file.sizeBytes == old.sizeBytes && file.mtimeEpoch == old.mtimeEpoch)
+                refreshed.setQueuedByPath(file.albumKey, true, trim)
+        }
+        grid.layoutManager?.onRestoreInstanceState(scroll)
+        if (!reached) toast(getString(R.string.camera_unreachable, pillName()))
+    }
+
+    private fun downloadAvailable() = mediaAvailable() || datalink?.datalinkOriginals == true
+
+    private fun mediaAvailable(): Boolean =
+        if (currentModel.legacyAlbum == CameraModel.LegacyActionAlbum.ACTION_1) datalink?.httpServing == true
+        else datalink?.httpServing != false
 
     /**
      * WiFi join failed (WifiNetworkSpecifier `onUnavailable` — wrong password, AP down, or the user
@@ -1591,11 +1651,13 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         imageLoader?.shutdown()
         metaLoader?.shutdown()
         val loader = ImageLoader(http, ::logLine)
-        val ml = MetaLoader(http)
+        val mediaAvailable = mediaAvailable()
+        val ml = MetaLoader(http, mediaAvailable)
         imageLoader = loader
         metaLoader = ml
         gridCols = gridColumns()
-        val ad = MediaGridAdapter(this, files, loader, ml, gridCols,
+        if (!downloadAvailable() && !preserveFilters) toast(getString(R.string.camera_not_serving_files))
+        val ad = MediaGridAdapter(this, files, loader, ml, gridCols, mediaAvailable,
             onOpen = { openPreview(it) }, onLongPress = { onGridLongPress(it) })
         adapter = ad
         ad.onQueueChanged = { updateDownloadFab() }
@@ -1676,7 +1738,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 }
                 // Belt to the guard's braces: the guard is what actually prevents a second run, this
                 // just stops the button looking tappable while one is in flight.
-                isEnabled = !downloadRunning
+                isEnabled = !downloadRunning && downloadAvailable()
             }
         updateBulkDeleteFab()
     }
@@ -1829,6 +1891,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 applyStorageAndSort(dl.fetchNextPage())
             }.getOrElse { emptyList() }
             main.post {
+                if (dl !== datalink) return@post
                 adapter?.append(more)
                 findViewById<View>(R.id.loadMoreSpinner)?.animate()?.alpha(0f)?.setDuration(180)
                     ?.withEndAction { findViewById<View>(R.id.loadMoreSpinner)?.visibility = View.GONE }?.start()
@@ -1887,9 +1950,10 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         val ad = adapter ?: return
         // Hand the preview the current filtered list + the tapped item's index so it can swipe prev/next.
         dev.konraditurbe.osmosis.net.PreviewNav.items = ad.visibleFiles()
-        val startIndex = ad.visibleIndexOf(f.path)
+        val startIndex = ad.visibleIndexOf(f.albumKey)
         previewLauncher.launch(MediaPreviewActivity.intent(
-            this, "192.168.2.1", f, startIndex, ad.isQueuedPath(f.path), ad.trimForPath(f.path), group))
+            this, "192.168.2.1", f, startIndex, ad.isQueuedPath(f.albumKey), ad.trimForPath(f.albumKey), group,
+            mediaAvailable = mediaAvailable(), datalinkOriginals = datalink?.datalinkOriginals == true))
     }
 
     /**
@@ -1898,6 +1962,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * these on the grid (not the preview) means the preview never touches the datalink.
      */
     private fun onGridLongPress(f: CameraFile) {
+        if (f.isActionDcf && f.opHandle == 0L && f.cmdHandle == 0L) return
         val dl = datalink ?: run { logLine("Long-press: no live datalink session."); toast(getString(R.string.not_connected)); return }
         val fav = getString(if (f.starred) R.string.unfavorite else R.string.favorite)
         val del = getString(R.string.delete)
@@ -1921,11 +1986,11 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         if (favHandle == 0L) { toast(getString(R.string.favorite_no_handle, f.name)); return }
         // Optimistic badge only — the camera's manifest is the single source of truth for star state, so a
         // reload shows whatever the camera reports (the Xtra reports none; that's fine, we don't fake it).
-        adapter?.setStarredByPath(f.path, on)
+        adapter?.setStarredByPath(f.albumKey, on)
         toast(getString(if (on) R.string.favoriting else R.string.unfavoriting, f.name))
         cmdExec.execute {
             val ok = runCatching { dl.setFavorite(favHandle, on) }.getOrDefault(false)
-            if (!ok) main.post { adapter?.setStarredByPath(f.path, !on); toast(getString(R.string.favorite_failed)) }
+            if (!ok) main.post { adapter?.setStarredByPath(f.albumKey, !on); toast(getString(R.string.favorite_failed)) }
         }
     }
 
@@ -1946,7 +2011,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                             0 -> {
                                 logLine("DELETE OK (status 0x0000): ${f.name}")
                                 toast(getString(R.string.deleted, f.name))
-                                removeFromGrid(f.path)
+                                removeFromGrid(f.albumKey)
                             }
                             null -> { logLine("DELETE: no response (timeout / no session)."); toast(getString(R.string.delete_no_response)) }
                             else -> {
@@ -2009,7 +2074,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                     0 -> {
                         logLine("DELETE OK (status 0x0000): ${files.size} files")
                         toast(getString(R.string.bulk_deleted, files.size))
-                        removeFromGrid(files.map { it.path }.toSet())
+                        removeFromGrid(files.map { it.albumKey }.toSet())
                     }
                     // One command, one answer: there is no partial success to report. A no-reply may
                     // still have landed, which is why nothing is dropped from the grid here — the next
@@ -2041,7 +2106,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // Drop them from the queue as well, or the Download FAB keeps counting files that no longer
         // exist and a later download tries to fetch them.
         ad.dequeuePaths(paths)
-        showGrid(ad.allFilesSnapshot().filter { it.path !in paths }, preserveFilters = true)
+        showGrid(ad.allFilesSnapshot().filter { it.albumKey !in paths }, preserveFilters = true)
     }
 
     private fun toast(s: String) =
@@ -2056,7 +2121,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
      * `downloadOne` resumes from the partial file's size, so this continues rather than restarts.
      */
     private fun maybeResumeAfterRejoin() {
-        if (!resumeDownloadOnRejoin || downloadRunning || !wifiUp) return
+        if (!resumeDownloadOnRejoin || downloadRunning || !wifiUp || !downloadAvailable()) return
         resumeDownloadOnRejoin = false
         if ((adapter?.selectedCount() ?: 0) == 0) return
         logLine("resuming interrupted download after the WiFi rejoin")
@@ -2081,8 +2146,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // A camera that has to be switched into serving files, where the switch didn't open :80 (the
         // Osmo Action 1). Every request would be refused, and the downloader would read each refusal as
         // a dropped link and retry it five times. Say so once instead.
-        if (datalink?.httpServing == false) {
-            logLine("Download not attempted: the camera isn't serving files over HTTP (no work mode opened :80).")
+        if (!downloadAvailable()) {
+            logLine("Download not attempted: the camera isn't serving files over HTTP (no original was verified).")
             toast(getString(R.string.camera_not_serving_files))
             return
         }
@@ -2133,7 +2198,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 main.post {
                     // Everything now on the device leaves the queue (saved + already-present); only
                     // failed/paused items stay so a later Download resumes them.
-                    adapter?.dequeuePaths(doneKeys.toList())
+                    ad.dequeuePaths(doneKeys.toList())
                     updateDownloadFab()
                     overallBar.progress = 100
                     overallText.text = getString(R.string.download_done, saved, skipped, failed)
@@ -2143,11 +2208,17 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
                 logLine("DONE: $saved saved, $skipped skipped, $failed failed")
             }
         }
+        val originalSession = datalink?.takeIf { it.datalinkOriginals }
+        val albumGeneration = if (currentModel.legacyAlbum == CameraModel.LegacyActionAlbum.ACTION_1)
+            datalinkGen.get() else null
         downloadRunning = true
         updateDownloadFab()
         Thread {
             try {
-                MediaDownloader(this, http, ::logLine).run(jobs, listener)
+                val downloader = MediaDownloader(this, http, ::logLine, originalSession) {
+                    albumGeneration == null || albumGeneration == datalinkGen.get()
+                }
+                downloader.run(jobs, listener)
             } finally {
                 // In a finally, not in onComplete: a throw anywhere in the run would otherwise wedge
                 // the guard on and leave Download dead for the rest of the session.

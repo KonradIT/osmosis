@@ -11,30 +11,30 @@ import java.util.concurrent.Executors
  * didn't size (photos, unknown layouts) fall back to an HTTP HEAD. Duration still needs the MP4
  * `mvhd`. Recycling-safe via the label tag; results are cached.
  */
-class MetaLoader(private val http: HttpClient) {
+class MetaLoader(private val http: HttpClient, private val mediaAvailable: Boolean = true) {
     private val exec = Executors.newFixedThreadPool(3)
     private val cache = HashMap<String, String>()
 
     fun load(file: CameraFile, label: TextView, prefix: String) {
-        synchronized(cache) { cache[file.path] }?.let {
+        label.tag = file.albumKey
+        synchronized(cache) { cache[file.albumKey] }?.let {
             label.text = if (it.isEmpty()) prefix else "$prefix  $it"
             return
         }
         label.text = prefix
-        label.tag = file.path
         exec.submit {
             // Everything from the DUML manifest — no network. Size (record marker-14) and, for videos,
             // duration in seconds (marker+26) are both decoded up front. The HTTP HEAD only survives as a
             // guard for the rare record the manifest didn't size (unknown layout).
-            val size = if (file.sizeBytes > 0) file.sizeBytes else http.head(file.urlPath())
+            val size = if (file.sizeBytes > 0 || !mediaAvailable) file.sizeBytes else http.head(file.urlPath())
             val dur = if (file.isVideo && file.durationSec > 0) file.durationSec * 1000L else -1L
             val meta = buildString {
                 if (dur > 0) append(fmtDur(dur))
                 if (size > 0) { if (isNotEmpty()) append(" · "); append(fmtSize(size)) }
             }
-            synchronized(cache) { cache[file.path] = meta }
+            synchronized(cache) { cache[file.albumKey] = meta }
             label.post {
-                if (label.tag == file.path) label.text = if (meta.isEmpty()) prefix else "$prefix  $meta"
+                if (label.tag == file.albumKey) label.text = if (meta.isEmpty()) prefix else "$prefix  $meta"
             }
         }
     }

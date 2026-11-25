@@ -1,35 +1,57 @@
 # Osmosis — Roadmap
 
-### 6. Older Osmo Action generation (index-based list)
+### 6. Older Osmo Action cameras
 
-We want browse + download on the Action 1/2/3, which use an older list format keyed by numeric
-`FileIndex` with no path strings ([MEDIA_PROTOCOL §1](MEDIA_PROTOCOL.md#1-get-media-list), "Parsed —
-index-based"). The **list decoder is hardware-verified but not on main**: `DcfRecords.decodeAction1`
-lives on the branch below, pinned to two cameras (fixture `action1_7.bin` and a 73-byte tester dump).
-The **download is not done**: our `/v1?file_index=` is a placeholder, and HTTP `:80` is refused while
-the datalink is up.
+| Camera | Album | Original download |
+|---|---|---|
+| Osmo Action (AC101) | BLE pairing, Wi-Fi and indexed listing observed on hardware | HTTP if available, experimental datalink fallback. Original download pending hardware verification. |
+| DJI Action 2 | Indexed and path-based lists supported in code | Mimo selects HTTP v1, pending hardware verification |
+| Osmo Action 3 (AC202) | Indexed and path-based lists supported in code | Mimo selects HTTP v2, pending hardware verification |
 
-**Identification.** An Action 1 advertises the classic id `0x0082` under company id `0xE5C0`
-(issue #32). Builds up to 1.3.3 ignored `0xE5C0`, so it resolved by name to the camera defaults and
-listed. Recognising `0xE5C0` for the Pocket 4 Pro exposed `0x82`, which sits above `DRONE_ID_FLOOR`
-and was taken for an aircraft: `DJI FLY` pairing, no BLE creds, a udp/9003 datalink that never answers,
-"no media". `0x06`/`0x07`/`0x82` are now all mapped to the Osmo Action.
+The Action 1 advertises IDs `0x0006`, `0x0007` or `0x0082`. Its album fixtures contain
+65-byte DCF descriptors. The AC101 firmware's `DjiTransSrv_SendListFrag` packs a local FAT timestamp
+and the media type. `DjiTransSrv_VideoMiscInfoGet` supplies a segment sub-index and millisecond
+duration. Osmosis gives each advertised segment its own filename and request. A recording for which
+the camera lists only the first part still needs a source for the other parts. [Record layout](MEDIA_PROTOCOL.md#parsed--index-based-osmo-action-123)
 
-**Branch: `support-osmo-action-1`**, rebased on main: the index decoder on the DCF seam, the 65-byte
-stride confirmed on a second camera, and `DcfTransferProbe` (opt-in, `--ez probe4a true`). The probe
-has run once, on 1.3.1: base `0x20` answered with a `release` and nothing else, and the camera started
-rebooting on that build, so it is off by default.
+**Action 1 HTTP evidence.** Retail firmware `V01.10.00.40` includes `/etc/cherokee.conf` for port 80
+with document root `/var/www` and an empty `DCIM` directory there. BusyBox 1.23.2 includes its
+HTTP server applet. The startup scripts mount the card at `/tmp/SD0`. The supplied
+`restart_webserver.sh` sources `/tmp/start_webserver.sh`, which
+is absent from the stock root filesystem. How a stock camera would activate an HTTP server and map
+its card into that directory remains open. Tester logs show connection refusals in RECORD and in
+four other modes. [Hardware reports](https://github.com/KonradIT/Osmosis/issues/32)
 
-**Approach: HTTP `/v1`, not a datalink file transfer.** On 1.5.1-action1 (issue #32) the list worked,
-`0x02/0x0c` playback came back `0xe0` on every attempt, and `:80` refused connections in ~10 ms. Mimo
-switches this camera's **work mode** (`0x02/0x10`) to TRANSCODE before it reads files, so 1.5.1-action1.2
-stops entering playback on the Action 1 and tries each candidate mode (`camera/WorkMode.kt`) until `:80`
-opens, then fetches the first 64 bytes of a clip over `/v1` (and the static DCF path as a fallback).
+In Mimo 2.10.9, `libdjisdk_jni.so` selects the transport in `FileTransferManager::TransferData`
+(camera-type switch at `0x12ce0e0`). AC101 takes version 0. `CreateHandler` at `0x12ccaa0`
+constructs the ordinary file-transfer handler for that version. Action 2 selects the v1 HTTP handler
+and AC202 selects v2. This explains the reference app's choice while leaving the camera-side HTTP
+question open.
 
-**Blockers:** none any more. Unblocked 2026-08-07 — a decompiled DJI-derived app's media layer turns out
-to be index-based as well, so the download path can be read off rather than guessed at. Two smaller
-fixes ride along: the AP keepalive does not hold an Action's AP (`onLost` ~40 s after the
-list), and the `/v2` storage detect should be skipped for index cameras (it fires two failing HEADs).
+The AC101 Wi-Fi session has a four-second receive timeout with the handshake Osmosis sends.
+In the stock `libswudp.so`, `SW_Pro_Uav_Manage_Check_Deal` checks that timer at `0x20fd4`.
+The receive path at `0x218ac` matches the UDP peer and session ID and refreshes the timer before
+dispatching the packet. Ordinary UDP acknowledgements keep that timer running during HTTP reads.
+The reported route failures for receivers 8/2, 8/1 and 3/0 concern separate DUML commands. Osmosis
+skips those commands on AC101 and keeps sending transport acknowledgements during the album check.
+On a Wi-Fi rejoin it opens a fresh UDP session, checks HTTP again and restores queued files whose
+index, segment, name, size and capture time still match. Whether the acknowledgement change also
+prevents the reported Wi-Fi AP shutdown needs a hardware test.
+
+Osmosis checks listed originals over HTTP and validates their media signatures. On Action 1 it
+checks the current mode first, then gives TRANSCODE up to 30 seconds while the datalink is alive.
+It tries both the indexed URL and the static DCIM path and requests the previous mode again after
+an unsuccessful check or on disconnect. When both HTTP checks fail, selecting a listed original and
+tapping Download starts a datalink transfer. Streaming previews and trim still require HTTP.
+
+An Android 14 emulator exercised the production list and download code against simulated cameras.
+The Action 1 static path, Action 2 v1 and Action 3 v2 each resumed an interrupted MP4 at byte
+1,171. The file saved to MediaStore matched the source SHA-256 in each case. With both Action 1
+URLs returning 404, Osmosis still listed the clip and restored RECORD after the 30-second check.
+With HTTP unavailable throughout a separate run, the Action 1 datalink fallback resumed an MP4 at
+byte 980, requested a missing chunk and saved a byte-identical original to MediaStore. Replaying a
+captured Mavic 3 transfer independently verified reassembly across real UDP packet boundaries.
+A stock Action 1 download is the remaining hardware check. [Transfer format](MEDIA_PROTOCOL.md#action-1-original-download-over-the-datalink)
 
 ### 11. Direct USB-C ↔ USB-C media read
 

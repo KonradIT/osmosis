@@ -112,6 +112,7 @@
     <string name="not_connected">未连接</string>
     <string name="no_media_found">%1$s 上没有媒体文件</string>
     <string name="camera_unreachable">无法通过 Wi-Fi 连接到 %1$s</string>
+    <string name="datalink_original_available">将原文件加入队列，即可通过相机的数据链路下载。保存后可在相册中打开。</string>
     <string name="camera_not_serving_files">此相机尚未通过 Wi-Fi 提供文件，因此无法预览和下载。</string>
     <string name="camera_network_blocked_title">Android 阻止了相机连接</string>
     <string name="camera_network_blocked_message">手机已加入 %1$s，但 Android 不允许 Osmosis 通过该网络发送数据，因此相机始终没有响应。\n\n这通常是 VPN、广告拦截、DNS 过滤或防火墙类应用导致的。请将其关闭，然后重新连接。</string>

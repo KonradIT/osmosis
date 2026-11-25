@@ -1,5 +1,11 @@
 package dev.konraditurbe.osmosis.dcf
 
+import dev.konraditurbe.osmosis.core.urlPath
+import dev.konraditurbe.osmosis.core.previewCandidates
+import dev.konraditurbe.osmosis.ble.CameraModel
+import dev.konraditurbe.osmosis.camera.CameraSession
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -64,11 +70,10 @@ class Action1RecordsTest {
     }
 
     @Test
-    fun `timestamps are unix seconds, not the drone's FAT packing`() {
+    fun `AC101 packs local capture time as FAT`() {
         val r = DcfRecords.decodeAction1(listBytes()).first()
-        // 1554159685 = 2019-04-01T21:41:25Z. Run through fatToEpoch it would be nonsense — this is the
-        // one field where the Action and the drone genuinely differ.
-        assertEquals(1554159685L, r.mtimeEpoch)
+        val expected = java.time.LocalDateTime.of(2026, 5, 2, 19, 2, 10)
+        assertEquals(expected.atZone(java.time.ZoneId.systemDefault()).toEpochSecond(), r.mtimeEpoch)
     }
 
     @Test
@@ -76,5 +81,67 @@ class Action1RecordsTest {
         // 94-byte records with no [count][total] header must not parse as an Action 1 list.
         assertTrue(DcfRecords.decodeAction1(ByteArray(8 + 94 * 3)).isEmpty())
         assertTrue(DcfRecords.decodeAction1(ByteArray(0)).isEmpty())
+    }
+
+    private fun descriptor(type: Int, ext: ByteArray, index: Int = 0x640001): ByteArray =
+        ByteBuffer.allocate(18 + ext.size).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putInt(0x5ca29845)
+            putInt(512)
+            putInt(index)
+            putInt(0)
+            put(type.toByte())
+            put(ext.size.toByte())
+            put(ext)
+        }.array()
+
+    private fun page(vararg records: ByteArray): ByteArray {
+        val total = 8 + records.sumOf { it.size }
+        return ByteBuffer.allocate(total).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putInt(records.size)
+            putInt(total)
+            records.forEach { put(it) }
+        }.array()
+    }
+
+    @Test fun `typed photos and numbered video parts survive the camera session decoder`() {
+        val raw = page(descriptor(0, byteArrayOf(3, 1)), descriptor(1, byteArrayOf(), 0x640002),
+            descriptor(2, byteArrayOf(10, 1, 0, 0x78, 5, 0, 0, 5, 0, 0, 0), 0x640003),
+            descriptor(2, byteArrayOf(10, 2, 0, 0x78, 5, 0, 0, 0, 0, 0, 0), 0x640003))
+        val profile = CameraModel.resolve(0x82, null).legacyAlbum
+        val files = CameraSession({}, 9004, true, legacyAlbum = profile).decodeManifestForTest(raw)
+        assertEquals(listOf("DJI_0001.JPG", "DJI_0002.DNG", "DJI_0003_001.MOV", "DJI_0003_002.MOV"),
+            files.map { it.name })
+        assertTrue(files.first().starred)
+        assertEquals(1, files.last().durationSec)
+        assertEquals(4, files.distinctBy { it.albumKey }.size)
+        assertTrue(files.last().previewCandidates().all { it.endsWith("file_seg_subindex=2") })
+        assertTrue(files.none { it.isBurst || it.deletable || it.sidecarCandidate() != null })
+    }
+
+    @Test fun `v2 uses the supplied camera path when the descriptor includes one`() {
+        val name = "DCIM/DJI_001/DJI_20260706163318_0120_D.MP4".toByteArray()
+        val record = descriptor(3, byteArrayOf(13, name.size.toByte()) + name)
+        val file = DcfRecords.decodeAction1(page(record), variableRecords = true).single()
+            .toCameraFile(DcfAddressing.Route.V2)
+        assertEquals("/v2?storage=0&path=${String(name)}", file.urlPath())
+    }
+
+    @Test fun `malformed extension lengths reject the entire page`() {
+        val first = descriptor(3, byteArrayOf())
+        val truncated = descriptor(3, byteArrayOf(10, 1))
+        assertTrue(DcfRecords.decodeAction1(page(first, truncated), variableRecords = true).isEmpty())
+        truncated[17] = 57
+        assertTrue(DcfRecords.decodeAction1(page(first, truncated), variableRecords = true).isEmpty())
+    }
+
+    @Test fun `Action 2 and 3 select their own Mimo URL format for indexed media`() {
+        val raw = page(descriptor(3, byteArrayOf(0), 0x40640002))
+        fun from(id: Int?, name: String?) = CameraSession({}, 9004, true,
+            legacyAlbum = CameraModel.resolve(id, name).legacyAlbum).decodeManifestForTest(raw).single()
+        assertEquals(CameraModel.LegacyActionAlbum.ACTION_1, CameraModel.resolve(null, "OsmoAction-FB74FD").legacyAlbum)
+        assertEquals(CameraModel.LegacyActionAlbum.ACTION_1, CameraModel.resolve(null, "Osmo Action 1").legacyAlbum)
+        assertEquals(DcfUrls.of(0x40640002), from(null, "DJI Action 2").urlPath())
+        assertEquals("/v2?storage=1&path=DCIM/100MEDIA/DJI_0002.MP4", from(0x12, null).urlPath())
+        assertTrue(from(0x12, null).albumKey != from(0x12, null).copy(fileIndex = 0x640002).albumKey)
     }
 }

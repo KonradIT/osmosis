@@ -1,8 +1,35 @@
 package dev.konraditurbe.osmosis.net
 
+import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.core.matchesOriginalPrefix
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+
+internal fun InputStream.readPrefix(limit: Int): ByteArray {
+    val buf = ByteArray(limit)
+    var count = 0
+    while (count < limit) {
+        if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException()
+        val n = read(buf, count, limit - count)
+        if (n <= 0) break
+        count += n
+    }
+    return if (count == limit) buf else buf.copyOf(count)
+}
+
+internal data class ContentRange(val start: Long, val end: Long, val total: Long)
+private val rangePattern = Regex("""bytes (\d+)-(\d+)/(\d+)""", RegexOption.IGNORE_CASE)
+
+internal fun HttpURLConnection.contentRange(): ContentRange? {
+    val value = getHeaderField("Content-Range") ?: return null
+    val parts = rangePattern.matchEntire(value.trim())?.groupValues ?: return null
+    val start = parts[1].toLongOrNull() ?: return null
+    val end = parts[2].toLongOrNull() ?: return null
+    val total = parts[3].toLongOrNull() ?: return null
+    return if (start <= end && end < total) ContentRange(start, end, total) else null
+}
 
 /** Thin client for the camera's lighttpd /v2 file API. Process must be bound to the camera net. */
 class HttpClient(
@@ -61,7 +88,14 @@ class HttpClient(
             setRequestProperty("Range", "bytes=$start-$end")
         }
         return try {
-            if (c.responseCode in 200..299) c.inputStream.use { it.readBytes() } else null
+            val length = end - start + 1
+            if (start < 0 || length !in 1..Int.MAX_VALUE.toLong()) return null
+            when (c.responseCode) {
+                200 -> if (start != 0L) return null
+                206 -> if (c.contentRange()?.start != start) return null
+                else -> return null
+            }
+            c.inputStream.use { it.readPrefix(length.toInt()) }
         } catch (_: Exception) {
             null
         } finally {
@@ -103,8 +137,9 @@ class HttpClient(
      * be reused, and Android's connection pool will otherwise hand the same dead socket to the very next
      * request — which then fails instantly with "unexpected end of stream" having moved no bytes.
      */
-    fun download(path: String, out: OutputStream, rangeStart: Long, onProgress: (Long) -> Unit): Fetch {
+    fun download(path: String, out: OutputStream, rangeStart: Long, checkedOriginal: CameraFile? = null, onProgress: (Long) -> Unit): Fetch {
         val c = open(path, "GET", rangeStart).apply { setRequestProperty("Connection", "close") }
+        if (checkedOriginal != null) c.instanceFollowRedirects = false
         return try {
             val code = c.responseCode
             if (code !in 200..299) {
@@ -118,19 +153,41 @@ class HttpClient(
                 log("download $path -> HTTP $code for a ranged request (Range ignored) — restarting at 0")
                 return Fetch.RANGE_IGNORED
             }
+            val expected = checkedOriginal?.sizeBytes ?: 0L
+            if (checkedOriginal != null) {
+                val range = c.contentRange()
+                val length = c.getHeaderFieldLong("Content-Length", -1)
+                val valid = when (code) {
+                    200 -> expected == 0L || length == -1L || length == expected
+                    206 -> range != null && range.start == rangeStart &&
+                        (expected == 0L || range.total == expected) && range.end == range.total - 1 &&
+                        (length == -1L || length == range.end - range.start + 1)
+                    else -> false
+                }
+                if (!valid) return Fetch.FAILED
+            }
             val buf = ByteArray(65536)
             var total = rangeStart.coerceAtLeast(0)
             c.inputStream.use { ins ->
+                if (rangeStart == 0L && checkedOriginal != null) {
+                    val head = ins.readPrefix(64)
+                    if (!checkedOriginal.matchesOriginalPrefix(head) ||
+                        (expected > 0 && head.size > expected)) return Fetch.FAILED
+                    out.write(head)
+                    total += head.size
+                    onProgress(total)
+                }
                 while (true) {
                     val n = ins.read(buf)
                     if (n < 0) break
+                    if (expected > 0 && n > expected - total) return Fetch.FAILED
                     out.write(buf, 0, n)
                     total += n
                     onProgress(total)
                 }
             }
             out.flush()
-            Fetch.DONE
+            if (expected > 0 && total != expected) Fetch.INTERRUPTED else Fetch.DONE
         } catch (e: Exception) {
             runCatching { out.flush() }   // keep whatever arrived, so the resume starts from it
             log("download $path ERR ${e.javaClass.simpleName}: ${e.message}")

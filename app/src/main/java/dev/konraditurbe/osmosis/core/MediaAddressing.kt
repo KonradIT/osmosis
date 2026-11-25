@@ -3,21 +3,7 @@ package dev.konraditurbe.osmosis.core
 import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.dcf.DcfAddressing
 
-/**
- * How a device's media is located over HTTP — the one seam between the app's two, mutually exclusive
- * addressing schemes.
- *
- * | | path-based camera | DCF-indexed device |
- * |---|---|---|
- * | who | Nano, Osmo Action 5 Pro / Xtra, the 360 | Mavic 3 family; Osmo Action 1 ([DcfRecords]) |
- * | endpoint | `/v2?storage=N&path=…` | `/v1?file_index=…&file_subtype=…` |
- * | proxy | a sidecar file (`.LRF`/`.XRF`) at its own path | a **subtype** of the same index |
- * | impl | [PathAddressing] | [DcfAddressing] |
- *
- * The two implementations share no code — that is the point of the interface. [of] is the single place
- * in the app that decides which one a file uses, and it decides from the file's own origin: a record
- * that came out of a DCF manifest carries an index, one that came out of a CompositePack carries a path.
- */
+/** Maps an album item to its original, thumbnail and preview URLs on the camera. */
 interface MediaAddressing {
 
     /** The full-resolution original — what a download fetches. */

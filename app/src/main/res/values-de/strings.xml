@@ -112,6 +112,7 @@
     <string name="not_connected">Nicht verbunden</string>
     <string name="no_media_found">%1$s enthält keine Medien</string>
     <string name="camera_unreachable">%1$s war über WLAN nicht erreichbar</string>
+    <string name="datalink_original_available">Lege das Original in die Warteschlange, um es über die Datenverbindung der Kamera herunterzuladen. Die gespeicherte Datei findest du in der Galerie.</string>
     <string name="camera_not_serving_files">Diese Kamera stellt ihre Dateien noch nicht über WLAN bereit, daher sind Vorschau und Download nicht verfügbar.</string>
     <string name="camera_network_blocked_title">Android hat die Kameraverbindung blockiert</string>
     <string name="camera_network_blocked_message">Das Telefon ist mit %1$s verbunden, aber Android lässt Osmosis nichts über dieses Netzwerk senden, deshalb hat die Kamera nie geantwortet.\n\nDie Ursache ist meist ein VPN, ein Werbeblocker, ein DNS-Filter oder eine Firewall-App. Schalte sie aus und verbinde dich dann erneut.</string>

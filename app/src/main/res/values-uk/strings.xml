@@ -112,6 +112,7 @@
     <string name="not_connected">Не підключено</string>
     <string name="no_media_found">На %1$s немає медіа</string>
     <string name="camera_unreachable">Не вдалося зв’язатися з %1$s через Wi-Fi</string>
+    <string name="datalink_original_available">Додайте оригінал до черги, щоб завантажити його через канал даних камери. Збережений файл можна відкрити в галереї.</string>
     <string name="camera_not_serving_files">Ця камера ще не надає свої файли через Wi-Fi, тому попередній перегляд і завантаження недоступні.</string>
     <string name="camera_network_blocked_title">Android заблокував з’єднання з камерою</string>
     <string name="camera_network_blocked_message">Телефон під’єднався до %1$s, але Android не дозволяє Osmosis нічого надсилати через цю мережу, тому камера так і не відповіла.\n\nЗазвичай причина — VPN, блокувальник реклами, DNS-фільтр або фаєрвол. Вимкніть його і під’єднайтеся знову.</string>
