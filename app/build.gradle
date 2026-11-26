@@ -27,9 +27,9 @@ android {
         // v1.4.2 and 28 the published v1.4.3. 32 went out as the 1.5.1-rc1 tester build, 33 as
         // 1.5.1-rc2 (from time-sync-fixes, not this branch) and 34 as 1.5.1-rc3. 35 is 1.5.1-rc4 on
         // time-sync-fixes; 36 went out as 1.5.1-action1 from support-osmo-action-1 (issue #32), 37
-        // as 1.5.1-action1.2 and 38 as 1.5.1-action1.3 from the same branch.
-        versionCode 38
-        versionName "1.5.1-action1.3"
+        // as 1.5.1-action1.2, 38 as 1.5.1-action1.3 and 39 as 1.5.1-action1.4 from the same branch.
+        versionCode 39
+        versionName "1.5.1-action1.4"
     }
 
     signingConfigs {
