@@ -35,8 +35,10 @@ dispatching the packet. Ordinary UDP acknowledgements keep that timer running du
 The reported route failures for receivers 8/2, 8/1 and 3/0 concern separate DUML commands. Osmosis
 skips those commands on AC101 and keeps sending transport acknowledgements during the album check.
 On a Wi-Fi rejoin it opens a fresh UDP session, checks HTTP again and restores queued files whose
-index, segment, name, size and capture time still match. Whether the acknowledgement change also
-prevents the reported Wi-Fi AP shutdown needs a hardware test.
+index, segment, name, size and capture time still match. The camera also tracks app presence.
+Osmosis now sends Mimo’s 500 ms Wi-Fi ping during browsing and transfers to renew it. The
+Wi-Fi manager can stop the access point after 60 seconds without a refresh.
+[Action 1 heartbeat and test results](MEDIA_PROTOCOL.md#action-1-wi-fi-app-heartbeat)
 
 Osmosis checks listed originals over HTTP and validates their media signatures. On Action 1 it
 checks the current mode first, then gives TRANSCODE up to 30 seconds while the datalink is alive.
@@ -51,7 +53,7 @@ URLs returning 404, Osmosis still listed the clip and restored RECORD after the 
 With HTTP unavailable throughout a separate run, the Action 1 datalink fallback resumed an MP4 at
 byte 980, requested a missing chunk and saved a byte-identical original to MediaStore. Replaying a
 captured Mavic 3 transfer independently verified reassembly across real UDP packet boundaries.
-A stock Action 1 download is the remaining hardware check. [Transfer format](MEDIA_PROTOCOL.md#action-1-original-download-over-the-datalink)
+Stock Action 1 hardware checks are pending for a complete original download, grid thumbnails and screen JPEGs. Mimo’s remote-transcode path for moving previews is mapped in [Action 1 album playback](MEDIA_PROTOCOL.md#action-1-album-thumbnails-screen-jpegs-and-video-playback). [Transfer format](MEDIA_PROTOCOL.md#action-1-original-download-over-the-datalink)
 
 ### 11. Direct USB-C ↔ USB-C media read
 

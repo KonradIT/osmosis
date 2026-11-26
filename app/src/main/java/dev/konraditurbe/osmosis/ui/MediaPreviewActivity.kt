@@ -30,6 +30,8 @@ import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
+import dev.konraditurbe.osmosis.core.AlbumJpeg
+import dev.konraditurbe.osmosis.net.PreviewNav
 import dev.konraditurbe.osmosis.core.previewCandidates
 import dev.konraditurbe.osmosis.core.urlPath
 import dev.konraditurbe.osmosis.net.FrameCapture
@@ -118,7 +120,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var selectedFrame = 0
     private lateinit var burstRow: LinearLayout
     private lateinit var burstStrip: View
-    private val imageLoader by lazy { ImageLoader(http) { plog(it) } }
+    private val imageLoader by lazy { ImageLoader(http, PreviewNav.album) { plog(it) } }
 
     // Scrub preview: the frame under the thumb, floated above the seek bar during a drag.
     private lateinit var previewRoot: View
@@ -291,6 +293,7 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     /** Load whatever [file] currently points at — queue/trim state comes live from the grid (PreviewNav). */
     private fun loadCurrent() {
+        imageLoader.clear(photoView)
         queued = dev.konraditurbe.osmosis.net.PreviewNav.isQueued?.invoke(file.albumKey) ?: false
         val t = if (mediaAvailable) dev.konraditurbe.osmosis.net.PreviewNav.trimFor?.invoke(file.albumKey) else null
         trimStartMs = t?.startMs ?: -1L; trimEndMs = t?.endMs ?: -1L
@@ -313,6 +316,17 @@ class MediaPreviewActivity : AppCompatActivity() {
         refreshQueueButton()
 
         when {
+            file.isActionDcf && (file.isImage || (file.isVideo && !mediaAvailable)) && PreviewNav.album?.datalinkJpegs == true -> {
+                imageLoader.loadAlbum(file, AlbumJpeg.SCREEN, photoView) { loaded ->
+                    if (loaded) {
+                        photoZoom?.reset()
+                        spinner.visibility = View.GONE
+                        photoView.visibility = View.VISIBLE
+                    } else if (mediaAvailable && file.isImage) loadPhoto()
+                    else showStatus(getString(if (datalinkOriginal) R.string.datalink_original_available
+                                              else R.string.preview_unavailable))
+                }
+            }
             datalinkOriginal -> showStatus(getString(R.string.datalink_original_available))
             !mediaAvailable -> showStatus(getString(R.string.camera_not_serving_files))
             file.isVideo -> {

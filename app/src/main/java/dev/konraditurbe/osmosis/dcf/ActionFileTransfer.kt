@@ -1,5 +1,6 @@
 package dev.konraditurbe.osmosis.dcf
 
+import dev.konraditurbe.osmosis.core.AlbumJpeg
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.matchesOriginalPrefix
 import dev.konraditurbe.osmosis.duml.DjiCrc
@@ -11,18 +12,21 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.TreeMap
 
-/** One original, on the already paired AC101 album session. All socket access stays on its owner thread. */
+/** One file or JPEG rendition on the already paired AC101 album session. All socket access stays on its owner thread. */
 internal class ActionFileTransfer(
     private val file: CameraFile,
     private val offset: Long,
     private val id: Int,
     private val output: OutputStream,
+    private val jpeg: AlbumJpeg? = null,
     private val progress: (Long) -> Unit,
 ) {
     // The camera adds its 13-byte first-fragment header to the requested byte count in a u32.
     // A FAT file within 13 bytes of 4 GiB needs a second request for its tail.
     private val rangeLength = minOf(file.sizeBytes - offset, 0xffffffffL - 13)
-    val endOffset = offset + rangeLength
+    var endOffset = offset + rangeLength
+        private set
+    private val label = jpeg?.name?.lowercase() ?: "original"
     private val pending = TreeMap<Long, ByteArray>()
     private var next = 0L
     private var highest = -1L
@@ -35,10 +39,10 @@ internal class ActionFileTransfer(
     internal fun request(): ByteArray = envelope(0x20, 48).apply {
         putInt(file.fileIndex.toInt())
         putShort(1)
-        put(0) // original
+        put((jpeg?.subtype ?: 0).toByte())
         put(0) // sub-index (the drive is already encoded in fileIndex)
         putInt(offset.toInt())
-        putInt(if (endOffset == file.sizeBytes) -1 else rangeLength.toInt())
+        putInt(if (jpeg != null || endOffset == file.sizeBytes) -1 else rangeLength.toInt())
         putInt(0) // extended sub-index
         putShort(file.segmentIndex.toShort())
     }.array()
@@ -75,13 +79,14 @@ internal class ActionFileTransfer(
 
     fun run(session: Int, send: (ByteArray) -> Unit, receive: () -> List<ByteArray>, ackWindow: () -> Unit,
             connected: () -> Boolean, log: (String) -> Unit): Boolean {
-        if (!file.isActionDcf || file.sizeBytes !in 1..0xffffffffL || offset !in 0 until file.sizeBytes ||
-            file.segmentIndex !in 0..65535 || !connected()) return false
+        if (!file.isActionDcf || file.segmentIndex !in 0..65535 || !connected()) return false
+        if (jpeg == null && (file.sizeBytes !in 1..0xffffffffL || offset !in 0 until file.sizeBytes)) return false
+        if (jpeg != null && offset != 0L) return false
         val frames = AlbumFrames(session)
         var lastProgress = System.nanoTime()
         var lastAck = lastProgress
         var acks = 0
-        log("datalink: original ${file.name} index=${file.fileIndex} segment=${file.segmentIndex} offset=$offset transfer=$id")
+        log("datalink: $label ${file.name} index=${file.fileIndex} segment=${file.segmentIndex} offset=$offset transfer=$id")
         try {
             send(request())
             while (connected() && !finished) {
@@ -102,12 +107,12 @@ internal class ActionFileTransfer(
                 }
             }
         } catch (e: IOException) {
-            log("datalink: original ${file.name} stopped at $written/${file.sizeBytes}: ${e.message}")
+            log("datalink: $label ${file.name} stopped at $written/$endOffset: ${e.message}")
             return false
         } finally {
             send(DcfTransferProbe.release(0x20, id))
         }
-        if (finished) log("datalink: received ${file.name} through byte $written/${file.sizeBytes}")
+        if (finished) log("datalink: received ${file.name} through byte $written/$endOffset")
         return finished
     }
 
@@ -121,7 +126,7 @@ internal class ActionFileTransfer(
             0x24 -> throw IOException("camera released transfer (${p.drop(10).take(4)})")
             0x21 -> {
                 val seq = u32(p, 6)
-                if (seq < next || seq > file.sizeBytes + 13) return
+                if (seq < next || seq > (jpeg?.maxBytes ?: rangeLength)) return
                 highest = maxOf(highest, seq)
                 if (seq - next >= 512) return // bound memory while requesting earlier missing chunks
                 pending.putIfAbsent(seq, p)
@@ -137,12 +142,20 @@ internal class ActionFileTransfer(
     private fun writeChunk(p: ByteArray) {
         var start = 10
         if (next == 0L) {
-            if (p.size < 23 || u32(p, 18) != file.fileIndex) throw IOException("original header/index mismatch")
-            val extra = p[22].toInt() and 255
-            if (extra != 0 || u32(p, 14) != rangeLength + 13) throw IOException("original header/length mismatch")
+            if (p.size < 23 || u32(p, 18) != file.fileIndex || p[22] != 0.toByte())
+                throw IOException("file header/index mismatch")
+            val length = u32(p, 14) - 13
             start += 13
-            if (offset == 0L && !file.matchesOriginalPrefix(p.copyOfRange(start, minOf(start + 64, p.size))))
-                throw IOException("unexpected original media signature")
+            if (jpeg != null) {
+                if (length !in 1..jpeg.maxBytes) throw IOException("invalid JPEG length $length")
+                if (p.size < start + 3 || p[start] != 0xff.toByte() || p[start + 1] != 0xd8.toByte() ||
+                    p[start + 2] != 0xff.toByte()) throw IOException("unexpected JPEG signature")
+                endOffset = length
+            } else {
+                if (length != rangeLength) throw IOException("original header/length mismatch")
+                if (offset == 0L && !file.matchesOriginalPrefix(p.copyOfRange(start, minOf(start + 64, p.size))))
+                    throw IOException("unexpected original media signature")
+            }
         }
         val count = p.size - start
         val last = u16(p, 2) and 0x1000 != 0

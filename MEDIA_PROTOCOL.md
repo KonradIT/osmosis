@@ -601,7 +601,99 @@ on completion or abandonment. A partial stays pending in MediaStore for the next
 
 The local Mavic 3 capture `mavic3_media_browse.pcap` has a 16,824-byte JPEG thumbnail in transfer
 `0x12` that exercises this framing. An Android 14 emulator verified the original-file path with a
-simulated Action 1. An original from a stock Action 1 still needs hardware confirmation.
+simulated Action 1. A stock Action 1 sent 1,728,800 of 2,486,428,346 bytes of `DJI_0819.MP4`
+before Android reported Wi-Fi loss. A complete original still needs hardware confirmation.
+[Tester log](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7202572811)
+
+#### Action 1 Wi-Fi app heartbeat
+
+Mimo 2.10.9 sends a DUML general ping every 500 ms on an Action 1 Wi-Fi session. The sender is
+the app (`02`), the receiver is camera 0 (`01`), the command is `00/00`, and the foreground
+payload is `01 00`. In `libdjisdk_jni.so`, see `HeartbeatLogic::PostStart` at `0x13bf8bc`
+for the timer, the Action 1 branch of `SendHeartbeat` at `0x13bfed8` for the receiver, and
+`GetDatalinkType` / `SetPackBody` at `0x13c0398` / `0x13c075c` for the payload.
+
+Retail AC101 V01.10.00.40 has two relevant timers. In the RTOS, `DjiCamPingHandler`
+(`0x442ec8`) sets Wi-Fi app presence and rearms a two-second timer. On expiry,
+`DjiPingTimerIsr` (`0x442e7c`) clears presence. On Linux, the `dji_wms_ac101` self-check
+refreshes a monotonic timestamp while the RTOS reports app presence (`0x407664`). With Wi-Fi
+active and more than 60 whole seconds elapsed, it enters the shutdown path (`0x4076b0`).
+That path stops the access point and brings down `wlan0` (`0x40b98c` → `0x40abd4`).
+
+To cross-check the cutoff, the stock RTOS ping handler, expiry callback and Linux self-check
+were run under instruction emulation with an active access point, a simulated clock, and OS
+calls intercepted. With a self-check every 500 ms, the manager requested access-point shutdown
+at 61 s without pings. With a Wi-Fi ping every 500 ms it stayed active for all 180 s. When
+pings stopped at 10 s, it requested shutdown at 72.5 s.
+
+The tester lost the network 61.5 and 61.8 seconds after the last logged BLE wake, once in
+the album grid and once during a download. UDP window acknowledgements were already running
+in that build. [Tester log](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7202572811)
+
+Osmosis starts the ping when the paired UDP session is ready and checks its deadline between
+socket reads. This also services the heartbeat while a file transfer owns the socket. An Android
+14 emulator completed a 69.57-second simulated download with 134 pings during the transfer. The
+longest gap over the whole session was 688 ms and the saved MP4 matched the source SHA-256.
+
+#### Action 1 album thumbnails, screen JPEGs and video playback
+
+**Grid and viewer.** Mimo 2.10.9 names file data types 1 and 2 `THUMBNAIL` and `SCREEN` in
+`dji.sdk.keyvalue.value.file.FileDataType`. In the gallery, `PlaybackRemoteBitmapLoader.g` checks the image cache
+and then requests the selected loader kind. Its AC101 product branch (`k0 → z0 → N`) selects
+`MEDIAFILEKIND_PHOTO_PREVIEW`, so Mimo can use a screen JPEG even for a grid cell. On retail AC101 V01.10.00.40, `DjiTransSrv_GetFileInfo`
+dispatches subtype 1 at `0x47ceb8` to `DjiTransSrv_GetThumbnail` and subtype 2 at `0x47cedc` to
+`DjiTransSrv_GetScreennail`. Both supply an offset and length for the JPEG to the album sender.
+
+Osmosis uses the 48-byte file request above with the listed file index and segment, byte offset zero
+and requested length `ffffffff`. Osmosis requests the smaller subtype 1 first for grid cells, using a
+downsampled screen JPEG if needed. The viewer requests subtype 2 for a photo or video poster and
+falls back to subtype 1. The expected
+JPEG length comes from the transfer header even when the indexed original is a much larger MP4.
+The Mavic 3 capture provides an independent replay of subtype 1. An Android 14 emulator with a
+simulated Action 1 rendered a 1280×720 video poster and decoded a 160×90 thumbnail. These sizes
+belong to the test images. Hardware confirmation of AC101 JPEG delivery and dimensions is pending.
+
+**Moving preview.** Mimo's `com.dji.playback.internal.product.a` identifies AC101 and inherits
+`e() == false` and `v() == false` from its base profile. For an uncached album clip,
+`PlaybackCutVideoDataSource.Companion.a` consequently returns no file source. The known-product
+and AC101 link checks in `PlaybackVideoPreviewViewNew.canTranscodePreview` enable
+`VideoPreviewerTranscode`. Its `PlaybackRemotePlayer` prepares the selected file index, plays,
+pauses, seeks and stops via `DJIMediaManager`. The renderer attaches a video consumer named
+`PLAYBACK`. DJI documents file-based LRF previews for Action 2 and 3. [DJI's LRF support article](https://support.dji.com/help/content?customId=01700006938&spaceId=17)
+
+Mimo's ARM64 `libdjisdk_jni.so` and the AC101 RTOS agree on the control messages.
+
+| Camera message | Mimo 2.10.9 | Action 1 firmware |
+|---|---|---|
+| `02/7b` select and start | `TranscodePlaybackHandler::InternalPlay` at `0x1417b58` writes the file index and start time in milliseconds as two little-endian u32s | `DjiMsgXcodePbFileSel` reads both words at `0x44d2e4` and calls `DjiXcodePb_FilePbStart` |
+| `02/7a` control | `SendControlPack` at `0x1417340` writes a u8 operation and a little-endian u32 argument. The state machine sends 0 to stop, 1 to resume, 4 to seek in milliseconds, and 5 to pause | `DjiMsgXcodePbControl` reads the same fields at `0x44d478`. Its operation map at `0x120ed3c` contains those four values |
+| `02/82` state push | `TranscodePlaybackHandler::Initialize` registers the playback state observer | `DjiXcodePb_Start` sends `DjiPushPbParaSend` as playback starts |
+
+On AC101, `DjiXcodePb_Start` at `0x3b77e0` resolves the DCF file, opens it with
+`AmbaMoviePlayback` and starts `DjiStream`.
+Its configuration includes 1280×720, 1440×1080 and 1920×1080 paths according to source dimensions.
+`DjiXcodePb_MmapInit` connects the encoder buffers to the RLV video/audio IPC channels.
+On the Linux side `S50service_dji` starts `usb_conn_svr`, which opens the SW UDP stream sender
+at `0x402cec`. In `libswudp.so`, the initializer at `0x2174c` assigns outer packet type 2 to
+this stream and type 3 to file downloads. The application payload begins at offset 20.
+`usb_conn_svr` sends a 12-byte HPI header followed by encoded video. It wraps audio in HPI too.
+
+| AC101 HPI offset | Field from `libdjihpi.so:hpi_fill_header` |
+|---|---|
+| 0–3 | Magic bytes `00 00 01 ff` |
+| 4–7 | Payload length, low 16 bits at 4–5, fixed `ff` at 6, high eight bits at 7 |
+| 8–9 | `4c` for this 12-byte header, then `11` for video or `24` for audio |
+| 10–11 | XOR of the other header bytes, then zero |
+
+The HPI header and media bytes can cross UDP packets. An independent Mimo/Pocket 3 capture
+(`mimo_op3_playback_2026-08-17.pcap`) contains type-2 packets with the same HPI magic and video
+type, a longer 16-byte header, and Annex B H.264 sequence parameter sets, IDR frames and slices.
+That capture corroborates the stream family. AC101's 12-byte header above comes from its own firmware.
+
+For moving playback in Osmosis, the camera session would need to drive the playback state machine,
+receive and reassemble encoded frames from the stream channel, and feed an Android decoder surface.
+Stopping or swiping would release remote playback before returning to album requests. On AC101 the retransmission and acknowledgement behavior under video load, emitted codec parameters,
+and select/play/seek behavior for segmented files still need an end-to-end check. The datalink-only viewer currently shows the JPEG poster.
 
 ### 1a. Unlisted sidecar files (`.DNG` / `.WAV`)
 

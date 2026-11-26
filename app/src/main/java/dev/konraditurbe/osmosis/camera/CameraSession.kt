@@ -3,6 +3,7 @@ package dev.konraditurbe.osmosis.camera
 import dev.konraditurbe.osmosis.ble.CameraModel.LegacyActionAlbum
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.StorageRules
+import dev.konraditurbe.osmosis.core.AlbumJpeg
 import dev.konraditurbe.osmosis.dcf.ActionFileTransfer
 import dev.konraditurbe.osmosis.dcf.DcfAddressing.Route
 import dev.konraditurbe.osmosis.dcf.DcfRecords
@@ -330,6 +331,28 @@ class CameraSession(
     private val seenKeys = HashSet<String>()
 
 
+    /** AC101's general ping renews its app-link timer. The socket owner sends it during lists,
+     * HTTP checks, idle browsing and file transfers. A fresh handshake starts a new timer. */
+    private fun startAction1Heartbeat() {
+        val payload = byteArrayOf(1, 0) // Mimo's Wi-Fi link and foreground state
+        var lastPing = System.nanoTime()
+        var count = 0
+        var maxGapMs = 0L
+        fun ping() {
+            val now = System.nanoTime()
+            val elapsed = now - lastPing
+            if (closing || (count > 0 && elapsed < 500_000_000L)) return
+            sendDuml(0x00, 0x00, payload, receiverType = 1, receiverId = 0, cmdType = 0)
+            lastPing = now
+            count++
+            maxGapMs = maxOf(maxGapMs, elapsed / 1_000_000L)
+            if (count == 1 || count % 60 == 0 || elapsed >= 2_000_000_000L)
+                log("datalink: Action 1 Wi-Fi heartbeat count=$count maxGap=${maxGapMs}ms")
+        }
+        tx.onReceivePoll = ::ping
+        ping()
+    }
+
     /**
      * Bring the datalink up ([openDatalink]) and then register: device-info, register, gimbal-init and
      * the param subscriptions. Leaves the socket open and the send sequence synced on success.
@@ -344,6 +367,7 @@ class CameraSession(
         // for the newer registration, subscriptions and gimbal init (receivers 8/2, 8/1 and 3/0).
         // openDatalink already established and acknowledged its UDP session.
         if (legacyAlbum == LegacyActionAlbum.ACTION_1) {
+            startAction1Heartbeat()
             // A restore sent on the old Wi-Fi network may have missed the camera. Keep ownership
             // only if the fresh session confirms that the camera is still in our album mode.
             if (inheritedWorkMode != null) reconcileRejoinedMode(readWorkMode() ?: workModeReported)
@@ -1392,47 +1416,59 @@ class CameraSession(
     }
 
     override val datalinkOriginals: Boolean
-        get() = legacyAlbum == LegacyActionAlbum.ACTION_1 && handshakeOk && httpServing == false &&
-            tx.isOpen && !closing
+        get() = datalinkJpegs && httpServing == false
 
-    private val originalQueue = ArrayBlockingQueue<FutureTask<Boolean>>(1)
-    private var nextOriginalId = 0x100
+    override val datalinkJpegs: Boolean
+        get() = legacyAlbum == LegacyActionAlbum.ACTION_1 && handshakeOk && tx.isOpen && !closing
+
+    private val albumQueue = ArrayBlockingQueue<FutureTask<Boolean>>(1)
+    private var nextAlbumTransferId = 0x100
+
+    override fun fetchAlbumJpeg(file: CameraFile, rendition: AlbumJpeg): ByteArray? {
+        val bytes = java.io.ByteArrayOutputStream()
+        return if (transferAlbumFile(file, 0, bytes, rendition) {}) bytes.toByteArray() else null
+    }
+
+    override fun downloadOriginal(file: CameraFile, offset: Long, output: java.io.OutputStream,
+                                  progress: (Long) -> Unit): Boolean =
+        transferAlbumFile(file, offset, output, null, progress)
 
     // Serialize with pagination so its fresh-session fallback cannot retire the socket mid-file.
     @Synchronized
-    override fun downloadOriginal(file: CameraFile, offset: Long, output: java.io.OutputStream,
-                                  progress: (Long) -> Unit): Boolean {
-        if (!datalinkOriginals || !keepAliveOn || !file.isActionDcf) return false
+    private fun transferAlbumFile(file: CameraFile, offset: Long, output: java.io.OutputStream,
+                                  jpeg: AlbumJpeg?, progress: (Long) -> Unit): Boolean {
+        fun available() = if (jpeg == null) datalinkOriginals else datalinkJpegs
+        if (!available() || !keepAliveOn || !file.isActionDcf || Thread.currentThread().isInterrupted) return false
         val cancelled = AtomicBoolean(false)
         val task = FutureTask {
             val buffered = output.buffered(64 * 1024)
             try {
                 var from = offset
                 do {
-                    val id = nextOriginalId
-                    nextOriginalId = if (id == 0xffff) 0x100 else id + 1
-                    val transfer = ActionFileTransfer(file, from, id, buffered, progress)
+                    val id = nextAlbumTransferId
+                    nextAlbumTransferId = if (id == 0xffff) 0x100 else id + 1
+                    val transfer = ActionFileTransfer(file, from, id, buffered, jpeg, progress)
                     val done = tx.withDownloadPolling {
                         transfer.run(tx.sessionId,
                             send = { sendDuml(0, 0x26, it, receiverType = 1, receiverId = 0) },
                             receive = { recvAll(30) }, ackWindow = ::sendAck,
-                            connected = { datalinkOriginals && keepAliveOn && !cancelled.get() }, log = log)
+                            connected = { available() && keepAliveOn && !cancelled.get() }, log = log)
                     }
                     if (!done) return@FutureTask false
                     from = transfer.endOffset
-                } while (from < file.sizeBytes)
+                } while (jpeg == null && from < file.sizeBytes)
                 true
             } finally {
                 buffered.flush()
             }
         }
-        if (!originalQueue.offer(task)) return false
+        if (!albumQueue.offer(task)) return false
         // Once the owner takes the task it may be writing to MediaStore. Let it return the stream
         // before the downloader closes it, including on disconnect or caller interruption.
         var interrupted = false
         try {
             while (true) {
-                if ((!keepAliveOn || closing) && originalQueue.remove(task)) return false
+                if ((!keepAliveOn || closing) && albumQueue.remove(task)) return false
                 try {
                     return task.get(250, TimeUnit.MILLISECONDS)
                 } catch (_: TimeoutException) {
@@ -1440,9 +1476,9 @@ class CameraSession(
                 } catch (_: InterruptedException) {
                     interrupted = true
                     cancelled.set(true)
-                    if (originalQueue.remove(task)) return false
+                    if (albumQueue.remove(task)) return false
                 } catch (e: ExecutionException) {
-                    log("datalink: original download failed: ${e.cause?.message}")
+                    log("datalink: album transfer failed: ${e.cause?.message}")
                     return false
                 }
             }
@@ -1467,7 +1503,7 @@ class CameraSession(
             // after a re-registration (delete, fresh page) the switch may not have survived the socket.
             if (httpViaWorkMode) ensureHttpWorkMode() else enterPlaybackConfirmed()
             while (keepAliveOn) {
-                if (awaitingCmd == null) originalQueue.poll()?.run()
+                if (awaitingCmd == null) albumQueue.poll()?.run()
                 if (!keepAliveOn) break
                 runCatching {
                     val dg = recvAll(200)

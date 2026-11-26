@@ -485,6 +485,8 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         // user is usually out with the Activity long gone, so the file has to stay open for it. Every
         // line is flushed, so nothing is lost if the process dies; the toggle closes it explicitly.
         stopKeepalive()
+        if (datalink != null && dev.konraditurbe.osmosis.net.PreviewNav.album === datalink)
+            dev.konraditurbe.osmosis.net.PreviewNav.clear()
         datalink?.close()
         rtmp?.stop()
         scanner?.stop()
@@ -1650,7 +1652,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
         }
         imageLoader?.shutdown()
         metaLoader?.shutdown()
-        val loader = ImageLoader(http, ::logLine)
+        val loader = ImageLoader(http, datalink, ::logLine)
         val mediaAvailable = mediaAvailable()
         val ml = MetaLoader(http, mediaAvailable)
         imageLoader = loader
@@ -1949,6 +1951,7 @@ class MainActivity : AppCompatActivity(), OsmoScanner.Listener, GattClient.Liste
     private fun launchPreview(f: CameraFile, group: List<CameraFile>) {
         val ad = adapter ?: return
         // Hand the preview the current filtered list + the tapped item's index so it can swipe prev/next.
+        dev.konraditurbe.osmosis.net.PreviewNav.album = datalink?.takeIf { it.datalinkJpegs }
         dev.konraditurbe.osmosis.net.PreviewNav.items = ad.visibleFiles()
         val startIndex = ad.visibleIndexOf(f.albumKey)
         previewLauncher.launch(MediaPreviewActivity.intent(

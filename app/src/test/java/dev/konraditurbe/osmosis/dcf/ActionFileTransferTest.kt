@@ -1,5 +1,6 @@
 package dev.konraditurbe.osmosis.dcf
 
+import dev.konraditurbe.osmosis.core.AlbumJpeg
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.duml.DjiCrc
 import java.io.ByteArrayOutputStream
@@ -45,9 +46,9 @@ class ActionFileTransferTest {
     private fun first(data: ByteArray, index: Long = file.fileIndex, size: Int = original.size) =
         little(13 + data.size).putInt(0).putInt(size + 13).putInt(index.toInt()).put(0).put(data).array()
 
-    private fun run(vararg packets: ByteArray, offset: Long = 0): Boolean {
+    private fun run(vararg packets: ByteArray, offset: Long = 0, jpeg: AlbumJpeg? = null): Boolean {
         var received = false
-        return ActionFileTransfer(file, offset, transferId, out) {}.run(session, { sent.add(it) },
+        return ActionFileTransfer(file, offset, transferId, out, jpeg) {}.run(session, { sent.add(it) },
             receive = { received = true; packets.toList() }, ackWindow = {}, connected = { !received }, log = {})
     }
 
@@ -55,6 +56,29 @@ class ActionFileTransferTest {
         val request = ActionFileTransfer(file.copy(segmentIndex = 3, sizeBytes = 0xf0001111L), 0x81234567L, transferId, out) {}.request()
         assertArrayEquals(bytes("4a2030101200000000001c0264000100000067452381ffffffff000000000300" +
             "00000000000000000000000000000000"), request)
+    }
+
+    @Test fun `JPEG requests keep the segment and use the returned rendition length for a video`() {
+        val jpeg = bytes("ffd8ffe000104a4649460001ffd9")
+        for (kind in AlbumJpeg.values()) {
+            out.reset()
+            val request = ActionFileTransfer(file.copy(segmentIndex = 3), 0, transferId, out, kind) {}.request()
+            assertEquals(kind.subtype, request[16].toInt())
+            assertEquals(3, request[30].toInt())
+            assertEquals(-1, ByteBuffer.wrap(request).order(ByteOrder.LITTLE_ENDIAN).getInt(22))
+            assertTrue(run(packet(8, frame(0x21, 0, first(jpeg.copyOf(6), size = jpeg.size))),
+                packet(16, frame(0x21, 1, jpeg.copyOfRange(6, jpeg.size), last = true)), jpeg = kind))
+            assertArrayEquals(jpeg, out.toByteArray())
+        }
+    }
+
+    @Test fun `a JPEG request rejects a returned MP4 or excessive or incomplete JPEG`() {
+        val kind = AlbumJpeg.SCREEN
+        val jpeg = bytes("ffd8ffe0ffd9")
+        assertFalse(run(packet(8, frame(0x21, 0, first(original.take(64).toByteArray()))), jpeg = kind))
+        assertFalse(run(packet(8, frame(0x21, 0, first(jpeg, size = kind.maxBytes.toInt() + 1))), jpeg = kind))
+        assertFalse(run(packet(8, frame(0x21, 0, first(jpeg, size = 7), last = true)), jpeg = kind))
+        assertEquals(0, out.size())
     }
 
     @Test fun `the thirteen-byte reply header cannot overflow the camera's range length`() {

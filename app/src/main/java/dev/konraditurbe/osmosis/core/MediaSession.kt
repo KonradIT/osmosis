@@ -1,5 +1,11 @@
 package dev.konraditurbe.osmosis.core
 
+/** JPEG renditions selected by the Action album file request. Size limits bound in-memory transfers. */
+enum class AlbumJpeg(val subtype: Int, val maxBytes: Long) {
+    THUMBNAIL(1, 2L * 1024 * 1024),
+    SCREEN(2, 8L * 1024 * 1024),
+}
+
 /**
  * A live connection to a device's media library — what the UI talks to, so it never has to ask whether
  * it is holding a camera or a drone.
@@ -10,7 +16,7 @@ package dev.konraditurbe.osmosis.core
  * "give me the newest page, then older ones", which is all the grid ever needed.
  *
  * Device-specific capabilities default to a no-op rather than throwing: a drone has no burst groups or
- * highlights, a camera serves its thumbnails over HTTP and never over the datalink. Callers can invoke
+ * highlights, each camera selects its supported album transport. Callers can invoke
  * them unconditionally.
  */
 interface MediaSession {
@@ -33,9 +39,12 @@ interface MediaSession {
     /** Whether a listed original passed the session's HTTP check. Null if no check was needed. */
     val httpServing: Boolean? get() = null
 
-
     /** Available for listed Action 1 originals when the camera does not serve them over HTTP. */
     val datalinkOriginals: Boolean get() = false
+
+    val datalinkJpegs: Boolean get() = false
+
+    fun fetchAlbumJpeg(file: CameraFile, rendition: AlbumJpeg): ByteArray? = null
 
     fun downloadOriginal(file: CameraFile, offset: Long, output: java.io.OutputStream,
                          progress: (Long) -> Unit): Boolean = false

@@ -13,7 +13,6 @@ import androidx.recyclerview.widget.RecyclerView
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
-import dev.konraditurbe.osmosis.core.thumbUrlPath
 import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MetaLoader
 import java.util.Calendar
@@ -161,6 +160,11 @@ class MediaGridAdapter(
         }
     }
 
+    override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+        if (holder is ItemVH) holder.clearThumbnail()
+        super.onViewRecycled(holder)
+    }
+
     private class HeaderVH(v: View) : RecyclerView.ViewHolder(v) {
         val label: TextView = v.findViewById(R.id.headerLabel)
     }
@@ -190,6 +194,8 @@ class MediaGridAdapter(
             v.setOnLongClickListener { file?.let(onLongPress); true }
         }
 
+        fun clearThumbnail() = loader.clear(thumb)
+
         fun bind(f: CameraFile) {
             file = f
             val queued = selected.containsKey(f.albumKey)
@@ -204,7 +210,7 @@ class MediaGridAdapter(
                 f.isVideo -> R.drawable.ic_media_video
                 else -> R.drawable.ic_media_photo
             })
-            loader.load(if (mediaAvailable) f.thumbUrlPath() else "", thumb)
+            loader.loadThumbnail(f, mediaAvailable, thumb)
             // A queued clip that carries a trim shows the scissors mark before its filename (compound
             // drawable, so it survives the async meta text update). Sized to the 10sp name row.
             val trimmed = selected[f.albumKey] != null

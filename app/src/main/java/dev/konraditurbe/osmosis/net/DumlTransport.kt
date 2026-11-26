@@ -94,12 +94,16 @@ class DumlTransport(
 
     val isOpen: Boolean get() = ::sock.isInitialized && !sock.isClosed
 
+    /** Optional paired-session work, on the socket owner between reads (including bulk downloads). */
+    internal var onReceivePoll: (() -> Unit)? = null
+
     val localPort: Int get() = if (::sock.isInitialized) sock.localPort else -1
 
     // ---- lifecycle ---------------------------------------------------------------------------------
 
     /** Create the socket and pick a session id. Does not talk to the peer yet. */
     fun open(ip: String) {
+        onReceivePoll = null
         peer = InetAddress.getByName(ip)
         sock = if (bindLocalPort) {
             runCatching { DatagramSocket(port) }
@@ -254,6 +258,7 @@ class DumlTransport(
         val deadline = System.nanoTime() + durationMs * 1_000_000
         val buf = ByteArray(65536)
         while (System.nanoTime() < deadline) {
+            onReceivePoll?.invoke()
             try {
                 val p = DatagramPacket(buf, buf.size)
                 sock.receive(p)
