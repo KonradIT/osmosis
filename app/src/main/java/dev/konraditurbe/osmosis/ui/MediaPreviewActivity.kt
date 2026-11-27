@@ -88,6 +88,11 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var btnRew: ImageButton
     private lateinit var btnFf: ImageButton
     private var scrubbing = false
+    private var remoteVideoItem = false
+    private var remoteView: ActionVideoView? = null
+    private var remotePlaying = false
+    private var remoteRendered = false
+    private lateinit var mediaTouch: View.OnTouchListener
 
     // Frame capture: pull the full-res frame at the paused position off the camera as a JPEG.
     private lateinit var btnCapture: ImageButton
@@ -258,6 +263,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         })
         @Suppress("ClickableViewAccessibility")
         val touch = View.OnTouchListener { _, ev -> gd.onTouchEvent(ev) }
+        mediaTouch = touch
         videoView.setOnTouchListener(touch)
 
         val zoom = PhotoZoom(photoView)
@@ -293,6 +299,8 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     /** Load whatever [file] currently points at — queue/trim state comes live from the grid (PreviewNav). */
     private fun loadCurrent() {
+        stopRemoteVideo()
+        remoteVideoItem = !mediaAvailable && file.isVideo && file.isActionDcf && PreviewNav.album?.datalinkVideo == true
         imageLoader.clear(photoView)
         queued = dev.konraditurbe.osmosis.net.PreviewNav.isQueued?.invoke(file.albumKey) ?: false
         val t = if (mediaAvailable) dev.konraditurbe.osmosis.net.PreviewNav.trimFor?.invoke(file.albumKey) else null
@@ -307,7 +315,12 @@ class MediaPreviewActivity : AppCompatActivity() {
         // `controls` is the whole bottom overlay — it also holds the queue button and the burst strip,
         // so it stays up for a still. Only [trimRow], the scrubber/transport/trim block inside it, is
         // video-only. Hiding the container instead took "Add to Queue" down with it on every photo.
-        trimRow.visibility = if (mediaAvailable && file.isVideo) View.VISIBLE else View.GONE
+        trimRow.visibility = if ((mediaAvailable || remoteVideoItem) && file.isVideo) View.VISIBLE else View.GONE
+        btnMarkIn.visibility = if (remoteVideoItem) View.GONE else View.VISIBLE
+        btnMarkOut.visibility = btnMarkIn.visibility
+        btnPlay.isEnabled = true
+        enableSeeking(!remoteVideoItem)
+        if (remoteVideoItem) resetRemoteControls()
         controls.visibility = View.VISIBLE
         topInfo.visibility = View.VISIBLE
 
@@ -318,10 +331,13 @@ class MediaPreviewActivity : AppCompatActivity() {
         when {
             file.isActionDcf && (file.isImage || (file.isVideo && !mediaAvailable)) && PreviewNav.album?.datalinkJpegs == true -> {
                 imageLoader.loadAlbum(file, AlbumJpeg.SCREEN, photoView) { loaded ->
+                    if (remoteRendered) return@loadAlbum
                     if (loaded) {
                         photoZoom?.reset()
                         spinner.visibility = View.GONE
                         photoView.visibility = View.VISIBLE
+                    } else if (remoteVideoItem) {
+                        if (remoteView == null) spinner.visibility = View.GONE
                     } else if (mediaAvailable && file.isImage) loadPhoto()
                     else showStatus(getString(if (datalinkOriginal) R.string.datalink_original_available
                                               else R.string.preview_unavailable))
@@ -555,7 +571,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 txtCur.text = mmss(progress.toLong())
                 showScrubPreview(progress)
                 main.removeCallbacks(scrubRefine)
-                main.postDelayed(scrubRefine, 140)   // sharpen only once the thumb settles
+                if (!remoteVideoItem) main.postDelayed(scrubRefine, 140)
             }
             override fun onStartTrackingTouch(sb: SeekBar) {
                 scrubbing = true
@@ -594,12 +610,87 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private fun mmss(ms: Long): String { val s = ms / 1000; return "%d:%02d".format(s / 60, s % 60) }
 
+    private fun enableSeeking(enabled: Boolean) {
+        seekBar.isEnabled = enabled
+        btnRew.isEnabled = enabled
+        btnFf.isEnabled = enabled
+    }
+
+    private fun resetRemoteControls() {
+        remotePlaying = false
+        remoteRendered = false
+        val duration = if (file.segmentIndex == 0) file.durationSec * 1000L else 0L
+        seekBar.max = duration.coerceIn(1, Int.MAX_VALUE.toLong()).toInt()
+        seekBar.progress = 0
+        txtCur.text = mmss(0)
+        txtTotal.text = mmss(duration)
+        btnPlay.isEnabled = true
+        enableSeeking(false)
+        updatePlayIcon()
+    }
+
+    private fun stopRemoteVideo() {
+        remoteView?.let { view ->
+            remoteView = null
+            view.close()
+            (view.parent as? android.view.ViewGroup)?.removeView(view)
+        }
+        remoteRendered = false
+        remotePlaying = false
+    }
+
+    private fun startRemoteVideo() {
+        val session = PreviewNav.album
+        if (session?.datalinkVideo != true) { showStatus(getString(R.string.preview_unavailable)); return }
+        spinner.visibility = View.VISIBLE
+        statusText.visibility = View.GONE
+        btnPlay.isEnabled = false
+        val view = ActionVideoView(this, session, file, firstFrame = { width, height ->
+            plog("Action 1 preview rendered ${width}x$height for index=${file.fileIndex}")
+            remoteRendered = true
+            spinner.visibility = View.GONE
+            photoView.visibility = View.GONE
+        }, progress = { playing, position, duration ->
+            remotePlaying = playing
+            btnPlay.isEnabled = true
+            enableSeeking(duration > 0)
+            seekBar.max = duration.coerceAtLeast(1)
+            txtTotal.text = mmss(duration.toLong())
+            if (!scrubbing) {
+                seekBar.progress = position
+                txtCur.text = mmss(position.toLong())
+            }
+            updatePlayIcon()
+        }, finished = { error ->
+            stopRemoteVideo()
+            resetRemoteControls()
+            spinner.visibility = View.GONE
+            if (photoView.drawable != null) photoView.visibility = View.VISIBLE
+            if (error != null) {
+                plog("Action 1 video preview: $error")
+                showStatus(getString(R.string.preview_unavailable))
+            }
+        })
+        remoteView = view
+        view.setOnTouchListener(mediaTouch)
+        (previewRoot as android.view.ViewGroup).addView(view, 1)
+    }
+
     private fun togglePlay() {
+        if (remoteVideoItem) {
+            val view = remoteView
+            if (view == null) startRemoteVideo() else view.setPlaying(!remotePlaying)
+            return
+        }
         if (videoView.isPlaying) videoView.pause() else videoView.start()
         updatePlayIcon()
     }
 
     private fun seekBy(deltaMs: Int) {
+        if (remoteVideoItem) {
+            seekToMs((seekBar.progress.toLong() + deltaMs).coerceIn(0, seekBar.max.toLong()))
+            return
+        }
         val dur = videoView.duration
         val target = (videoView.currentPosition + deltaMs).coerceIn(0, if (dur > 0) dur else Int.MAX_VALUE)
         videoView.seekTo(target)
@@ -609,11 +700,11 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private fun updatePlayIcon() {
         btnPlay.setImageResource(
-            if (videoView.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+            if (remotePlaying || videoView.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
         )
         // The capture button only makes sense on a paused frame. INVISIBLE (not GONE) so the transport
         // group doesn't shift; left alone mid-capture so the spinner / ✓ stay where the tap was.
-        if (!capturing) btnCapture.visibility = if (videoView.isPlaying) View.INVISIBLE else View.VISIBLE
+        if (!capturing) btnCapture.visibility = if (remoteVideoItem || videoView.isPlaying) View.INVISIBLE else View.VISIBLE
     }
 
     /**
@@ -659,7 +750,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         topInfo.visibility = if (show) View.VISIBLE else View.GONE
         savedActions.visibility = if (show && savedUri != null) View.VISIBLE else View.GONE
         controls.visibility = if (show) View.VISIBLE else View.GONE
-        trimRow.visibility = if (show && mediaAvailable && file.isVideo) View.VISIBLE else View.GONE
+        trimRow.visibility = if (show && (mediaAvailable || remoteVideoItem) && file.isVideo) View.VISIBLE else View.GONE
     }
 
     /** Keep the scrubber + current-time in sync while playing (skipped while the user is dragging). */
@@ -681,7 +772,8 @@ class MediaPreviewActivity : AppCompatActivity() {
         val resFps = listOfNotNull(resTag, file.resLabel).joinToString("·").ifBlank { "—" }
         val id = file.displayNumber
         val name = if (groupPaths.isNotEmpty()) "$id  (${selectedFrame + 1}/${groupPaths.size})" else id
-        topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
+        val recording = if (remoteVideoItem && file.segmentIndex > 0) "   ·   " + getString(R.string.full_recording_preview) else ""
+        topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps$recording"
     }
 
     /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge) and draw them
@@ -730,7 +822,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     /** Float the bubble over the seekbar thumb at [posMs] with the closest frame we have so far. */
     private fun showScrubPreview(posMs: Int) {
         scrubTime.text = mmss(posMs.toLong())
-        showScrubFrame(scrubFrames.nearest(posMs.toLong()))
+        showScrubFrame(if (remoteVideoItem) null else scrubFrames.nearest(posMs.toLong()))
         scrubPreview.visibility = View.VISIBLE
         positionScrubPreview(posMs)
     }
@@ -774,7 +866,7 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private fun seekToMs(ms: Long) {
         val t = ms.toInt()
-        videoView.seekTo(t)
+        if (remoteVideoItem) remoteView?.seek(t) else videoView.seekTo(t)
         seekBar.progress = t
         txtCur.text = mmss(ms)
     }
@@ -893,10 +985,17 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        if (remoteView != null) {
+            stopRemoteVideo()
+            resetRemoteControls()
+            spinner.visibility = View.GONE
+            if (photoView.drawable != null) photoView.visibility = View.VISIBLE
+        }
         if (videoView.isPlaying) { videoView.pause(); updatePlayIcon() }
     }
 
     override fun onDestroy() {
+        stopRemoteVideo()
         super.onDestroy()
         main.removeCallbacks(tick)
         main.removeCallbacks(highlightsRunnable)

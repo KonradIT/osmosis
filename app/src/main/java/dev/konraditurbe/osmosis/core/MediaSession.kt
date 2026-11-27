@@ -44,6 +44,11 @@ interface MediaSession {
 
     val datalinkJpegs: Boolean get() = false
 
+    /** Camera-generated movie preview over the paired album session. */
+    val datalinkVideo: Boolean get() = false
+
+    fun openAlbumVideo(file: CameraFile, listener: AlbumVideo.Listener): AlbumVideo? = null
+
     fun fetchAlbumJpeg(file: CameraFile, rendition: AlbumJpeg): ByteArray? = null
 
     fun downloadOriginal(file: CameraFile, offset: Long, output: java.io.OutputStream,

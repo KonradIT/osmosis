@@ -40,11 +40,11 @@ Osmosis now sends Mimo’s 500 ms Wi-Fi ping during browsing and transfers to re
 Wi-Fi manager can stop the access point after 60 seconds without a refresh.
 [Action 1 heartbeat and test results](MEDIA_PROTOCOL.md#action-1-wi-fi-app-heartbeat)
 
-Osmosis checks listed originals over HTTP and validates their media signatures. On Action 1 it
-checks the current mode first, then gives TRANSCODE up to 30 seconds while the datalink is alive.
-It tries both the indexed URL and the static DCIM path and requests the previous mode again after
-an unsuccessful check or on disconnect. When both HTTP checks fail, selecting a listed original and
-tapping Download starts a datalink transfer. Streaming previews and trim still require HTTP.
+On Action 2 and 3, Osmosis checks listed originals over HTTP and validates their media signatures.
+Action 1 skips that check. Port 80 refused every connection in every tester session, in RECORD and
+after 30 seconds in TRANSCODE, and the check cost about 32 seconds per connect. Selecting a listed
+original and tapping Download starts a datalink transfer. Tapping Play on a video poster starts the
+camera’s transcoded preview over the same session. Trimming still requires HTTP.
 
 An Android 14 emulator exercised the production list and download code against simulated cameras.
 The Action 1 static path, Action 2 v1 and Action 3 v2 each resumed an interrupted MP4 at byte
@@ -53,7 +53,10 @@ URLs returning 404, Osmosis still listed the clip and restored RECORD after the 
 With HTTP unavailable throughout a separate run, the Action 1 datalink fallback resumed an MP4 at
 byte 980, requested a missing chunk and saved a byte-identical original to MediaStore. Replaying a
 captured Mavic 3 transfer independently verified reassembly across real UDP packet boundaries.
-Stock Action 1 hardware checks are pending for a complete original download, grid thumbnails and screen JPEGs. Mimo’s remote-transcode path for moving previews is mapped in [Action 1 album playback](MEDIA_PROTOCOL.md#action-1-album-thumbnails-screen-jpegs-and-video-playback). [Transfer format](MEDIA_PROTOCOL.md#action-1-original-download-over-the-datalink)
+The Android viewer also played a 1280×720 AVC stream from the simulated camera, paused, sought,
+resumed, and fetched another thumbnail after restoring the camera mode. Stock Action 1 hardware
+checks are pending for a complete original download, thumbnails, screen JPEGs and video playback.
+[Action 1 album playback](MEDIA_PROTOCOL.md#action-1-album-thumbnails-screen-jpegs-and-video-playback) · [Transfer format](MEDIA_PROTOCOL.md#action-1-original-download-over-the-datalink)
 
 ### 11. Direct USB-C ↔ USB-C media read
 

@@ -190,6 +190,7 @@
     <string name="sidecar_added">%1$s added to the queue</string>
     <string name="cant_play_clip">Can\'t play this clip (%1$d/%2$d)</string>
     <string name="preview_unavailable">Preview unavailable</string>
+    <string name="full_recording_preview">Full recording preview</string>
     <string name="pause_then_set_start">Pause, then set the start point</string>
     <string name="pause_then_set_end">Pause, then set the end point</string>
     <string name="set_start_first">Set the start point [ first</string>

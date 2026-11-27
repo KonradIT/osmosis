@@ -79,7 +79,7 @@ Not worth my time or money entertaining insane EU rules. So be it. No Play.
 | Osmo Pocket 3 | **Verified on hardware** |
 | Osmo Pocket 4 / 4 Pro | **Verified on hardware** |
 | Xtra Atto / Edge / Muse | Untested, should work |
-| Osmo Action 1 | Album listing verified on hardware. Experimental grid thumbnails, full-screen JPEGs and video posters over the datalink. Originals can also use the datalink when HTTP is unavailable. |
+| Osmo Action 1 | Album listing verified on hardware. Experimental datalink support for thumbnails, screen JPEGs, originals and video previews with stereo audio, pause and seek. Preview playback has been tested on an Android emulator with a simulated camera. |
 | Osmo Action 4 | **Verified on hardware**, thanks to Ave @aveao for helping flip this to verified in https://github.com/KonradIT/osmosis/pull/37 |
 | Osmo 360 | Unplanned (needs Mimo to render 360 content) |
 | Osmo Action 2 / 3 | Experimental HTTP support (Action 2 v1, Action 3 v2). Hardware verification pending. |

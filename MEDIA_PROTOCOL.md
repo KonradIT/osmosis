@@ -599,6 +599,15 @@ signature before accepting a new original. On loss it sends `4a 02` with the fir
 followed by a count and up to three pairs of missing chunk indices and lengths. It sends `4a 24`
 on completion or abandonment. A partial stays pending in MediaStore for the next download attempt.
 
+A stock Action 1 has never answered `4a 02`. In the 2026-11-27 tester logs every failed transfer
+stopped on one missing chunk while the camera kept sending past it: chunk 2239 missing with chunk
+4329 received, after 30–57 resend requests. A new `4a 20` request from the last contiguous byte
+started streaming in all six manual resumes. Osmosis therefore gives a missing chunk two seconds
+once data is flowing, releases the transfer and requests the original again from the contiguous end.
+The camera still gets eight seconds to send the first chunk. A restart that adds no bytes may be
+retried once before the download stops. A corrupt frame, a released transfer or a lost connection
+ends it at once. [Tester logs](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7227379731)
+
 The local Mavic 3 capture `mavic3_media_browse.pcap` has a 16,824-byte JPEG thumbnail in transfer
 `0x12` that exercises this framing. An Android 14 emulator verified the original-file path with a
 simulated Action 1. A stock Action 1 sent 1,728,800 of 2,486,428,346 bytes of `DJI_0819.MP4`
@@ -690,10 +699,82 @@ The HPI header and media bytes can cross UDP packets. An independent Mimo/Pocket
 type, a longer 16-byte header, and Annex B H.264 sequence parameter sets, IDR frames and slices.
 That capture corroborates the stream family. AC101's 12-byte header above comes from its own firmware.
 
-For moving playback in Osmosis, the camera session would need to drive the playback state machine,
-receive and reassemble encoded frames from the stream channel, and feed an Android decoder surface.
-Stopping or swiping would release remote playback before returning to album requests. On AC101 the retransmission and acknowledgement behavior under video load, emitted codec parameters,
-and select/play/seek behavior for segmented files still need an end-to-end check. The datalink-only viewer currently shows the JPEG poster.
+##### Starting the selected clip
+
+Mimo's AC101 album requests work mode `TRANSCODE` (wire value 3). The tester's Action 1
+acknowledged `02/10 [03]` and reported mode 3 twice. Osmosis's HTTP check subsequently restored
+RECORD. When the user taps Play, read the current mode, enter TRANSCODE if needed, and confirm it
+via `02/11` or the `02/80` push before sending `02/7b`. The stock file-select handler checks
+the internal playback operating mode and returns `e4` if it is wrong (`0x44d218`). For example,
+the tester's DCF index `0x00640333` at time zero encodes as `33 03 64 00 00 00 00 00`.
+[Action 1 tester log](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7202572811)
+
+The AC101 `02/82` push has a 41-byte body. Executing `DjiPushPbParaSend` at `0x43ae20`
+with known playback values verified these offsets. The three u32 fields are little-endian.
+
+| Body offset | Meaning |
+|---|---|
+| 0 | State. Mimo recognises 2 as playing, 3 as paused, 7 as stopped and 8 as loading. |
+| 4–7 | Current DCF index |
+| 9–12 | Movie duration in milliseconds |
+| 13–16 | Current playback position in milliseconds. Mimo also treats `ffffffff` as loading in states 2 and 7. |
+
+Use the selected index and this push to update the play button and scrubber. For split recordings,
+`02/7b` carries only the index and start time. The firmware opens the DCF subfiles and calls
+`AmbaMoviePlayback_CrossSegVideoCheck`. Confirm how chapter start times map to the recording
+timeline on a split recording before offering chapter-specific seeking.
+
+##### Feeding the Android player
+
+With HTTP unavailable, tapping Play in `MediaPreviewActivity` starts playback through the existing
+album session. The JPEG poster stays visible until Android displays the first frame. The socket
+owner sends commands, the 500 ms app heartbeat and video-window acknowledgements while receiving
+video. It reorders type-2 packets by sequence, acknowledges the last contiguous packet and carries
+partial HPI headers and payloads across reads.
+
+A bounded queue feeds Annex B AVC to `MediaCodec` on a separate thread. The decoder reads the
+dimensions from the SPS and renders to a `TextureView`. After a gap it waits for an IDR picture.
+AC101's configuration branch at `0x3b7af0` selects 1280×720 for 1280×720
+input, 1440×1080 for 4000×3000 or 2720×2040, and a 1920×1080 default.
+[Android MediaCodec reference](https://developer.android.com/reference/android/media/MediaCodec)
+
+In playback mode, the firmware takes a compressed audio sample from the source movie. At
+`0x79ac88` it writes a seven-byte MPEG-4 ADTS header for AAC-LC at 48 kHz in stereo, then reads
+the sample immediately after that header. Running those instructions with a 2,400-byte sample
+produced `ff f1 4c 81 2c ff fc`. At `0x79f0c8` the firmware compares the audio read PTS with the
+playback clock before passing the buffer and length to `DjiXcodePb_AudioBufSend`.
+On Linux, `usb_conn_svr` wraps those bytes with HPI type `24` at `0x402e34` and sends
+the header and payload together on the video socket at `0x402e7c`.
+
+Osmosis validates the length and format of each HPI audio record, removes its ADTS header and
+decodes AAC to stereo PCM for Android’s media output. The 12-byte HPI header has no timestamp.
+The player uses the arrival time of the rendered video frame to align camera-paced audio and
+discards stale samples after a seek or interruption. Clips without audio can play normally.
+[Android AudioTrack reference](https://developer.android.com/reference/android/media/AudioTrack)
+
+The player uses camera-reported position for pause, resume and seeking. Seeking drops queued
+pictures from the old position. Split files are labelled as full-recording previews because the
+play command accepts a DCF index across segments. Leaving the viewer stops playback and restores
+the previous work mode.
+
+**Decoder replay.** A 9.56-second Pocket 3 capture excerpt supplied 247 HPI video records with
+240 pictures. Running the stock AC101 `hpi_fill_header` function produced 12-byte headers for
+those payloads and 36 interleaved synthetic audio records. Splitting the stream at each header
+byte and into 1,452-byte chunks recovered all 4,057,500 video bytes. FFmpeg decoded 240 distinct
+pictures. Android 14's `MediaCodec` decoded all 240 at 1280×720 and delivered all 240 to an
+`ImageReader` surface. A physical Action 1 still needs to verify the emitted codec and dimensions,
+video delivery under packet loss, seeking across segments, and return to browsing after Stop.
+
+For the audio replay, a simulated camera interleaved HPI video with ADTS frames containing a
+660 Hz tone on the left and 990 Hz on the right. An Android 14 test detected both frequencies
+in the playing audio session, verified that pause released the output, and observed stereo PCM
+playback resume after a seek. Audio delivery and lip sync still need a physical Action 1 test.
+
+**Stored stream files.** File-transfer subtype 9 reaches `DjiTransSrv_GetStreamFile` at
+`0x47cf34`. Its movie branch can derive a secondary-file path. For two GIS metadata values it
+returns the original path with offset zero and length `ffffffff`. Subtype 3 looks up an existing
+transcode by commit and clip numbers. Availability and size of these files on ordinary Action 1
+recordings remain unverified. Mimo's on-demand playback path uses the recording index directly.
 
 ### 1a. Unlisted sidecar files (`.DNG` / `.WAV`)
 

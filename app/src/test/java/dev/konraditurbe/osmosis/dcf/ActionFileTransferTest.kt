@@ -143,4 +143,72 @@ class ActionFileTransferTest {
             packet(16, frame(0x21, 1, original.copyOfRange(100, 150), last = true))))
         assertArrayEquals(original.copyOf(100), out.toByteArray())
     }
+
+    /** Deliver [packets] once, then silence, with short timeouts so a stall ends the run quickly. */
+    private fun ActionFileTransfer.runOnce(packets: List<ByteArray>): Boolean {
+        startTimeoutNs = 50_000_000L
+        stallTimeoutNs = 50_000_000L
+        var delivered = false
+        return run(session, { sent.add(it) }, receive = { if (delivered) emptyList() else { delivered = true; packets } },
+            ackWindow = {}, connected = { true }, log = {})
+    }
+
+    // Chunk 1 never arrives: the hardware failure in issue #32, where the camera never resent it.
+    private val holed = listOf(packet(8, frame(0x21, 0, first(original.copyOf(600))) +
+        frame(0x21, 2, original.copyOfRange(900, 1200), last = true)))
+
+    @Test fun `an unfilled hole stops the transfer as stalled at the contiguous end`() {
+        val t = ActionFileTransfer(file, 0, transferId, out) {}
+        assertFalse(t.runOnce(holed))
+        assertTrue(t.stalled)
+        assertEquals(600L, t.contiguousEnd)
+        assertArrayEquals(original.copyOf(600), out.toByteArray())
+    }
+
+    @Test fun `a silent camera is a stall but a bad frame is not`() {
+        val silent = ActionFileTransfer(file, 0, transferId, out) {}
+        assertFalse(silent.runOnce(emptyList()))
+        assertTrue(silent.stalled)
+        assertEquals(0L, silent.contiguousEnd)
+        val bad = ActionFileTransfer(file, 0, transferId, out) {}
+        assertFalse(bad.runOnce(listOf(packet(8, frame(0x21, 0, first(ByteArray(100)))))))
+        assertFalse(bad.stalled)
+    }
+
+    @Test fun `a stalled original is re-requested from its contiguous end and completes`() {
+        val logs = mutableListOf<String>()
+        var id = transferId
+        var attempts = 0
+        val replies = listOf(holed,
+            listOf(packet(8, frame(0x21, 0, first(original.copyOfRange(600, 1200), size = 600), last = true,
+                id = transferId + 1))))
+        val ok = ActionFileTransfer.fetchOriginal(file, 0, out, {}, nextId = { id++ }, connected = { true },
+            log = { logs += it }) { t -> t.runOnce(replies[attempts++]) }
+        assertTrue(ok)
+        assertEquals(2, attempts)
+        assertArrayEquals(original, out.toByteArray())
+        val requests = sent.filter { it[1] == 0x20.toByte() }
+        assertEquals(600, ByteBuffer.wrap(requests[1]).order(ByteOrder.LITTLE_ENDIAN).getInt(18))
+        assertTrue(logs.any { "auto-resume 1" in it })
+    }
+
+    @Test fun `restarts that bring no new bytes give up`() {
+        var id = transferId
+        var attempts = 0
+        assertFalse(ActionFileTransfer.fetchOriginal(file, 0, out, {}, { id++ }, { true }, {}) { t ->
+            attempts++; t.runOnce(emptyList()) })
+        assertEquals(ActionFileTransfer.MAX_IDLE_RESTARTS + 1, attempts)
+    }
+
+    @Test fun `a bad frame or a lost connection is not retried`() {
+        var id = transferId
+        var attempts = 0
+        assertFalse(ActionFileTransfer.fetchOriginal(file, 0, out, {}, { id++ }, { true }, {}) { t ->
+            attempts++; t.runOnce(listOf(packet(8, frame(0x21, 0, first(ByteArray(100)))))) })
+        assertEquals(1, attempts)
+        attempts = 0
+        assertFalse(ActionFileTransfer.fetchOriginal(file, 0, out, {}, { id++ }, { false }, {}) { t ->
+            attempts++; t.runOnce(holed) })
+        assertEquals(1, attempts)
+    }
 }

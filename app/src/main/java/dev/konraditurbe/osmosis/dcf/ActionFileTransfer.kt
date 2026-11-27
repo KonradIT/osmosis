@@ -35,6 +35,23 @@ internal class ActionFileTransfer(
     private var sawState = false
     private var stateCount = 0
 
+    /** How long the camera gets to send the first chunk of this transfer. */
+    internal var startTimeoutNs = 8_000_000_000L
+
+    /**
+     * Once chunks are flowing, how long a missing one may hold up the file. AC101 never resent a lost
+     * chunk on hardware (issue #32: 30–57 `4a 02` requests per stall, none honoured), so waiting the
+     * full start timeout only delayed the restart that [fetchOriginal] makes from [contiguousEnd].
+     */
+    internal var stallTimeoutNs = 2_000_000_000L
+
+    /** True when [run] gave up because no new in-order chunk arrived, not because of a bad frame or a disconnect. */
+    var stalled = false
+        private set
+
+    /** Absolute end of the bytes written in order so far. A new request from here appends cleanly. */
+    val contiguousEnd: Long get() = written
+
     /** Mimo 2.10.9 DataTransferRequest::CreateStartRequestPack, 32-bit file offsets on AC101. */
     internal fun request(): ByteArray = envelope(0x20, 48).apply {
         putInt(file.fileIndex.toInt())
@@ -97,7 +114,10 @@ internal class ActionFileTransfer(
                 ackWindow()
                 val now = System.nanoTime()
                 if (next != before) lastProgress = now
-                if (now - lastProgress >= 8_000_000_000L) throw IOException("waiting for chunk $next (highest=$highest, state frames=$stateCount, transfer ACKs=$acks)")
+                if (now - lastProgress >= if (highest < 0) startTimeoutNs else stallTimeoutNs) {
+                    stalled = true
+                    throw IOException("waiting for chunk $next (highest=$highest, state frames=$stateCount, transfer ACKs=$acks)")
+                }
                 if (!finished && (sawState || (highest >= 0 && now - lastProgress > 400_000_000L)) &&
                     now - lastAck >= 250_000_000L) {
                     send(acknowledge())
@@ -165,6 +185,47 @@ internal class ActionFileTransfer(
         written += count
         progress(written)
         finished = last
+    }
+
+    companion object {
+        /** Restarts in a row that may bring no new bytes before the original is given up on. */
+        internal const val MAX_IDLE_RESTARTS = 1
+
+        /**
+         * Fetch an original from [offset] to its end, one transfer per range, restarting from the
+         * contiguous end whenever a transfer stalls.
+         *
+         * On hardware a stalled transfer never recovered by itself, while a fresh request from the
+         * last in-order byte started streaming every time it was tried by hand (6 of 6 in issue #32).
+         * This does that restart automatically. A restart that brings no new bytes counts against
+         * [MAX_IDLE_RESTARTS], so a camera that has stopped answering still ends the download. Bad
+         * frames, a released transfer and a disconnect are not stalls and end it at once, leaving the
+         * contiguous prefix for the next Download.
+         */
+        internal fun fetchOriginal(file: CameraFile, offset: Long, output: OutputStream, progress: (Long) -> Unit,
+                                   nextId: () -> Int, connected: () -> Boolean, log: (String) -> Unit,
+                                   run: (ActionFileTransfer) -> Boolean): Boolean {
+            var from = offset
+            var idle = 0
+            var resumes = 0
+            do {
+                val transfer = ActionFileTransfer(file, from, nextId(), output, null, progress)
+                if (run(transfer)) {
+                    from = transfer.endOffset
+                    idle = 0
+                    continue
+                }
+                if (!transfer.stalled || !connected()) return false
+                val reached = transfer.contiguousEnd
+                idle = if (reached > from) 0 else idle + 1
+                if (idle > MAX_IDLE_RESTARTS) return false
+                resumes++
+                log("datalink: original ${file.name} stalled at $reached/${file.sizeBytes} — " +
+                    "re-requesting from there (auto-resume $resumes)")
+                from = reached
+            } while (from < file.sizeBytes)
+            return true
+        }
     }
 }
 

@@ -110,6 +110,8 @@ class DumlTransport(
                 .onFailure { log("datalink: local udp/$port unavailable (${it.message}) — falling back") }
                 .getOrElse { DatagramSocket() }
         } else DatagramSocket()
+        // A single intra frame can arrive in a burst of over a hundred video datagrams.
+        runCatching { sock.receiveBufferSize = maxOf(sock.receiveBufferSize, 512 * 1024) }
         sock.soTimeout = 200
         sessionId = Random.nextInt(0x1000, 0xFFFE)
         // Fresh base per connect, 8-aligned — see [baseSeq]. camChannel starts here because until the
@@ -184,13 +186,13 @@ class DumlTransport(
      *
      * Sent with seq 0, like every other type-`0x04`.
      */
-    fun sendAck() {
+    fun sendAck(videoSequence: Int? = null) {
         fun grp(v: Int) = byteArrayOf(
             (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
             (v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(),
             0, 0, 0, 0,
         )
-        val payload = grp(peerCursor) + grp(peerDownloadCursor) + grp(baseSeq) + byteArrayOf(0, 0)
+        val payload = grp(videoSequence ?: peerCursor) + grp(peerDownloadCursor) + grp(baseSeq) + byteArrayOf(0, 0)
         val old = udpSeq; udpSeq = 0
         val hdr = udpHeader(0x04, payload.size)
         udpSeq = old

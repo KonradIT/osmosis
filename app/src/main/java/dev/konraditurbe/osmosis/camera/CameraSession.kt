@@ -4,6 +4,7 @@ import dev.konraditurbe.osmosis.ble.CameraModel.LegacyActionAlbum
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.StorageRules
 import dev.konraditurbe.osmosis.core.AlbumJpeg
+import dev.konraditurbe.osmosis.core.AlbumVideo
 import dev.konraditurbe.osmosis.dcf.ActionFileTransfer
 import dev.konraditurbe.osmosis.dcf.DcfAddressing.Route
 import dev.konraditurbe.osmosis.dcf.DcfRecords
@@ -18,6 +19,7 @@ import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * A media session with an **Osmo camera** — registration, the CompositePack media list (`0x00/0x26`)
@@ -66,7 +68,6 @@ class CameraSession(
     internal val captureModeToRestore: Int?
         get() = if (httpWorkMode != null) originalWorkMode else inheritedWorkMode
     private val albumLock = Any()
-    private var checkingAlbum = false
     @Volatile private var closing = false
 
     @Volatile override var httpServing: Boolean? = null
@@ -446,40 +447,23 @@ class CameraSession(
         noteEndedStores(files, sdOldest != null, intOldest != null)
         log("datalink: parsed ${files.size} media files (newest page; ${cursorLog()}; more=$moreAvailable)")
         logPageEvidence(files, files, NEWEST_SD, NEWEST_INTERNAL)
-        // After the list, not before it: the list is known to work in the mode the camera wakes up in,
-        // so a mode switch that misbehaves (or takes the AP down) still leaves the user with a grid.
-        // Mimo switches first and lists second; that order is worth trying once HTTP is proven.
-        if (legacyAlbum != null && files.any { it.isIndexed }) {
+        if (legacyAlbum == LegacyActionAlbum.ACTION_1) {
+            // AC101 has no HTTP route to probe. Mimo sends its originals through the datalink handler,
+            // and port 80 refused every connection in every tester session (issue #32), in RECORD and
+            // after 30 s in TRANSCODE alike. The check cost about 32 s a connect and never succeeded.
+            httpServing = false
+            log("datalink: Action 1 album uses the datalink for originals, thumbnails and stills (no HTTP check)")
+        } else if (legacyAlbum != null && files.any { it.isIndexed }) {
             // Prefer small originals. A missing or stale item should not hide a valid route.
             val samples = files.filter { it.isIndexed }.sortedBy { it.sizeBytes }.take(2)
             val probe = ActionHttpMedia(ip, log)
-            val route = if (httpViaWorkMode) openHttpViaWorkMode(samples, probe)
-                else checkAlbumRoute(samples, listOf(dcfRoute), probe).route
+            val route = checkAlbumRoute(samples, listOf(dcfRoute), probe).route
             httpServing = route != null
             if (route != null) dcfRoute = route
             log("datalink: HTTP media route: ${route ?: "no original verified"}")
         }
         onFetchProgress?.invoke(100)
         return files.map { if (it.isIndexed) it.copy(dcfRoute = dcfRoute) else it }
-    }
-
-    /** AC101's album work mode. Its firmware includes a port-80 web root with a DCIM directory. */
-    private fun openHttpViaWorkMode(samples: List<CameraFile>, probe: ActionHttpMedia): Route? {
-        synchronized(albumLock) {
-            if (closing) return null
-            checkingAlbum = true
-        }
-        try {
-            return checkAction1Http(samples, probe)
-        } finally {
-            synchronized(albumLock) {
-                checkingAlbum = false
-                if (closing) {
-                    restoreAlbumOnClose()
-                    super.close()
-                }
-            }
-        }
     }
 
     private data class AlbumCheck(val route: Route?, val peerActive: Boolean)
@@ -516,47 +500,6 @@ class CameraSession(
             httpWorkMode = WorkMode.TRANSCODE
         }
         inheritedWorkMode = null
-    }
-
-    private fun checkAction1Http(samples: List<CameraFile>, probe: ActionHttpMedia): Route? {
-        val routes = listOf(Route.V1, Route.STATIC)
-        log("datalink: checking Action 1 originals in the current work mode")
-        val initial = checkAlbumRoute(samples, routes, probe)
-        initial.route?.let { return it }
-        if (!initial.peerActive) return null
-        val current = readWorkMode() ?: workModeReported
-        reconcileRejoinedMode(current)
-        if (httpWorkMode == null) originalWorkMode = current
-        val original = originalWorkMode ?: run {
-            log("datalink: camera mode unknown, skipping album mode switch")
-            return null
-        }
-        if (closing) return null
-        val changed = current != WorkMode.TRANSCODE
-        log("datalink: Action 1 current mode ${WorkMode.name(current)}, checking HTTP in TRANSCODE for up to 30 s")
-        var keepMode = false
-        try {
-            if (changed) {
-                httpWorkMode = WorkMode.TRANSCODE
-                val status = setWorkMode(WorkMode.TRANSCODE)
-                log("datalink: SetMode TRANSCODE status=$status, reported=${WorkMode.name(workModeReported)}")
-                if (status != null && status != 0) {
-                    httpWorkMode = null
-                    log("datalink: TRANSCODE refused (status $status)")
-                    return null
-                }
-            }
-            val route = checkAlbumRoute(samples, routes, probe, retry = true).route
-            keepMode = route != null
-            log("datalink: Action 1 album HTTP result=$route, reported mode=${WorkMode.name(workModeReported)}")
-            return route
-        } finally {
-            if (httpWorkMode != null && !keepMode && !closing && tx.isOpen) {
-                val status = setWorkMode(original)
-                if (status == 0) httpWorkMode = null
-                log("datalink: restore ${WorkMode.name(original)} after HTTP check: status=$status")
-            }
-        }
     }
 
     /** `0x02/0x11`: the camera's work mode, or null if it didn't answer. */
@@ -1421,6 +1364,53 @@ class CameraSession(
     override val datalinkJpegs: Boolean
         get() = legacyAlbum == LegacyActionAlbum.ACTION_1 && handshakeOk && tx.isOpen && !closing
 
+    override val datalinkVideo: Boolean get() = datalinkJpegs && keepAliveOn
+    private val requestedVideo = AtomicReference<ActionVideoPlayback?>(null)
+
+    override fun openAlbumVideo(file: CameraFile, listener: AlbumVideo.Listener): AlbumVideo? {
+        if (!datalinkVideo || !file.isActionDcf || !file.isVideo) return null
+        val playback = ActionVideoPlayback(file.fileIndex, listener)
+        requestedVideo.getAndSet(playback)?.close()
+        return playback
+    }
+
+    private fun playAlbumVideo(playback: ActionVideoPlayback) {
+        var restore: Int? = null
+        var failure: String? = null
+        try {
+            if (playback.closed || !keepAliveOn) return
+            val previous = readWorkMode() ?: workModeReported ?: error("unknown camera work mode")
+            if (playback.closed || !keepAliveOn) return
+            if (previous != WorkMode.TRANSCODE) {
+                restore = previous
+                originalWorkMode = previous
+                httpWorkMode = WorkMode.TRANSCODE
+                val status = setWorkMode(WorkMode.TRANSCODE)
+                check(status == null || status == 0) { "TRANSCODE refused (status=$status)" }
+                check((readWorkMode() ?: workModeReported) == WorkMode.TRANSCODE) {
+                    "camera did not enter TRANSCODE"
+                }
+            }
+            if (playback.closed || !keepAliveOn) return
+            log("datalink: Action 1 playback index=${playback.index}")
+            tx.withDownloadPolling {
+                playback.play(tx.sessionId, { keepAliveOn && !closing && tx.isOpen },
+                    { cmd, body -> sendDuml(2, cmd, body, receiverType = 1, receiverId = 0) },
+                    { recvAll(30) }, tx::sendAck)
+            }
+        } catch (e: Exception) {
+            failure = e.message ?: e.javaClass.simpleName
+            log("datalink: Action 1 playback index=${playback.index}: $failure")
+        } finally {
+            if (restore != null && !closing && tx.isOpen) {
+                runCatching { if (setWorkMode(restore) == 0) httpWorkMode = null }
+                    .onFailure { log("datalink: restoring work mode after Action 1 playback: ${it.message}") }
+            }
+            requestedVideo.compareAndSet(playback, null)
+            playback.finish(failure)
+        }
+    }
+
     private val albumQueue = ArrayBlockingQueue<FutureTask<Boolean>>(1)
     private var nextAlbumTransferId = 0x100
 
@@ -1430,34 +1420,39 @@ class CameraSession(
     }
 
     override fun downloadOriginal(file: CameraFile, offset: Long, output: java.io.OutputStream,
-                                  progress: (Long) -> Unit): Boolean =
-        transferAlbumFile(file, offset, output, null, progress)
+                                  progress: (Long) -> Unit): Boolean {
+        requestedVideo.get()?.close()
+        return transferAlbumFile(file, offset, output, null, progress)
+    }
 
     // Serialize with pagination so its fresh-session fallback cannot retire the socket mid-file.
     @Synchronized
     private fun transferAlbumFile(file: CameraFile, offset: Long, output: java.io.OutputStream,
                                   jpeg: AlbumJpeg?, progress: (Long) -> Unit): Boolean {
-        fun available() = if (jpeg == null) datalinkOriginals else datalinkJpegs
+        fun available() = if (jpeg == null) datalinkOriginals
+            else datalinkJpegs && requestedVideo.get()?.closed != false
         if (!available() || !keepAliveOn || !file.isActionDcf || Thread.currentThread().isInterrupted) return false
         val cancelled = AtomicBoolean(false)
         val task = FutureTask {
             val buffered = output.buffered(64 * 1024)
             try {
-                var from = offset
-                do {
+                fun nextId(): Int {
                     val id = nextAlbumTransferId
                     nextAlbumTransferId = if (id == 0xffff) 0x100 else id + 1
-                    val transfer = ActionFileTransfer(file, from, id, buffered, jpeg, progress)
-                    val done = tx.withDownloadPolling {
-                        transfer.run(tx.sessionId,
-                            send = { sendDuml(0, 0x26, it, receiverType = 1, receiverId = 0) },
-                            receive = { recvAll(30) }, ackWindow = ::sendAck,
-                            connected = { available() && keepAliveOn && !cancelled.get() }, log = log)
-                    }
-                    if (!done) return@FutureTask false
-                    from = transfer.endOffset
-                } while (jpeg == null && from < file.sizeBytes)
-                true
+                    return id
+                }
+                fun connected() = available() && keepAliveOn && !cancelled.get()
+                fun runTransfer(transfer: ActionFileTransfer) = tx.withDownloadPolling {
+                    transfer.run(tx.sessionId,
+                        send = { sendDuml(0, 0x26, it, receiverType = 1, receiverId = 0) },
+                        receive = { recvAll(30) }, ackWindow = ::sendAck,
+                        connected = ::connected, log = log)
+                }
+                // An original restarts from its contiguous end after a stall (see fetchOriginal).
+                // A JPEG is small and starts at zero, so it stays a single transfer.
+                if (jpeg != null) runTransfer(ActionFileTransfer(file, offset, nextId(), buffered, jpeg, progress))
+                else ActionFileTransfer.fetchOriginal(file, offset, buffered, progress, ::nextId, ::connected, log,
+                    ::runTransfer)
             } finally {
                 buffered.flush()
             }
@@ -1503,7 +1498,10 @@ class CameraSession(
             // after a re-registration (delete, fresh page) the switch may not have survived the socket.
             if (httpViaWorkMode) ensureHttpWorkMode() else enterPlaybackConfirmed()
             while (keepAliveOn) {
-                if (awaitingCmd == null) albumQueue.poll()?.run()
+                if (awaitingCmd == null) {
+                    albumQueue.poll()?.run()
+                    requestedVideo.get()?.let(::playAlbumVideo)
+                }
                 if (!keepAliveOn) break
                 runCatching {
                     val dg = recvAll(200)
@@ -1640,12 +1638,10 @@ class CameraSession(
      * nothing worse than a camera sitting in playback until it sleeps.
      */
     override fun close() {
-        synchronized(albumLock) {
-            closing = true
-            // The probe owns the socket and will restore the capture mode before closing it.
-            if (checkingAlbum) return
-        }
-        if ((playbackHeld || (httpWorkMode != null && originalWorkMode != null)) && keepAliveOn) {
+        synchronized(albumLock) { closing = true }
+        val video = requestedVideo.get()
+        video?.close()
+        if ((video != null || playbackHeld || (httpWorkMode != null && originalWorkMode != null)) && keepAliveOn) {
             releasePlaybackOnExit = true
             keepAliveOn = false
             val deadline = System.currentTimeMillis() + 500
