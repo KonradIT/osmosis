@@ -1,5 +1,6 @@
 package dev.konraditurbe.osmosis.ui
 
+import dev.konraditurbe.osmosis.dcf.DcfAddressing.Route
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -29,6 +30,8 @@ import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
+import dev.konraditurbe.osmosis.core.AlbumJpeg
+import dev.konraditurbe.osmosis.net.PreviewNav
 import dev.konraditurbe.osmosis.core.previewCandidates
 import dev.konraditurbe.osmosis.core.urlPath
 import dev.konraditurbe.osmosis.net.FrameCapture
@@ -49,7 +52,20 @@ import dev.konraditurbe.osmosis.net.ImageLoader
 class MediaPreviewActivity : AppCompatActivity() {
 
     private val main = Handler(Looper.getMainLooper())
-    private val http by lazy { HttpClient(ip) { Log.i("Osmosis", it) } }
+
+    /**
+     * Log to logcat **and** to the shared session file, the way [MainActivity] does.
+     *
+     * This used to be a bare `Log.i`, which meant "Save logs" captured the whole connect flow and then
+     * went silent the moment a preview opened — so a tester log covering a camera that misbehaved
+     * *during playback* contained no trace of playback at all, and every question about it was
+     * unanswerable from the only artefact we had.
+     */
+    private fun plog(s: String) {
+        Log.i("Osmosis", s)
+        dev.konraditurbe.osmosis.core.FileLog.write(s)
+    }
+    private val http by lazy { HttpClient(ip) { plog(it) } }
 
     private lateinit var videoView: VideoView
     private lateinit var photoView: ImageView
@@ -72,6 +88,11 @@ class MediaPreviewActivity : AppCompatActivity() {
     private lateinit var btnRew: ImageButton
     private lateinit var btnFf: ImageButton
     private var scrubbing = false
+    private var remoteVideoItem = false
+    private var remoteView: ActionVideoView? = null
+    private var remotePlaying = false
+    private var remoteRendered = false
+    private lateinit var mediaTouch: View.OnTouchListener
 
     // Frame capture: pull the full-res frame at the paused position off the camera as a JPEG.
     private lateinit var btnCapture: ImageButton
@@ -84,6 +105,8 @@ class MediaPreviewActivity : AppCompatActivity() {
     // The grid's filtered list + our index in it, so a swipe (when paused) moves to the prev/next item.
     private var navItems: List<CameraFile> = emptyList()
     private var navIndex = -1
+    private val mediaAvailable get() = intent.getBooleanExtra(EXTRA_MEDIA_AVAILABLE, true)
+    private val datalinkOriginal get() = intent.getBooleanExtra(EXTRA_DATALINK_ORIGINALS, false) && file.isActionDcf
     private var queued = false
     private var resTag: String? = null // resolution label, from the manifest (video enum / photo W×H)
     private var streamCandidates: List<String> = emptyList() // preview URLs, cheapest first
@@ -102,14 +125,14 @@ class MediaPreviewActivity : AppCompatActivity() {
     private var selectedFrame = 0
     private lateinit var burstRow: LinearLayout
     private lateinit var burstStrip: View
-    private val imageLoader by lazy { ImageLoader(http) { Log.i("Osmosis", it) } }
+    private val imageLoader by lazy { ImageLoader(http, PreviewNav.album) { plog(it) } }
 
     // Scrub preview: the frame under the thumb, floated above the seek bar during a drag.
     private lateinit var previewRoot: View
     private lateinit var scrubPreview: View
     private lateinit var scrubImage: ImageView
     private lateinit var scrubTime: TextView
-    private val scrubFrames by lazy { ScrubFrames { Log.i("Osmosis", it) } }
+    private val scrubFrames by lazy { ScrubFrames { plog(it) } }
 
     /** Newest status-bar/cutout inset, kept so the floating scrub bubble can clamp against it. */
     private var topInsetPx = 0
@@ -208,7 +231,13 @@ class MediaPreviewActivity : AppCompatActivity() {
         intent.getStringExtra(EXTRA_RES), intent.getStringExtra(EXTRA_PROXY),
         handle = intent.getLongExtra(EXTRA_HANDLE, 0L),
         sizeBytes = intent.getLongExtra(EXTRA_SIZE, 0L),
-        resolution = intent.getStringExtra(EXTRA_RESOLUTION))
+        resolution = intent.getStringExtra(EXTRA_RESOLUTION),
+        durationSec = intent.getIntExtra(EXTRA_DURATION, 0),
+        mtimeEpoch = intent.getLongExtra(EXTRA_MTIME, 0L),
+        mediaType = intent.getIntExtra(EXTRA_TYPE, -1),
+        fileIndex = intent.getLongExtra(EXTRA_FILE_INDEX, 0L),
+        segmentIndex = intent.getIntExtra(EXTRA_SEGMENT, 0),
+        dcfRoute = Route.values().firstOrNull { it.name == intent.getStringExtra(EXTRA_ROUTE) } ?: Route.V1)
 
     /** Tap the media to toggle overlays; a horizontal fling moves to the prev/next item, even while a
      *  video plays. Swipe **left = next**, **right = previous**. A photo also
@@ -234,6 +263,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         })
         @Suppress("ClickableViewAccessibility")
         val touch = View.OnTouchListener { _, ev -> gd.onTouchEvent(ev) }
+        mediaTouch = touch
         videoView.setOnTouchListener(touch)
 
         val zoom = PhotoZoom(photoView)
@@ -269,10 +299,14 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     /** Load whatever [file] currently points at — queue/trim state comes live from the grid (PreviewNav). */
     private fun loadCurrent() {
-        queued = dev.konraditurbe.osmosis.net.PreviewNav.isQueued?.invoke(file.path) ?: false
-        val t = dev.konraditurbe.osmosis.net.PreviewNav.trimFor?.invoke(file.path)
+        stopRemoteVideo()
+        remoteVideoItem = !mediaAvailable && file.isVideo && file.isActionDcf && PreviewNav.album?.datalinkVideo == true
+        imageLoader.clear(photoView)
+        queued = dev.konraditurbe.osmosis.net.PreviewNav.isQueued?.invoke(file.albumKey) ?: false
+        val t = if (mediaAvailable) dev.konraditurbe.osmosis.net.PreviewNav.trimFor?.invoke(file.albumKey) else null
         trimStartMs = t?.startMs ?: -1L; trimEndMs = t?.endMs ?: -1L
-        resTag = null
+        resTag = if (file.isVideo) dev.konraditurbe.osmosis.core.VideoFormats.label(file.resolution)
+            else file.resolution?.replace("x", "×")
 
         videoView.visibility = View.GONE
         photoView.visibility = View.GONE
@@ -281,7 +315,12 @@ class MediaPreviewActivity : AppCompatActivity() {
         // `controls` is the whole bottom overlay — it also holds the queue button and the burst strip,
         // so it stays up for a still. Only [trimRow], the scrubber/transport/trim block inside it, is
         // video-only. Hiding the container instead took "Add to Queue" down with it on every photo.
-        trimRow.visibility = if (file.isVideo) View.VISIBLE else View.GONE
+        trimRow.visibility = if ((mediaAvailable || remoteVideoItem) && file.isVideo) View.VISIBLE else View.GONE
+        btnMarkIn.visibility = if (remoteVideoItem) View.GONE else View.VISIBLE
+        btnMarkOut.visibility = btnMarkIn.visibility
+        btnPlay.isEnabled = true
+        enableSeeking(!remoteVideoItem)
+        if (remoteVideoItem) resetRemoteControls()
         controls.visibility = View.VISIBLE
         topInfo.visibility = View.VISIBLE
 
@@ -290,12 +329,27 @@ class MediaPreviewActivity : AppCompatActivity() {
         refreshQueueButton()
 
         when {
+            file.isActionDcf && (file.isImage || (file.isVideo && !mediaAvailable)) && PreviewNav.album?.datalinkJpegs == true -> {
+                imageLoader.loadAlbum(file, AlbumJpeg.SCREEN, photoView) { loaded ->
+                    if (remoteRendered) return@loadAlbum
+                    if (loaded) {
+                        photoZoom?.reset()
+                        spinner.visibility = View.GONE
+                        photoView.visibility = View.VISIBLE
+                    } else if (remoteVideoItem) {
+                        if (remoteView == null) spinner.visibility = View.GONE
+                    } else if (mediaAvailable && file.isImage) loadPhoto()
+                    else showStatus(getString(if (datalinkOriginal) R.string.datalink_original_available
+                                              else R.string.preview_unavailable))
+                }
+            }
+            datalinkOriginal -> showStatus(getString(R.string.datalink_original_available))
+            !mediaAvailable -> showStatus(getString(R.string.camera_not_serving_files))
             file.isVideo -> {
                 if (groupPaths.size > 1) setupBurstStrip()     // a looping recording's chapters
                 loadVideo(); loadHighlights()
             }
             file.isImage -> {
-                resTag = file.resolution?.replace("x", "×")   // pixel W×H from the manifest, no JPEG decode
                 if (groupPaths.size > 1) setupBurstStrip()     // frames came from the DUML group-expand
                 loadPhoto()
             }
@@ -307,7 +361,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     private fun commitQueue() {
         val member = if (groupPaths.isNotEmpty()) groupMember(selectedFrame) else null
         val trim = if (hasTrim()) TrimRange(trimStartMs, trimEndMs) else null
-        dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(file.path, queued, trim, member)
+        dev.konraditurbe.osmosis.net.PreviewNav.setQueued?.invoke(file.albumKey, queued, trim, member)
     }
 
     /**
@@ -336,6 +390,7 @@ class MediaPreviewActivity : AppCompatActivity() {
      * cell of its own; the HEAD's Content-Length becomes its size for the progress/duplicate checks.
      */
     private fun offerSidecar() {
+        if (!mediaAvailable) return
         val target = shownFile()
         val sc = target.sidecarCandidate() ?: return
         val url = PathAddressing.byPath(target.storage, sc.path)
@@ -449,7 +504,7 @@ class MediaPreviewActivity : AppCompatActivity() {
      */
     private fun refreshQueueButton() {
         val f = currentCheckFile()
-        val name = f.name
+        val name = f.albumKey
         if (!hasTrim() && !downloadedCache.containsKey(name)) {
             Thread {
                 // One query answers both questions — the row's existence grays out Download, and its id
@@ -463,8 +518,8 @@ class MediaPreviewActivity : AppCompatActivity() {
             }.start()
         }
         val alreadySaved = !hasTrim() && downloadedCache[name] == true
-        btnQueue.isEnabled = !alreadySaved
-        btnQueue.alpha = if (alreadySaved) 0.5f else 1f
+        btnQueue.isEnabled = (mediaAvailable || datalinkOriginal) && !alreadySaved
+        btnQueue.alpha = if (btnQueue.isEnabled) 1f else 0.5f
         btnQueue.text = if (alreadySaved) getString(R.string.already_downloaded) else queueLabel()
 
         // Share/Edit act on the saved copy, so they only exist once there is one — and they follow the
@@ -516,7 +571,7 @@ class MediaPreviewActivity : AppCompatActivity() {
                 txtCur.text = mmss(progress.toLong())
                 showScrubPreview(progress)
                 main.removeCallbacks(scrubRefine)
-                main.postDelayed(scrubRefine, 140)   // sharpen only once the thumb settles
+                if (!remoteVideoItem) main.postDelayed(scrubRefine, 140)
             }
             override fun onStartTrackingTouch(sb: SeekBar) {
                 scrubbing = true
@@ -555,12 +610,87 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private fun mmss(ms: Long): String { val s = ms / 1000; return "%d:%02d".format(s / 60, s % 60) }
 
+    private fun enableSeeking(enabled: Boolean) {
+        seekBar.isEnabled = enabled
+        btnRew.isEnabled = enabled
+        btnFf.isEnabled = enabled
+    }
+
+    private fun resetRemoteControls() {
+        remotePlaying = false
+        remoteRendered = false
+        val duration = if (file.segmentIndex == 0) file.durationSec * 1000L else 0L
+        seekBar.max = duration.coerceIn(1, Int.MAX_VALUE.toLong()).toInt()
+        seekBar.progress = 0
+        txtCur.text = mmss(0)
+        txtTotal.text = mmss(duration)
+        btnPlay.isEnabled = true
+        enableSeeking(false)
+        updatePlayIcon()
+    }
+
+    private fun stopRemoteVideo() {
+        remoteView?.let { view ->
+            remoteView = null
+            view.close()
+            (view.parent as? android.view.ViewGroup)?.removeView(view)
+        }
+        remoteRendered = false
+        remotePlaying = false
+    }
+
+    private fun startRemoteVideo() {
+        val session = PreviewNav.album
+        if (session?.datalinkVideo != true) { showStatus(getString(R.string.preview_unavailable)); return }
+        spinner.visibility = View.VISIBLE
+        statusText.visibility = View.GONE
+        btnPlay.isEnabled = false
+        val view = ActionVideoView(this, session, file, firstFrame = { width, height ->
+            plog("Action 1 preview rendered ${width}x$height for index=${file.fileIndex}")
+            remoteRendered = true
+            spinner.visibility = View.GONE
+            photoView.visibility = View.GONE
+        }, progress = { playing, position, duration ->
+            remotePlaying = playing
+            btnPlay.isEnabled = true
+            enableSeeking(duration > 0)
+            seekBar.max = duration.coerceAtLeast(1)
+            txtTotal.text = mmss(duration.toLong())
+            if (!scrubbing) {
+                seekBar.progress = position
+                txtCur.text = mmss(position.toLong())
+            }
+            updatePlayIcon()
+        }, finished = { error ->
+            stopRemoteVideo()
+            resetRemoteControls()
+            spinner.visibility = View.GONE
+            if (photoView.drawable != null) photoView.visibility = View.VISIBLE
+            if (error != null) {
+                plog("Action 1 video preview: $error")
+                showStatus(getString(R.string.preview_unavailable))
+            }
+        })
+        remoteView = view
+        view.setOnTouchListener(mediaTouch)
+        (previewRoot as android.view.ViewGroup).addView(view, 1)
+    }
+
     private fun togglePlay() {
+        if (remoteVideoItem) {
+            val view = remoteView
+            if (view == null) startRemoteVideo() else view.setPlaying(!remotePlaying)
+            return
+        }
         if (videoView.isPlaying) videoView.pause() else videoView.start()
         updatePlayIcon()
     }
 
     private fun seekBy(deltaMs: Int) {
+        if (remoteVideoItem) {
+            seekToMs((seekBar.progress.toLong() + deltaMs).coerceIn(0, seekBar.max.toLong()))
+            return
+        }
         val dur = videoView.duration
         val target = (videoView.currentPosition + deltaMs).coerceIn(0, if (dur > 0) dur else Int.MAX_VALUE)
         videoView.seekTo(target)
@@ -570,11 +700,11 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private fun updatePlayIcon() {
         btnPlay.setImageResource(
-            if (videoView.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+            if (remotePlaying || videoView.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
         )
         // The capture button only makes sense on a paused frame. INVISIBLE (not GONE) so the transport
         // group doesn't shift; left alone mid-capture so the spinner / ✓ stay where the tap was.
-        if (!capturing) btnCapture.visibility = if (videoView.isPlaying) View.INVISIBLE else View.VISIBLE
+        if (!capturing) btnCapture.visibility = if (remoteVideoItem || videoView.isPlaying) View.INVISIBLE else View.VISIBLE
     }
 
     /**
@@ -620,7 +750,7 @@ class MediaPreviewActivity : AppCompatActivity() {
         topInfo.visibility = if (show) View.VISIBLE else View.GONE
         savedActions.visibility = if (show && savedUri != null) View.VISIBLE else View.GONE
         controls.visibility = if (show) View.VISIBLE else View.GONE
-        trimRow.visibility = if (show && file.isVideo) View.VISIBLE else View.GONE
+        trimRow.visibility = if (show && (mediaAvailable || remoteVideoItem) && file.isVideo) View.VISIBLE else View.GONE
     }
 
     /** Keep the scrubber + current-time in sync while playing (skipped while the user is dragging). */
@@ -640,9 +770,10 @@ class MediaPreviewActivity : AppCompatActivity() {
     /** id · date · <resolution>·<fps> — the 4-digit media ID (seq), not the raw filename. */
     private fun renderTop() {
         val resFps = listOfNotNull(resTag, file.resLabel).joinToString("·").ifBlank { "—" }
-        val id = "%04d".format(file.seq)
+        val id = file.displayNumber
         val name = if (groupPaths.isNotEmpty()) "$id  (${selectedFrame + 1}/${groupPaths.size})" else id
-        topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps"
+        val recording = if (remoteVideoItem && file.segmentIndex > 0) "   ·   " + getString(R.string.full_recording_preview) else ""
+        topInfo.text = "$name   ·   ${file.dateTaken}   ·   $resFps$recording"
     }
 
     /** Pull this video's highlight marks off-UI (DUML 0x02/0xff via the datalink bridge) and draw them
@@ -691,7 +822,7 @@ class MediaPreviewActivity : AppCompatActivity() {
     /** Float the bubble over the seekbar thumb at [posMs] with the closest frame we have so far. */
     private fun showScrubPreview(posMs: Int) {
         scrubTime.text = mmss(posMs.toLong())
-        showScrubFrame(scrubFrames.nearest(posMs.toLong()))
+        showScrubFrame(if (remoteVideoItem) null else scrubFrames.nearest(posMs.toLong()))
         scrubPreview.visibility = View.VISIBLE
         positionScrubPreview(posMs)
     }
@@ -735,7 +866,7 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     private fun seekToMs(ms: Long) {
         val t = ms.toInt()
-        videoView.seekTo(t)
+        if (remoteVideoItem) remoteView?.seek(t) else videoView.seekTo(t)
         seekBar.progress = t
         txtCur.text = mmss(ms)
     }
@@ -750,7 +881,25 @@ class MediaPreviewActivity : AppCompatActivity() {
         // Pro doesn't list), falling back through to the full-res file. See CameraFile.previewCandidates.
         streamCandidates = shownFile().previewCandidates()
         streamIdx = 0
-        startStream(streamCandidates[streamIdx])
+        // Check the port is even open before handing the URL to MediaPlayer. When it isn't — the older
+        // Osmo Action generation, whose HTTP server we can't yet get to listen — MediaPlayer sits on
+        // each candidate for a full 30 s before reporting `what=1 extra=-2147483648`, so a two-candidate
+        // list is a minute of spinner and then a generic failure. A refused connect is instant and
+        // says something specific.
+        val requested = shownFile()
+        Thread {
+            val open = runCatching {
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, 80), 2500); true }
+            }.getOrDefault(false)
+            main.post {
+                if (isFinishing || requested != shownFile()) return@post
+                if (open) startStream(streamCandidates[streamIdx])
+                else {
+                    plog("preview: $ip:80 refused — not attempting to stream (camera is not serving HTTP)")
+                    showStatus(getString(R.string.camera_not_serving_files))
+                }
+            }
+        }.start()
     }
 
     /**
@@ -760,11 +909,11 @@ class MediaPreviewActivity : AppCompatActivity() {
      */
     private fun startStream(path: String) {
         val uri = Uri.parse("http://$ip$path")
-        Log.i("Osmosis", "preview stream $uri")
+        plog("preview stream $uri")
         videoView.visibility = VideoView.VISIBLE
         videoView.setVideoURI(uri)
         videoView.setOnPreparedListener { mp ->
-            Log.i("Osmosis", "preview PREPARED ${mp.videoWidth}x${mp.videoHeight}")
+            plog("preview PREPARED ${mp.videoWidth}x${mp.videoHeight}")
             mp.isLooping = true
             spinner.visibility = ProgressBar.GONE
             videoView.start()
@@ -777,10 +926,10 @@ class MediaPreviewActivity : AppCompatActivity() {
             startScrubFrames(path)   // the candidate that actually opened, so previews match the stream
         }
         videoView.setOnErrorListener { _, what, extra ->
-            Log.i("Osmosis", "preview ERROR what=$what extra=$extra (candidate ${streamIdx + 1}/${streamCandidates.size}: $path)")
+            plog("preview ERROR what=$what extra=$extra (candidate ${streamIdx + 1}/${streamCandidates.size}: $path)")
             if (streamIdx < streamCandidates.size - 1) {
                 streamIdx++
-                Log.i("Osmosis", "preview falling back to ${streamCandidates[streamIdx]}")
+                plog("preview falling back to ${streamCandidates[streamIdx]}")
                 startStream(streamCandidates[streamIdx])
                 return@setOnErrorListener true
             }
@@ -836,10 +985,17 @@ class MediaPreviewActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        if (remoteView != null) {
+            stopRemoteVideo()
+            resetRemoteControls()
+            spinner.visibility = View.GONE
+            if (photoView.drawable != null) photoView.visibility = View.VISIBLE
+        }
         if (videoView.isPlaying) { videoView.pause(); updatePlayIcon() }
     }
 
     override fun onDestroy() {
+        stopRemoteVideo()
         super.onDestroy()
         main.removeCallbacks(tick)
         main.removeCallbacks(highlightsRunnable)
@@ -858,6 +1014,14 @@ class MediaPreviewActivity : AppCompatActivity() {
         private const val CAPTURE_OK_MS = 1_200L
 
         const val EXTRA_PATH = "path"
+        private const val EXTRA_FILE_INDEX = "file_index"
+        private const val EXTRA_SEGMENT = "segment_index"
+        private const val EXTRA_ROUTE = "dcf_route"
+        private const val EXTRA_TYPE = "media_type"
+        private const val EXTRA_MTIME = "mtime"
+        private const val EXTRA_DURATION = "duration"
+        private const val EXTRA_DATALINK_ORIGINALS = "datalink_originals"
+        private const val EXTRA_MEDIA_AVAILABLE = "media_available"
         private const val EXTRA_STORAGE = "storage"
         private const val EXTRA_SIZE = "size"    // full manifest byte size → already-downloaded check
         private const val EXTRA_HANDLE = "handle"    // video handle → highlight pull (0x02/0xff)
@@ -879,8 +1043,17 @@ class MediaPreviewActivity : AppCompatActivity() {
         /** [group] = a burst/interval group's frames (from DatalinkClient.expandBurstGroup), sub-index
          *  order, [file] being the lead; empty/size-1 for a normal file → no strip. */
         fun intent(ctx: Context, ip: String, file: CameraFile, position: Int, queued: Boolean,
-                   trim: TrimRange?, group: List<CameraFile> = emptyList()) =
+                   trim: TrimRange?, group: List<CameraFile> = emptyList(), mediaAvailable: Boolean = true,
+                   datalinkOriginals: Boolean = false) =
             Intent(ctx, MediaPreviewActivity::class.java).apply {
+                putExtra(EXTRA_FILE_INDEX, file.fileIndex)
+                putExtra(EXTRA_SEGMENT, file.segmentIndex)
+                putExtra(EXTRA_ROUTE, file.dcfRoute.name)
+                putExtra(EXTRA_TYPE, file.mediaType)
+                putExtra(EXTRA_MTIME, file.mtimeEpoch)
+                putExtra(EXTRA_DURATION, file.durationSec)
+                putExtra(EXTRA_DATALINK_ORIGINALS, datalinkOriginals)
+                putExtra(EXTRA_MEDIA_AVAILABLE, mediaAvailable)
                 putExtra(EXTRA_PATH, file.path)
                 putExtra(EXTRA_STORAGE, file.storage)
                 putExtra(EXTRA_SIZE, file.sizeBytes)

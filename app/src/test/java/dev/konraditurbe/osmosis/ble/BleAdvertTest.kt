@@ -48,6 +48,20 @@ class BleAdvertTest {
      */
     private val action4 = hex("1400faaabbccddeeff")
 
+    /**
+     * An Osmo Action 1 advert, verbatim from a tester's scan on 2026-11-22 (issue #32):
+     *
+     *     HIT [DJI] 60:60:1F:FB:74:FE name=OsmoAction-FB74FD model=unknown(0x0082)
+     *         mfr[cid=e5c0 82000060601ffb74fe]
+     *
+     *     82 00 00 60 60 1f fb 74 fe     classic 0x0082, then the MAC
+     *
+     * Two traps in nine bytes. Byte 5 is the MAC's `0x1f`, so the new-format flag bit is set by
+     * accident; only the payload being too short to hold a product type keeps the classic id. And
+     * `0x82` is above the drone floor, so unmapped it resolved as an aircraft.
+     */
+    private val action1 = hex("82000060601ffb74fe")
+
     @Test
     fun `pocket 4 pro resolves through the new format`() {
         val d = BleAdvert.decode(pocket4Pro)
@@ -153,6 +167,35 @@ class BleAdvertTest {
         assertFalse("its AP is WPA2, not WPA3", m.wpa3)
         assertFalse("the handle bit picks the mount; nothing is pinned", m.singleSdStorage)
         assertFalse("an Action 4 is not a drone", m.isDrone)
+    }
+
+    /**
+     * The Action 1 must come out a camera. Resolved as a drone, it paired with the `DJI FLY` token,
+     * got no BLE creds and looked for its list on udp/9003, where nothing answers: "no media".
+     */
+    @Test
+    fun `action 1 resolves through the classic format to a camera, not a drone`() {
+        val d = BleAdvert.decode(action1)
+        assertFalse("the flag bit is set, but the payload is too short to carry a product type", d.newFormat)
+        assertEquals(0x0082, d.modelId)
+        assertEquals("OsmoAction", BleConstants.MODEL_NAMES[d.modelId])
+
+        val m = CameraModel.resolve(d.modelId, "OsmoAction-FB74FD", Brand.DJI)
+        assertEquals("Osmo Action", m.name)
+        assertFalse("an Action 1 is not a drone", m.isDrone)
+        assertEquals("osmo", m.pairingToken)
+        assertEquals(9004, m.datalinkPort)
+        assertTrue(m.tcpPoke)
+        assertFalse("no offload has finished on one yet", m.verified)
+    }
+
+    /** DJI's table folds 0x06, 0x07 and 0x82 into the one Action 1 product type; all three agree. */
+    @Test
+    fun `every classic action 1 id resolves to the same camera`() {
+        val viaProductType = CameraModel.resolve(0x0006, null, Brand.DJI)
+        for (id in listOf(0x0007, 0x0082)) {
+            assertEquals("model 0x%04x".format(id), viaProductType, CameraModel.resolve(id, null, Brand.DJI))
+        }
     }
 
     @Test

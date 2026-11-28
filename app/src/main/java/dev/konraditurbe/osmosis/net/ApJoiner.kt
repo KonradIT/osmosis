@@ -48,7 +48,7 @@ class ApJoiner(context: Context, private val listener: Listener) {
 
     private val cm = context.applicationContext
         .getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    private var cb: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var cb: ConnectivityManager.NetworkCallback? = null
 
     // Remembered so [rejoin] can re-issue the identical request without the caller having to hold
     // the credentials for the whole session.
@@ -71,6 +71,7 @@ class ApJoiner(context: Context, private val listener: Listener) {
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                if (cb !== this) return
                 val bound = cm.bindProcessToNetwork(network)
                 val link = runCatching { cm.getLinkProperties(network) }.getOrNull()
                 listener.onLog("WiFi: onAvailable, bindProcessToNetwork=$bound")
@@ -84,10 +85,12 @@ class ApJoiner(context: Context, private val listener: Listener) {
             }
 
             override fun onUnavailable() {
+                if (cb !== this) return
                 listener.onFailed("WiFi: onUnavailable (wrong password, AP down, or user cancelled)")
             }
 
             override fun onLost(network: Network) {
+                if (cb !== this) return
                 listener.onLog("WiFi: onLost")
                 listener.onLost()
             }
@@ -109,8 +112,9 @@ class ApJoiner(context: Context, private val listener: Listener) {
      */
     fun rejoin(): Boolean {
         val ssid = lastSsid ?: return false
-        cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+        val old = cb
         cb = null
+        old?.let { runCatching { cm.unregisterNetworkCallback(it) } }
         join(ssid, lastPassphrase, lastWpa3)
         return true
     }
@@ -131,8 +135,9 @@ class ApJoiner(context: Context, private val listener: Listener) {
     }
 
     fun release() {
-        cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
-        runCatching { cm.bindProcessToNetwork(null) }
+        val old = cb
         cb = null
+        old?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+        runCatching { cm.bindProcessToNetwork(null) }
     }
 }

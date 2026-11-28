@@ -42,6 +42,19 @@ abstract class DumlSession(
         private set
 
     /**
+     * The camera's work mode (`CameraSession`'s `WorkMode` wire values), from byte 4 of the same
+     * `0x02/0x80` push. Fly reads it there (`DataCameraGetPushStateInfo.getMode`). Null until a push
+     * arrives. Only logged when [logWorkMode] is set, because it has only been checked against the
+     * older Osmo Action, and on newer bodies the byte may carry something else.
+     */
+    @Volatile
+    var workModeReported: Int? = null
+        private set
+
+    /** Log [workModeReported] changes. Set by the cameras that switch modes through `0x02/0x10`. */
+    protected var logWorkMode = false
+
+    /**
      * When the current session last completed its handshake+registration, or 0 if never.
      *
      * Measured on a Nano: inline command **writes** stop being answered roughly 70 s after this, while
@@ -203,6 +216,7 @@ abstract class DumlSession(
         // A fresh session must re-learn this from the camera, not inherit the last one's answer —
         // the whole value of the bit is that it is the camera's word and not ours.
         playbackReported = null
+        workModeReported = null
     }
 
     /** Fire [onStatus] if anything the UI displays has actually changed. */
@@ -235,6 +249,11 @@ abstract class DumlSession(
                 if (playbackReported != inPlayback) {
                     playbackReported = inPlayback
                     log("camera reports playback mode: ${if (inPlayback) "YES" else "no"}")
+                }
+                val mode = p[4].toInt() and 0xFF
+                if (workModeReported != mode) {
+                    workModeReported = mode
+                    if (logWorkMode) log("camera reports work mode: ${dev.konraditurbe.osmosis.camera.WorkMode.name(mode)} ($mode)")
                 }
                 // Storage of the active store: total = u32-LE MiB @ byte 5, free = u32-LE MiB @ byte 9.
                 val total = u32le(p, 5).toInt()

@@ -1,6 +1,7 @@
 package dev.konraditurbe.osmosis.net
 
 import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.core.MediaSession
 import dev.konraditurbe.osmosis.core.TrimRange
 
 /**
@@ -13,10 +14,11 @@ import dev.konraditurbe.osmosis.core.TrimRange
  * while a grid is up and cleared on teardown. All calls happen on the main thread.
  */
 object PreviewNav {
+    @Volatile var album: MediaSession? = null
     @Volatile var items: List<CameraFile> = emptyList()
     @Volatile var isQueued: ((path: String) -> Boolean)? = null
     @Volatile var trimFor: ((path: String) -> TrimRange?)? = null
     @Volatile var setQueued: ((path: String, queued: Boolean, trim: TrimRange?, member: CameraFile?) -> Unit)? = null
 
-    fun clear() { items = emptyList(); isQueued = null; trimFor = null; setQueued = null }
+    fun clear() { album = null; items = emptyList(); isQueued = null; trimFor = null; setQueued = null }
 }

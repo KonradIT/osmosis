@@ -25,9 +25,12 @@ android {
         // 1.3.3-action1-playback, 22 as 1.3.1-rc1, 23 was tagged v1.3.1 but never published, 24 is
         // the published v1.3.2, 25 the published v1.4.0, 26 the published v1.4.1, 27 the published
         // v1.4.2 and 28 the published v1.4.3. 32 went out as the 1.5.1-rc1 tester build, 33 as
-        // 1.5.1-rc2 (from time-sync-fixes, not this branch) and 34 as 1.5.1-rc3.
-        versionCode 34
-        versionName "1.5.1-rc3"
+        // 1.5.1-rc2 (from time-sync-fixes, not this branch) and 34 as 1.5.1-rc3. 35 is 1.5.1-rc4 on
+        // time-sync-fixes; 36 went out as 1.5.1-action1 from support-osmo-action-1 (issue #32), 37
+        // as 1.5.1-action1.2, 38 as 1.5.1-action1.3, 39 as 1.5.1-action1.4 and 40 as 1.5.1-action1.5
+        // from the same branch.
+        versionCode 40
+        versionName "1.5.1-action1.5"
     }
 
     signingConfigs {
@@ -76,6 +79,8 @@ dependencies {
     implementation 'com.google.android.material:material:1.10.0'
     implementation 'androidx.recyclerview:recyclerview:1.3.2'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4'
+
+    implementation 'androidx.media3:media3-container:1.5.1' // AVC sequence parameter sets
 
     testImplementation 'junit:junit:4.13.2'
 }

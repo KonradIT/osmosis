@@ -49,7 +49,8 @@
 
     <!-- Wi-Fi join failed dialog -->
     <string name="couldnt_join_wifi">Verbindung mit %1$s fehlgeschlagen</string>
-    <string name="wifi_join_failed_message">Die Verbindung mit dem Kamera-WLAN ist fehlgeschlagen. Meist ist das gespeicherte Passwort veraltet – z. B. nach einem Zurücksetzen der Kamera auf Werkseinstellungen. Erneut eingeben und noch einmal versuchen?</string>
+    <string name="wifi_join_failed_message">Android konnte sich nicht mit dem Kamera-WLAN verbinden und nennt keinen Grund. Meist war das WLAN der Kamera noch nicht bereit oder die Verbindungsanfrage wurde geschlossen. Ein falsches Passwort (z. B. nach einem Zurücksetzen der Kamera) sieht genauso aus.</string>
+    <string name="try_again">Erneut versuchen</string>
     <string name="wifi_join_failed_wpa_message">Dieses Telefon konnte sich weder über WPA3 noch über WPA2 mit %1$s verbinden – wahrscheinlich eine WLAN-Kompatibilitätsgrenze des Telefons, nicht das Passwort. Du kannst das Passwort trotzdem erneut eingeben, um das auszuschließen.</string>
     <string name="reenter_password">Passwort erneut eingeben</string>
     <string name="back_to_cameras">Zurück zu den Kameras</string>
@@ -111,6 +112,8 @@
     <string name="not_connected">Nicht verbunden</string>
     <string name="no_media_found">%1$s enthält keine Medien</string>
     <string name="camera_unreachable">%1$s war über WLAN nicht erreichbar</string>
+    <string name="datalink_original_available">Lege das Original in die Warteschlange, um es über die Datenverbindung der Kamera herunterzuladen. Die gespeicherte Datei findest du in der Galerie.</string>
+    <string name="camera_not_serving_files">Diese Kamera stellt ihre Dateien noch nicht über WLAN bereit, daher sind Vorschau und Download nicht verfügbar.</string>
     <string name="camera_network_blocked_title">Android hat die Kameraverbindung blockiert</string>
     <string name="camera_network_blocked_message">Das Telefon ist mit %1$s verbunden, aber Android lässt Osmosis nichts über dieses Netzwerk senden, deshalb hat die Kamera nie geantwortet.\n\nDie Ursache ist meist ein VPN, ein Werbeblocker, ein DNS-Filter oder eine Firewall-App. Schalte sie aus und verbinde dich dann erneut.</string>
     <string name="camera_not_activated_title">%1$s ist eine brandneue Kamera, nicht aktiviert</string>

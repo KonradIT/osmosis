@@ -1,22 +1,19 @@
 package dev.konraditurbe.osmosis.dcf
 
+import dev.konraditurbe.osmosis.camera.PathAddressing
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.MediaAddressing
 
-/**
- * DCF-index addressing — drones and the Osmo Action 1, over `/v1` ([DcfUrls]).
- *
- * The distinguishing move is that a cheaper rendition is a **subtype of the same index**, not a
- * separate file at a separate path: one number addresses the original, its thumbnail, its screen-res
- * render and its low-res proxy clip. So unlike the camera scheme there is nothing to derive, probe or
- * guess — the chain is exact.
- *
- * Nothing here knows about paths, and [PathAddressing][dev.konraditurbe.osmosis.camera.PathAddressing]
- * knows nothing about indices.
- */
+/** Addresses indexed album records using the HTTP route selected for the camera. */
 object DcfAddressing : MediaAddressing {
 
-    override fun original(f: CameraFile): String = DcfUrls.of(f.fileIndex, DcfUrls.ORG)
+    enum class Route { V1, V2, STATIC }
+
+    override fun original(f: CameraFile): String = when (f.dcfRoute) {
+        Route.V1 -> DcfUrls.of(f.fileIndex, DcfUrls.ORG, f.segmentIndex)
+        Route.V2 -> PathAddressing.byPath(f.storage, f.path)
+        Route.STATIC -> "/${f.path}"
+    }
 
     /**
      * A video's thumbnail is its [THM][DcfUrls.THM]. **A still has no rendition on the card at all** —
@@ -29,9 +26,11 @@ object DcfAddressing : MediaAddressing {
      * every thumbnail over the datalink, which is strictly one-at-a-time and leases a transfer slot per
      * image — the source of a long-running stall in the grid. This is a deliberate deviation.
      */
-    override fun thumbnail(f: CameraFile): String =
-        if (f.isVideo) DcfUrls.of(f.fileIndex, DcfUrls.THM)
-        else CameraFile.EXIF_THUMB + DcfUrls.of(f.fileIndex, DcfUrls.ORG)
+    override fun thumbnail(f: CameraFile): String = when {
+        f.dcfRoute == Route.V1 && f.isVideo -> DcfUrls.of(f.fileIndex, DcfUrls.THM, f.segmentIndex)
+        f.ext == "JPG" -> CameraFile.EXIF_THUMB + original(f)
+        else -> ""
+    }
 
     /**
      * Videos take the low-res [LRF][DcfUrls.LRF] proxy — measured ~7× smaller than the original and the
@@ -40,5 +39,7 @@ object DcfAddressing : MediaAddressing {
      * original.
      */
     override fun previewChain(f: CameraFile): List<String> =
-        listOf(DcfUrls.of(f.fileIndex, if (f.isVideo) DcfUrls.LRF else DcfUrls.SCR), original(f))
+        if (f.dcfRoute == Route.V1)
+            listOf(DcfUrls.of(f.fileIndex, if (f.isVideo) DcfUrls.LRF else DcfUrls.SCR, f.segmentIndex), original(f))
+        else listOf(original(f))
 }

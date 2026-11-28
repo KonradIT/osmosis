@@ -30,11 +30,7 @@ class SdListTransferTest {
             0x4A, sub.toByte(), (lenFlags and 0xFF).toByte(), (lenFlags shr 8).toByte(),
             ctr.toByte(), 0, 0, 0, 0, 0,
         ) + chunk
-        val len = payload.size + 13
-        return byteArrayOf(
-            0x55, (len and 0xFF).toByte(), ((len shr 8) and 0x03).toByte(), 0x00,
-            0x01, 0x02, 0x03, 0x04, 0x00, 0x00, 0x27,
-        ) + payload + byteArrayOf(0, 0)
+        return dev.konraditurbe.osmosis.duml.DjiMessage(0x0201, 0x0403, 0x270000, payload).encode()
     }
 
     private fun state(ctr: Int) = frame(0x03, ctr)
@@ -163,6 +159,34 @@ class SdListTransferTest {
         val t = transfer()
         for (step in 0..9) assertEquals("step $step", Action.WAIT, t.next(step, Answer.STREAMING, step * 5))
         assertEquals(Action.RELEASE, t.next(10, Answer.DONE, 45))
+    }
+
+    /**
+     * Issue #32: an Action 1 list declared 1048 bytes and stopped at 918. Its transfer asks for the
+     * missing chunk on each quiet step, a few times, before it is released.
+     */
+    @Test
+    fun `a stream short of its own header asks for the missing chunk before it is released`() {
+        val t = transfer()
+        assertEquals(Action.WAIT, t.next(0, Answer.STREAMING, 0, gap = true))
+        for (n in 1..ListTransfer.MAX_RESENDS)
+            assertEquals("request $n", Action.RESEND, t.next(n, Answer.STREAMING, 0, gap = true))
+        assertEquals(Action.RELEASE, t.next(ListTransfer.MAX_RESENDS + 1, Answer.STREAMING, 0, gap = true))
+    }
+
+    @Test
+    fun `a resent chunk that completes the list ends the requests`() {
+        val t = transfer()
+        assertEquals(Action.WAIT, t.next(0, Answer.STREAMING, 0, gap = true))
+        assertEquals(Action.RESEND, t.next(1, Answer.STREAMING, 0, gap = true))
+        assertEquals(Action.RELEASE, t.next(2, Answer.DONE, 16))
+    }
+
+    @Test
+    fun `a store with nothing older to give is never held for a resend`() {
+        val t = transfer(hold = false)
+        assertEquals(Action.WAIT, t.next(0, Answer.STREAMING, 0, gap = true))
+        assertEquals(Action.RELEASE, t.next(1, Answer.STREAMING, 0, gap = true))
     }
 
     /** A store past its end marker, or never populated, keeps the old timing: step 1, no proceed, no waiting. */

@@ -19,14 +19,21 @@ object DjiCrc {
 
     // CRC-16: spec init=0x496C, poly=0x1021, refIn=true, refOut=true.
     // Reflected form: init=reflect16(0x496C)=0x3692, poly=reflect16(0x1021)=0x8408.
-    fun computeCrc16(data: ByteArray, initial: Int = 0x3692, poly: Int = 0x8408): Int {
-        var crc = initial and 0xFFFF
-        for (b in data) {
-            crc = crc xor (b.toInt() and 0xFF)
-            for (i in 0 until 8) {
-                crc = if ((crc and 0x01) != 0) (crc ushr 1) xor poly else crc ushr 1
-            }
+    private val crc16Table = IntArray(256) { byte -> crc16Byte(byte, 0x8408) }
+
+    private fun crc16Byte(value: Int, poly: Int): Int {
+        var crc = value
+        repeat(8) { crc = if (crc and 1 != 0) (crc ushr 1) xor poly else crc ushr 1 }
+        return crc
+    }
+
+    fun computeCrc16(data: ByteArray, initial: Int = 0x3692, poly: Int = 0x8408,
+                     offset: Int = 0, length: Int = data.size - offset): Int {
+        var crc = initial and 0xffff
+        for (i in offset until offset + length) {
+            val byte = (crc xor data[i].toInt()) and 0xff
+            crc = (crc ushr 8) xor if (poly == 0x8408) crc16Table[byte] else crc16Byte(byte, poly)
         }
-        return crc and 0xFFFF
+        return crc and 0xffff
     }
 }

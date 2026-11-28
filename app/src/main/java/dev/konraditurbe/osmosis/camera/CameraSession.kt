@@ -1,10 +1,26 @@
 package dev.konraditurbe.osmosis.camera
 
+import dev.konraditurbe.osmosis.ble.CameraModel.LegacyActionAlbum
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.StorageRules
+import dev.konraditurbe.osmosis.core.AlbumJpeg
+import dev.konraditurbe.osmosis.core.AlbumVideo
+import dev.konraditurbe.osmosis.dcf.ActionFileTransfer
+import dev.konraditurbe.osmosis.dcf.AlbumFrames
+import dev.konraditurbe.osmosis.dcf.DcfAddressing.Route
+import dev.konraditurbe.osmosis.dcf.DcfRecords
+import dev.konraditurbe.osmosis.dcf.DcfTransferProbe
 import dev.konraditurbe.osmosis.duml.DjiCrc
+import dev.konraditurbe.osmosis.net.ActionHttpMedia
 import dev.konraditurbe.osmosis.net.DumlSession
 import dev.konraditurbe.osmosis.net.DumlTransport
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * A media session with an **Osmo camera** — registration, the CompositePack media list (`0x00/0x26`)
@@ -26,7 +42,39 @@ class CameraSession(
     log: (String) -> Unit,
     port: Int = 9004,
     tcpPoke: Boolean = true,
+    /**
+     * `--ez probe4a true` — run [probeTransferKinds] on an Action-1 manifest.
+     *
+     * **Default off, deliberately.** It ran unattended in the first probe build, and that build is the
+     * one where a tester's Action 1 started rebooting. The probe is not established as the cause — the
+     * same build also made the grid non-empty for the first time, so preview became reachable in the
+     * same step — but sending speculative transfer frames to firmware is exactly the kind of thing that
+     * could do it, and it is not a tester's job to run an experiment we can't yet exonerate.
+     */
+    private val probeTransfers: Boolean = false,
+    private val legacyAlbum: LegacyActionAlbum? = null,
+    restoreAfterRejoin: Int? = null,
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
+
+    private val httpViaWorkMode = legacyAlbum == LegacyActionAlbum.ACTION_1
+    /** List frames must pass their CRC16 too. See [forEachListFrame]. */
+    private val strictListFrames = legacyAlbum == LegacyActionAlbum.ACTION_1
+    private var dcfRoute = if (legacyAlbum == LegacyActionAlbum.ACTION_3) Route.V2 else Route.V1
+    init { logWorkMode = httpViaWorkMode }
+
+    /** The work mode that opened `:80` this session, held for browse and restored on teardown. */
+    @Volatile private var httpWorkMode: Int? = null
+
+    /** What the camera was in before we touched it, for [close] to put back. */
+    @Volatile private var originalWorkMode: Int? = null
+    @Volatile private var inheritedWorkMode = restoreAfterRejoin
+    internal val captureModeToRestore: Int?
+        get() = if (httpWorkMode != null) originalWorkMode else inheritedWorkMode
+    private val albumLock = Any()
+    @Volatile private var closing = false
+
+    @Volatile override var httpServing: Boolean? = null
+        private set
 
     /**
      * Remaining hex-dump budget for this session, in bytes of manifest.
@@ -223,6 +271,13 @@ class CameraSession(
      *
      * The proceed was first sent on the drone's precedent. An Action 6 then delivered its card's list
      * after it on every older page (issue #53); whether the data would have come without it is not known.
+     *
+     * [RESEND][Action.RESEND] is for a stream that went quiet with a known hole: [next]'s `gap` says the
+     * answer's own header declares more than arrived. It is asked for up to [MAX_RESENDS] times, a
+     * quiet step apart, before the transfer is released. Retail AC101 firmware sends every list chunk
+     * without waiting for an ACK, then keeps the transfer open for about six seconds (a one-second push
+     * timer, five pushes) and resends the chunks an ACK lists as missing (`DjiTransSrv_DoResend`,
+     * "ReSend List seq"). A 16-file Action 1 list lost its second chunk and showed an empty grid.
      */
     internal class ListTransfer(
         val ctr: Int,
@@ -232,22 +287,31 @@ class CameraSession(
         private val maxSteps: Int,
         private val hold: Boolean = true,
     ) {
-        enum class Action { WAIT, PROCEED, RELEASE }
+        enum class Action { WAIT, PROCEED, RESEND, RELEASE }
 
         var released = false
             private set
         private var proceededAt = -1
         private var lastRecords = -1
         private var quiet = 0
+        private var resends = 0
 
-        /** [step] counts collect steps since the query went out; [records] is this store's records in so far. */
-        fun next(step: Int, answer: Answer, records: Int): Action {
+        /**
+         * [step] counts collect steps since the query went out; [records] is this store's records in so
+         * far; [gap] is true when the answer is known to be missing a chunk the camera could resend.
+         */
+        fun next(step: Int, answer: Answer, records: Int, gap: Boolean = false): Action {
             if (released) return Action.WAIT
             quiet = if (records == lastRecords) quiet + 1 else 0
             lastRecords = records
             if (hold && answer == Answer.WAITING && proceededAt < 0) {
                 proceededAt = step
                 return Action.PROCEED
+            }
+            if (hold && gap && answer != Answer.DONE && quiet >= quietSteps && resends < MAX_RESENDS) {
+                resends++
+                quiet = 0
+                return Action.RESEND
             }
             val due = !hold || when (answer) {
                 Answer.DONE, Answer.EMPTY -> true
@@ -258,6 +322,11 @@ class CameraSession(
             if (step < minStep || !due) return Action.WAIT
             released = true
             return Action.RELEASE
+        }
+
+        companion object {
+            /** Resend requests per transfer. Each asks for one chunk, so a list can be up to this many chunks short. */
+            const val MAX_RESENDS = 3
         }
     }
 
@@ -274,6 +343,18 @@ class CameraSession(
     /** The release and proceed frames for request [ctr]: the SD ones with that counter at byte 4. */
     internal fun listRelease(ctr: Int) = SD_RELEASE.copyOf().also { it[4] = ctr.toByte() }
     internal fun listProceed(ctr: Int) = SD_PROCEED.copyOf().also { it[4] = ctr.toByte() }
+
+    /**
+     * The `4A 02` ACK for request [ctr] that confirms chunks before [chunk] and lists [chunk] as missing:
+     * `[confirm:u32 @10][missing pairs:u8 @14][seq:u32][count:u32]`. Retail AC101 V01.10.00.40 reads
+     * those fields in `DjiTransSrv_MainProc` (`0x47db68` to `0x47dbf0`) and queues the pair for
+     * `DjiTransSrv_DoResend`. The proceed above is the same frame with nothing confirmed or missing.
+     */
+    internal fun listResend(ctr: Int, chunk: Long): ByteArray =
+        java.nio.ByteBuffer.allocate(23).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+            put(0x4A).put(0x02).putShort((0x1000 or 23).toShort()).putShort(ctr.toShort()).putInt(0)
+            putInt(chunk.toInt()).put(1).putInt(chunk.toInt()).putInt(1)
+        }.array()
     // What each store's query last came to ([answerState] over the page's own frames), and the stores
     // that have nothing older to give: past their end marker, or given up on. See [unansweredStores].
     private val lastAnswers = HashMap<Int, Answer>()
@@ -287,6 +368,28 @@ class CameraSession(
     private val seenKeys = HashSet<String>()
 
 
+    /** AC101's general ping renews its app-link timer. The socket owner sends it during lists,
+     * HTTP checks, idle browsing and file transfers. A fresh handshake starts a new timer. */
+    private fun startAction1Heartbeat() {
+        val payload = byteArrayOf(1, 0) // Mimo's Wi-Fi link and foreground state
+        var lastPing = System.nanoTime()
+        var count = 0
+        var maxGapMs = 0L
+        fun ping() {
+            val now = System.nanoTime()
+            val elapsed = now - lastPing
+            if (closing || (count > 0 && elapsed < 500_000_000L)) return
+            sendDuml(0x00, 0x00, payload, receiverType = 1, receiverId = 0, cmdType = 0)
+            lastPing = now
+            count++
+            maxGapMs = maxOf(maxGapMs, elapsed / 1_000_000L)
+            if (count == 1 || count % 60 == 0 || elapsed >= 2_000_000_000L)
+                log("datalink: Action 1 Wi-Fi heartbeat count=$count maxGap=${maxGapMs}ms")
+        }
+        tx.onReceivePoll = ::ping
+        ping()
+    }
+
     /**
      * Bring the datalink up ([openDatalink]) and then register: device-info, register, gimbal-init and
      * the param subscriptions. Leaves the socket open and the send sequence synced on success.
@@ -295,7 +398,18 @@ class CameraSession(
      * fresh, in-window session the list does.
      */
     private fun openAndRegister(ip: String, subscribe: Boolean = true): Boolean {
-        if (!openDatalink(ip)) return false
+        if (closing || !openDatalink(ip) || closing) return false
+
+        // AC101 routes the album commands directly to the camera. Its firmware logs route failures
+        // for the newer registration, subscriptions and gimbal init (receivers 8/2, 8/1 and 3/0).
+        // openDatalink already established and acknowledged its UDP session.
+        if (legacyAlbum == LegacyActionAlbum.ACTION_1) {
+            startAction1Heartbeat()
+            // A restore sent on the old Wi-Fi network may have missed the camera. Keep ownership
+            // only if the fresh session confirms that the camera is still in our album mode.
+            if (inheritedWorkMode != null) reconcileRejoinedMode(readWorkMode() ?: workModeReported)
+            return true
+        }
 
         // Registration.
         sendDuml(0x00, 0x81, appDeviceInfo(), receiverType = 0x08, receiverId = 2, cmdType = 4)
@@ -338,7 +452,10 @@ class CameraSession(
         // make a moment later, it is idempotent, and [startKeepAlive] skips it when it already holds.
         // Runs on this thread, which is the session thread and the only one sending right now, so the
         // sequence-interleaving rule that puts this on the keep-alive thread still holds.
-        enterPlaybackConfirmed()
+        //
+        // Not on a work-mode camera: an Action 1 answers 0x02/0x0c with 0xe0 every time, and the
+        // 0x01/0x01 fallback after it never moved one either. Its list works without playback.
+        if (!httpViaWorkMode) enterPlaybackConfirmed()
 
         // No retry on an empty answer, deliberately. There WAS one, added for a log where a camera
         // handshook, streamed status and served no media across several connects — but the cause was
@@ -366,9 +483,101 @@ class CameraSession(
         noteEndedStores(files, sdOldest != null, intOldest != null)
         log("datalink: parsed ${files.size} media files (newest page; ${cursorLog()}; more=$moreAvailable)")
         logPageEvidence(files, files, NEWEST_SD, NEWEST_INTERNAL)
+        if (legacyAlbum == LegacyActionAlbum.ACTION_1) {
+            // AC101 has no HTTP route to probe. Mimo sends its originals through the datalink handler,
+            // and port 80 refused every connection in every tester session (issue #32), in RECORD and
+            // after 30 s in TRANSCODE alike. The check cost about 32 s a connect and never succeeded.
+            httpServing = false
+            log("datalink: Action 1 album uses the datalink for originals, thumbnails and stills (no HTTP check)")
+        } else if (legacyAlbum != null && files.any { it.isIndexed }) {
+            // Prefer small originals. A missing or stale item should not hide a valid route.
+            val samples = files.filter { it.isIndexed }.sortedBy { it.sizeBytes }.take(2)
+            val probe = ActionHttpMedia(ip, log)
+            val route = checkAlbumRoute(samples, listOf(dcfRoute), probe).route
+            httpServing = route != null
+            if (route != null) dcfRoute = route
+            log("datalink: HTTP media route: ${route ?: "no original verified"}")
+        }
         onFetchProgress?.invoke(100)
-        return files
+        return files.map { if (it.isIndexed) it.copy(dcfRoute = dcfRoute) else it }
     }
+
+    private data class AlbumCheck(val route: Route?, val peerActive: Boolean)
+
+    private fun checkAlbumRoute(samples: List<CameraFile>, routes: List<Route>, probe: ActionHttpMedia,
+                                retry: Boolean = false): AlbumCheck {
+        var lastRx = System.nanoTime()
+        var lastPresence = lastRx
+        val deadline = lastRx + (if (retry) 30L else 12L) * 1_000_000_000L
+        var peerActive = true
+        val route = probe.checkWhileConnected(samples, routes, retry) {
+            if (closing || !tx.isOpen || System.nanoTime() >= deadline) return@checkWhileConnected false
+            val packets = recvAll(200)
+            parseStatus(packets)
+            val now = System.nanoTime()
+            if (packets.isNotEmpty()) lastRx = now
+            sendAck()
+            if (now - lastPresence >= 1_000_000_000L) {
+                holdPlayback()
+                lastPresence = now
+            }
+            peerActive = now - lastRx <= 3_000_000_000L
+            if (!peerActive) log("datalink: camera stopped answering during the HTTP check")
+            peerActive
+        }
+        return AlbumCheck(route, peerActive && !closing && tx.isOpen)
+    }
+
+    private fun reconcileRejoinedMode(current: Int?) {
+        val restore = inheritedWorkMode ?: return
+        if (current == null) return
+        if (current == WorkMode.TRANSCODE) {
+            originalWorkMode = restore
+            httpWorkMode = WorkMode.TRANSCODE
+        }
+        inheritedWorkMode = null
+    }
+
+    /** `0x02/0x11`: the camera's work mode, or null if it didn't answer. */
+    private fun readWorkMode(): Int? {
+        sendDuml(0x02, 0x11, ByteArray(0), receiverType = 0x01, receiverId = 0)
+        val deadline = System.nanoTime() + 1_500_000_000L
+        while (!closing && tx.isOpen && System.nanoTime() < deadline) {
+            val dg = recvAll(150)
+            parseStatus(dg)
+            val reply = findReply(dg, 0x02, 0x11)
+            if (reply != null) {
+                val mode = WorkMode.parseGetReply(reply)
+                if (mode == null) log("datalink: GetMode reply not understood: ${reply.hexStr()}")
+                sendAck()
+                return mode
+            }
+            sendAck()
+        }
+        log("datalink: GetMode (0x02/0x11) — no reply")
+        return null
+    }
+
+    /**
+     * `0x02/0x10`: switch the work mode. Returns the reply's status byte (0 = ok), or null when nothing
+     * came back within 3 s. That timeout is DJI Fly's own for this command: a mode switch is slow.
+     */
+    private fun setWorkMode(mode: Int): Int? {
+        sendDuml(0x02, 0x10, WorkMode.setPayload(mode), receiverType = 0x01, receiverId = 0)
+        val deadline = System.nanoTime() + 3_000_000_000L
+        var beat = 0
+        while (!closing && tx.isOpen && System.nanoTime() < deadline) {
+            val dg = recvAll(150)
+            parseStatus(dg)
+            val reply = findReply(dg, 0x02, 0x10)
+            sendAck()
+            reply?.firstOrNull()?.let { return it.toInt() and 0xFF }
+            if (++beat % 6 == 0) holdPlayback()     // the ~1 Hz presence beat, so the session holds
+        }
+        return null
+    }
+
+    private fun ByteArray.hexStr() = joinToString("") { "%02x".format(it) }
 
     /**
      * One `0x00/0x88` presence beat, sent from inside a collect loop.
@@ -380,8 +589,10 @@ class CameraSession(
      * the body, and a window where a store-specific query could be answered from the wrong mode. Each
      * collect batch is a ~700-800 ms receive, so one beat per batch is the documented ~1 Hz cadence.
      */
-    private fun holdPlayback() =
-        sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
+    private fun holdPlayback() {
+        if (legacyAlbum != LegacyActionAlbum.ACTION_1)
+            sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
+    }
 
     /**
      * The fast initial load: SD query, release of its transfer, internal query, for the newest ~45
@@ -417,8 +628,9 @@ class CameraSession(
         var internalAskedAt = -1
         var internalFrom = 0
         var lastCount = -1
+        val frames = AlbumFrames(tx.sessionId)
         for (batch in 0 until batches) {
-            for (r in recvAll(800)) blob.write(r); sendAck()
+            for (r in withSplitFrames(recvAll(800), frames)) blob.write(r); sendAck()
             val raw = blob.toByteArray()
             val count = distinctPaths(blob)
             perBatch(batch, count, count != lastCount)
@@ -431,6 +643,41 @@ class CameraSession(
             } else if (stepTransfer(internal, batch - internalAskedAt, raw, internalFrom)) break
         }
     }
+
+    /**
+     * [datagrams] as they go into a list blob, each preceded by any frame that began in an earlier
+     * envelope of the same channel and ends in it.
+     *
+     * A list blob is scanned for frames across whole datagrams, so a frame split between two SW UDP
+     * envelopes carries the second envelope's 20-byte header inside it, fails its checksum and is lost.
+     * The drone's list lost chunks that way until [dev.konraditurbe.osmosis.drone.DroneSession] began
+     * stripping the headers. Retail AC101 firmware sends a list's chunks back to back without waiting for
+     * an ACK (`DjiTransSrv_SendListFrag` raises event `0x10` and `MainProc` sends the next), so a 16-file
+     * Action 1 list went out as a 918-byte chunk and a 130-byte one; the second never decoded (issue #32).
+     * A split like this is the likeliest reason. Frames that fit inside one envelope are left to the
+     * datagram itself, so nothing is counted twice.
+     */
+    private fun withSplitFrames(datagrams: List<ByteArray>, frames: AlbumFrames?): List<ByteArray> {
+        if (frames == null || datagrams.isEmpty()) return datagrams
+        val out = ArrayList<ByteArray>(datagrams.size)
+        for (dg in datagrams) {
+            frames.frames(dg) { frame, carried ->
+                if (carried) {
+                    out += frame
+                    rejoinedFrames++
+                }
+            }
+            out += dg
+        }
+        return out
+    }
+
+    /** Frames [withSplitFrames] rebuilt since [collectStores] last reported them. Diagnostic only. */
+    @Volatile private var rejoinedFrames = 0
+
+    /** Test seam: a list blob built from [datagrams] the way the collect loops build it. */
+    internal fun listBlobForTest(datagrams: List<ByteArray>, session: Int): ByteArray =
+        withSplitFrames(datagrams, AlbumFrames(session)).fold(ByteArray(0)) { acc, b -> acc + b }
 
     /** A store's transfer for the batch-paced paths (~800 ms a step). */
     private fun transferByBatch(ctr: Int, hold: Boolean = true) = ListTransfer(
@@ -452,15 +699,21 @@ class CameraSession(
     private fun stepTransfer(t: ListTransfer, step: Int, raw: ByteArray, from: Int = 0): Boolean {
         val name = if (t.ctr == SD_QUERY_CTR) "SD" else "internal"
         val bytes = manifestBytes(raw, requestCtr = t.ctr)
-        val records = countMediaPaths(bytes)
+        val records = listRecordCount(bytes)
         var answer = answerState(raw, t.ctr, from)
         // Where the body writes a count, every declared record being in settles it, flag or no flag.
         if (answer == Answer.STREAMING && bytes.size >= 4 && u32le(bytes, 0) in 1..COUNT_MAX.toLong() &&
             records >= u32le(bytes, 0)) answer = Answer.DONE
-        when (t.next(step, answer, records)) {
+        val gap = action1ListGap(raw, t.ctr, from)
+        when (t.next(step, answer, records, gap != null)) {
             ListTransfer.Action.PROCEED -> {
                 log("datalink: $name list raised a state frame before any data — sending proceed (4A 02)")
                 sendDuml(0x00, 0x26, listProceed(t.ctr), receiverType = 0x01, receiverId = 0)
+            }
+            ListTransfer.Action.RESEND -> if (gap != null) {
+                log("datalink: $name list stopped at ${bytes.size} of ${u32le(bytes, 4)} bytes — " +
+                    "asking the camera to resend chunk $gap (4A 02)")
+                sendDuml(0x00, 0x26, listResend(t.ctr, gap), receiverType = 0x01, receiverId = 0)
             }
             ListTransfer.Action.RELEASE -> {
                 if (answer == Answer.WAITING || answer == Answer.SILENT)
@@ -517,14 +770,15 @@ class CameraSession(
         log("datalink: SD store answered empty — re-asking once (it may not have been mounted yet)")
         sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, NEWEST_SD), receiverType = 0x01, receiverId = 0)
         val sd = transferByBatch(SD_QUERY_CTR)
+        val frames = AlbumFrames(tx.sessionId)
         for (batch in 0 until 6) {
-            for (r in recvAll(700)) blob.write(r); sendAck()
+            for (r in withSplitFrames(recvAll(700), frames)) blob.write(r); sendAck()
             holdPlayback()
             // Judge this query by its own frames: the blob still holds the first, empty answer.
             if (!sd.released) stepTransfer(sd, batch, blob.toByteArray(), from = first.size)
         }
         val again = blob.toByteArray()
-        val n = countMediaPaths(manifestBytes(again, requestCtr = SD_QUERY_CTR))
+        val n = listRecordCount(manifestBytes(again, requestCtr = SD_QUERY_CTR))
         log("datalink: SD retry -> $n record(s)")
         return again
     }
@@ -598,7 +852,8 @@ class CameraSession(
     /** One older page in a fresh playback session; advances both cursors + [moreAvailable]; returns new files. */
     private fun freshSessionPage(ip: String): List<CameraFile> {
         if (!openAndRegister(ip, subscribe = false)) { log("datalink: next-page open FAILED"); return emptyList() }
-        sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)     // enter playback
+        if (httpViaWorkMode) ensureHttpWorkMode()
+        else sendDuml(0x02, 0x0c, hex("01010001"), receiverType = 0x01, receiverId = 0)     // enter playback
         for (b in 0 until 2) { recvAll(250); sendAck() }
         val blob = java.io.ByteArrayOutputStream()
         sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, sdCursor), receiverType = 0x01, receiverId = 0)
@@ -693,8 +948,9 @@ class CameraSession(
         val blob = java.io.ByteArrayOutputStream()
         sendDuml(0x00, 0x26, groupCmd(1, handle, GROUP_EXPAND_LIMIT), receiverType = 0x01, receiverId = 0)
         var lastCount = -1; var stable = 0
+        val frames = AlbumFrames(tx.sessionId)
         for (batch in 0 until 10) {
-            for (r in recvAll(700)) blob.write(r); sendAck()
+            for (r in withSplitFrames(recvAll(700), frames)) blob.write(r); sendAck()
             if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"), receiverType = 0x01, receiverId = 0)
             val c = distinctPaths(blob)
             if (batch >= 3 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
@@ -743,7 +999,7 @@ class CameraSession(
         // Xtra page declaring 21, delivering 17, marker present, 0003–0006 gone.
         info.incomplete -> true
         info.endMarker -> false
-        else -> sliceSize >= pageSize
+        else -> maxOf(sliceSize, info.records) >= pageSize
     }
 
     /**
@@ -868,7 +1124,8 @@ class CameraSession(
      * own list boundary stand in.
      */
     internal fun storeOf(f: CameraFile): Int =
-        if (f.storageKnown) f.storage
+        if (f.isIndexed) dev.konraditurbe.osmosis.dcf.DcfIndex.storage(f.fileIndex)
+        else if (f.storageKnown) f.storage
         else StorageRules.mountGuess(singleSdStorage = false, handle = f.handle, cmdHandle = f.cmdHandle)
             ?: f.group
 
@@ -884,7 +1141,7 @@ class CameraSession(
      * not a very old file, and taking it would park the cursor at the bottom forever.
      */
     private fun oldestHandle(page: List<CameraFile>, store: Int, below: Long): Long? =
-        storeSlice(page, store).map { it.handle }.filter { it != 0L && it < below }.minOrNull()
+        storeSlice(page, store).map { if (it.isIndexed) it.fileIndex else it.handle }.filter { it != 0L && it < below }.minOrNull()
 
     /** Both cursors in hex, for the log — the line that tells you which store is still advancing. */
     private fun cursorLog() = "sd=0x%08x int=0x%08x".format(sdCursor, internalCursor)
@@ -939,6 +1196,7 @@ class CameraSession(
         val sdTransfer: ListTransfer? = null,       // set = the query is an SD list: release its transfer first, then prime
         val internalTransfer: ListTransfer? = null, // set with it: the last prime frame is the internal query, and the
                                                     // page is over when this transfer is released
+        val frames: AlbumFrames? = null,            // a stream query's frames split across envelopes ([withSplitFrames])
     ) {
         val blob = java.io.ByteArrayOutputStream()   // raw datagrams for a stream query
         @Volatile var reply: ByteArray? = null
@@ -989,7 +1247,8 @@ class CameraSession(
         val c = PendingCmd(0x00, 0x26, payload, 0x01, 0, 2, 0x00, 0x27,
             System.currentTimeMillis() + timeoutMs, primeFrames = primeFrames.toList(), stream = true,
             sdTransfer = if (sdList) transferByTick(SD_QUERY_CTR, holds(SD_STORE)) else null,
-            internalTransfer = if (sdList) transferByTick(INTERNAL_QUERY_CTR, holds(INTERNAL_STORE)) else null)
+            internalTransfer = if (sdList) transferByTick(INTERNAL_QUERY_CTR, holds(INTERNAL_STORE)) else null,
+            frames = AlbumFrames(tx.sessionId))
         cmdQueue.add(c)
         while (!c.done && System.currentTimeMillis() < c.deadlineMs + 600) runCatching { Thread.sleep(30) }
         return c.reply
@@ -1181,8 +1440,132 @@ class CameraSession(
         return true
     }
 
+    override val datalinkOriginals: Boolean
+        get() = datalinkJpegs && httpServing == false
+
+    override val datalinkJpegs: Boolean
+        get() = legacyAlbum == LegacyActionAlbum.ACTION_1 && handshakeOk && tx.isOpen && !closing
+
+    override val datalinkVideo: Boolean get() = datalinkJpegs && keepAliveOn
+    private val requestedVideo = AtomicReference<ActionVideoPlayback?>(null)
+
+    override fun openAlbumVideo(file: CameraFile, listener: AlbumVideo.Listener): AlbumVideo? {
+        if (!datalinkVideo || !file.isActionDcf || !file.isVideo) return null
+        val playback = ActionVideoPlayback(file.fileIndex, listener)
+        requestedVideo.getAndSet(playback)?.close()
+        return playback
+    }
+
+    private fun playAlbumVideo(playback: ActionVideoPlayback) {
+        var restore: Int? = null
+        var failure: String? = null
+        try {
+            if (playback.closed || !keepAliveOn) return
+            val previous = readWorkMode() ?: workModeReported ?: error("unknown camera work mode")
+            if (playback.closed || !keepAliveOn) return
+            if (previous != WorkMode.TRANSCODE) {
+                restore = previous
+                originalWorkMode = previous
+                httpWorkMode = WorkMode.TRANSCODE
+                val status = setWorkMode(WorkMode.TRANSCODE)
+                check(status == null || status == 0) { "TRANSCODE refused (status=$status)" }
+                check((readWorkMode() ?: workModeReported) == WorkMode.TRANSCODE) {
+                    "camera did not enter TRANSCODE"
+                }
+            }
+            if (playback.closed || !keepAliveOn) return
+            log("datalink: Action 1 playback index=${playback.index}")
+            tx.withDownloadPolling {
+                playback.play(tx.sessionId, { keepAliveOn && !closing && tx.isOpen },
+                    { cmd, body -> sendDuml(2, cmd, body, receiverType = 1, receiverId = 0) },
+                    { recvAll(30) }, tx::sendAck)
+            }
+        } catch (e: Exception) {
+            failure = e.message ?: e.javaClass.simpleName
+            log("datalink: Action 1 playback index=${playback.index}: $failure")
+        } finally {
+            if (restore != null && !closing && tx.isOpen) {
+                runCatching { if (setWorkMode(restore) == 0) httpWorkMode = null }
+                    .onFailure { log("datalink: restoring work mode after Action 1 playback: ${it.message}") }
+            }
+            requestedVideo.compareAndSet(playback, null)
+            playback.finish(failure)
+        }
+    }
+
+    private val albumQueue = ArrayBlockingQueue<FutureTask<Boolean>>(1)
+    private var nextAlbumTransferId = 0x100
+
+    override fun fetchAlbumJpeg(file: CameraFile, rendition: AlbumJpeg): ByteArray? {
+        val bytes = java.io.ByteArrayOutputStream()
+        return if (transferAlbumFile(file, 0, bytes, rendition) {}) bytes.toByteArray() else null
+    }
+
+    override fun downloadOriginal(file: CameraFile, offset: Long, output: java.io.OutputStream,
+                                  progress: (Long) -> Unit): Boolean {
+        requestedVideo.get()?.close()
+        return transferAlbumFile(file, offset, output, null, progress)
+    }
+
+    // Serialize with pagination so its fresh-session fallback cannot retire the socket mid-file.
+    @Synchronized
+    private fun transferAlbumFile(file: CameraFile, offset: Long, output: java.io.OutputStream,
+                                  jpeg: AlbumJpeg?, progress: (Long) -> Unit): Boolean {
+        fun available() = if (jpeg == null) datalinkOriginals
+            else datalinkJpegs && requestedVideo.get()?.closed != false
+        if (!available() || !keepAliveOn || !file.isActionDcf || Thread.currentThread().isInterrupted) return false
+        val cancelled = AtomicBoolean(false)
+        val task = FutureTask {
+            val buffered = output.buffered(64 * 1024)
+            try {
+                fun nextId(): Int {
+                    val id = nextAlbumTransferId
+                    nextAlbumTransferId = if (id == 0xffff) 0x100 else id + 1
+                    return id
+                }
+                fun connected() = available() && keepAliveOn && !cancelled.get()
+                fun runTransfer(transfer: ActionFileTransfer) = tx.withDownloadPolling {
+                    transfer.run(tx.sessionId,
+                        send = { sendDuml(0, 0x26, it, receiverType = 1, receiverId = 0) },
+                        receive = { recvAll(30) }, ackWindow = ::sendAck,
+                        connected = ::connected, log = log)
+                }
+                // An original restarts from its contiguous end after a stall (see fetchOriginal).
+                // A JPEG is small and starts at zero, so it stays a single transfer.
+                if (jpeg != null) runTransfer(ActionFileTransfer(file, offset, nextId(), buffered, jpeg, progress))
+                else ActionFileTransfer.fetchOriginal(file, offset, buffered, progress, ::nextId, ::connected, log,
+                    ::runTransfer)
+            } finally {
+                buffered.flush()
+            }
+        }
+        if (!albumQueue.offer(task)) return false
+        // Once the owner takes the task it may be writing to MediaStore. Let it return the stream
+        // before the downloader closes it, including on disconnect or caller interruption.
+        var interrupted = false
+        try {
+            while (true) {
+                if ((!keepAliveOn || closing) && albumQueue.remove(task)) return false
+                try {
+                    return task.get(250, TimeUnit.MILLISECONDS)
+                } catch (_: TimeoutException) {
+                    // Observe teardown even when it happens before the owner takes the task.
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                    cancelled.set(true)
+                    if (albumQueue.remove(task)) return false
+                } catch (e: ExecutionException) {
+                    log("datalink: album transfer failed: ${e.cause?.message}")
+                    return false
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
     override fun startKeepAlive() {
-        if (keepAliveOn) return
+        if (keepAliveOn || closing) return
         keepAliveOn = true
         playbackReleased = false
         resetStatus()
@@ -1193,14 +1576,21 @@ class CameraSession(
             // playbackHeld instead was wrong — that flag survives a re-registration, so a refreshed
             // session (the delete flow) would have skipped entry on a body that drops the mode when
             // the old session goes away, and written outside playback believing it held.
-            enterPlaybackConfirmed()
+            // A work-mode camera skips playback (it refuses 0x02/0x0c) and re-checks its mode instead:
+            // after a re-registration (delete, fresh page) the switch may not have survived the socket.
+            if (httpViaWorkMode) ensureHttpWorkMode() else enterPlaybackConfirmed()
             while (keepAliveOn) {
+                if (awaitingCmd == null) {
+                    albumQueue.poll()?.run()
+                    requestedVideo.get()?.let(::playAlbumVideo)
+                }
+                if (!keepAliveOn) break
                 runCatching {
                     val dg = recvAll(200)
                     parseStatus(dg)
                     awaitingCmd?.let { c ->
                         if (c.stream) {
-                            for (r in dg) c.blob.write(r)
+                            for (r in withSplitFrames(dg, c.frames)) c.blob.write(r)
                             c.ticks++
                             val sd = c.sdTransfer
                             val internal = c.internalTransfer
@@ -1266,8 +1656,7 @@ class CameraSession(
                     // ~1 Hz app-presence beat (tick is 300 ms). Without it the camera drops playback a
                     // second after we set it — see APP_PRESENCE. This is the beat 0x02/0x8E was standing
                     // in for, badly: we polled it *during* playback, which is what knocked the mode out.
-                    if (tick % 3 == 0)
-                        sendDuml(0x00, 0x88, APP_PRESENCE, receiverType = 0x08, receiverId = 1)
+                    if (tick % 3 == 0) holdPlayback()
                     // No 0x02/0xA0 or 0x02/0x61 either. Both were polled here as "state query" and
                     // "status poll", which is not what they are: DJI's own command catalogue names them
                     // **Audio Param Get** and **Histogram Get**. Neither feeds the pill — the camera
@@ -1305,8 +1694,21 @@ class CameraSession(
                 playbackHeld = false
                 log("datalink: playback mode released")
             }
+            // Same for a work-mode switch: put the camera back in the mode we found it in, so it isn't
+            // left serving files (and out of its capture mode) after we've gone.
+            if (releasePlaybackOnExit) restoreAlbumOnClose()
             playbackReleased = true
         }.apply { isDaemon = true; name = "datalink-keepalive" }.start()
+    }
+
+    private fun restoreAlbumOnClose() {
+        val back = originalWorkMode ?: return
+        if (httpWorkMode == null || !tx.isOpen) return
+        runCatching {
+            sendDuml(0x02, 0x10, WorkMode.setPayload(back), receiverType = 0x01, receiverId = 0)
+            log("datalink: requested original work mode ${WorkMode.name(back)}")
+        }
+        httpWorkMode = null
     }
 
     /**
@@ -1318,12 +1720,17 @@ class CameraSession(
      * nothing worse than a camera sitting in playback until it sleeps.
      */
     override fun close() {
-        if (playbackHeld && keepAliveOn) {
+        synchronized(albumLock) { closing = true }
+        val video = requestedVideo.get()
+        video?.close()
+        if ((video != null || playbackHeld || (httpWorkMode != null && originalWorkMode != null)) && keepAliveOn) {
             releasePlaybackOnExit = true
             keepAliveOn = false
             val deadline = System.currentTimeMillis() + 500
             while (!playbackReleased && System.currentTimeMillis() < deadline) runCatching { Thread.sleep(25) }
             releasePlaybackOnExit = false
+        } else if (!keepAliveOn) {
+            restoreAlbumOnClose()
         }
         super.close()
     }
@@ -1558,6 +1965,13 @@ class CameraSession(
         return status == 0
     }
 
+    private fun listRecordCount(bytes: ByteArray): Int {
+        val paths = countMediaPaths(bytes)
+        if (paths == 0 && legacyAlbum != null && DcfRecords.decodeAction1(bytes, variableRecords = true).isNotEmpty())
+            return u32le(bytes, 0).toInt()
+        return paths
+    }
+
     /**
      * Count distinct media-path fields in a byte range by structure — the same `1a … 00 00 00 01`
      * "DCIM/" TLV [decodeComposite] anchors on, read by length. Used to gauge list growth while paging
@@ -1584,6 +1998,14 @@ class CameraSession(
      * still reassembled.
      */
     private fun manifestBytes(raw: ByteArray, requestCtr: Int? = null): ByteArray {
+        // An Action 1 answer can be completed by a resent chunk, which arrives after the chunks that
+        // followed it, and two resend requests can bring the same chunk twice. Within one counter the
+        // chunk sequence numbers are the camera's own, so order by them and keep each once.
+        if (requestCtr != null && legacyAlbum == LegacyActionAlbum.ACTION_1) {
+            val out = java.io.ByteArrayOutputStream()
+            for ((p, size) in action1Chunks(raw, requestCtr).values) out.write(raw, p + 10, size - 10)
+            return out.toByteArray()
+        }
         // The file list streams back as DUML data frames (cmd 0x00/0x27) whose payload is
         //   [10-byte sub-header][chunk]:  4A 01 .. .. <seq:u16le @6> 00 00, then the chunk bytes.
         // byte1==0x01 marks a data chunk; the control frames (4A 04.. start / 4A 03.. end) are 10
@@ -1593,28 +2015,11 @@ class CameraSession(
         // (e.g. "DCIM/DJI_" + "J….001/…") and silently drops from the grid. Concatenate in arrival
         // order (not seq-sorted): on multi-page lists the seq counter restarts per page.
         val out = java.io.ByteArrayOutputStream()
-        var i = 0
-        while (i + 13 <= raw.size) {
-            if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
-            val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-            if (len < 13 || i + len > raw.size) { i++; continue }
-            // Match on the frame's DUML command, not on its payload prefix. The 11-byte header is
-            // [55][len:2][crc8][target:2][id:2][type][set][cmd], so the command is right here — there
-            // was never a reason to guess from the body. `4A 01` alone also matches subscription state,
-            // which is why raising paramSubs to Mimo's 54 keys drowned the media stream in parameter
-            // names (see paramSubs). Verified against the captures: in nano_45.bin and xtra_13.bin
-            // every `4A 01` chunk arrives on 0x00/0x27 and nothing else does.
-            val cmdSet = raw[i + 9].toInt() and 0xFF
-            val cmdId = raw[i + 10].toInt() and 0xFF
-            val plStart = i + 11; val plLen = len - 13
-            // Sub-header byte 4 echoes the counter from the request that asked for this chunk (our
-            // requests put it at the same offset). That is what lets one blob be split back into the
-            // per-store answers it actually contains — see [collectStores].
-            val ctrOk = requestCtr == null || (raw[plStart + 4].toInt() and 0xFF) == requestCtr
-            if (cmdSet == 0x00 && cmdId == 0x27 && ctrOk &&
-                plLen > 10 && (raw[plStart].toInt() and 0xFF) == 0x4A && (raw[plStart + 1].toInt() and 0xFF) == 0x01
-            ) out.write(raw, plStart + 10, plLen - 10) // drop the 10-byte sub-header, keep the chunk
-            i += len
+        forEachListFrame(raw) { p, size ->
+            // The counter identifies the store. Each data frame has a ten-byte list sub-header.
+            if ((raw[p + 1].toInt() and 0xFF) == 1 &&
+                (requestCtr == null || (raw[p + 4].toInt() and 0xFF) == requestCtr))
+                out.write(raw, p + 10, size - 10)
         }
         val bytes = out.toByteArray()
         // A per-counter slice is a subset by construction, so the whole-blob comparison below would
@@ -1653,14 +2058,23 @@ class CameraSession(
         // like one list being fitted twice rather than two stores each being fitted once.
         val tally = chunkTally(raw)
         lastSlices.clear()
+        if (rejoinedFrames > 0) {
+            log("datalink: rebuilt $rejoinedFrames list frame(s) split across UDP envelopes")
+            rejoinedFrames = 0
+        }
         fun sliceOf(ctr: Int): List<CameraFile> {
             val store = if (ctr == SD_QUERY_CTR) "SD" else "internal"
             val bytes = manifestBytes(raw, requestCtr = ctr)
             val files = bytes.takeIf { it.isNotEmpty() }?.let { decodeManifest(it, store) } ?: emptyList()
+            val indexed = files.firstOrNull()?.isIndexed == true
             val info = SliceInfo(
                 declared = if (bytes.size >= 4) u32le(bytes, 0).toInt() else -1,
-                records = countMediaPaths(bytes),
-                endMarker = hasEndMarker(bytes),
+                records = when {
+                    !indexed -> countMediaPaths(bytes)
+                    bytes.size >= 8 && u32le(bytes, 4) > bytes.size -> files.size  // a short Action 1 list
+                    else -> u32le(bytes, 0).toInt()
+                },
+                endMarker = files.firstOrNull()?.isIndexed != true && hasEndMarker(bytes),
                 ended = (tally[ctr]?.get(0x03) ?: 0) > 0)
             lastSlices[if (ctr == SD_QUERY_CTR) SD_STORE else INTERNAL_STORE] = info
             lastAnswers[if (ctr == SD_QUERY_CTR) SD_STORE else INTERNAL_STORE] = answerState(raw, ctr)
@@ -1683,8 +2097,9 @@ class CameraSession(
         if (sd.isEmpty()) log("datalink: SD slice empty — reply frames by request counter: ${chunkCensus(raw)}" +
             "; SD control frames: ${controlFrames(raw, SD_QUERY_CTR)}")
         val ambiguous = sd.isNotEmpty() && internal.isNotEmpty() &&
-            sd.map { it.path }.toSet() == internal.map { it.path }.toSet()
+            sd.map { it.albumKey }.toSet() == internal.map { it.albumKey }.toSet()
         if ((sd.isEmpty() && internal.isEmpty()) || ambiguous) {
+            if (ambiguous && sd.all { it.isIndexed }) return sd
             val merged = decodeManifest(manifestBytes(raw))
             log("datalink: store split unavailable (${if (ambiguous) "both queries same list" else "no counter echo"})" +
                 " — ${merged.size} files, storage resolved per file")
@@ -1693,8 +2108,10 @@ class CameraSession(
         log("datalink: per-store lists — SD ${sd.size}, internal ${internal.size} (no probing needed)")
         // Internal first: it is the larger store on every camera we have, so on the rare overlap the
         // kept copy is the one more likely to be right.
-        return (internal.map { it.copy(storage = 1, storageKnown = true) } +
-            sd.map { it.copy(storage = 0, storageKnown = true) }).distinctBy { it.path }
+        fun fromStore(files: List<CameraFile>, mount: Int) = files.map {
+            it.copy(storage = if (it.isIndexed) it.storage else mount, storageKnown = true)
+        }
+        return (fromStore(internal, 1) + fromStore(sd, 0)).distinctBy { it.albumKey }
     }
 
     /**
@@ -1748,34 +2165,40 @@ class CameraSession(
     /** `0x00/0x27` reply frames in [raw] by request counter, then by `4A` subtype (0x04 start · 0x01 data · 0x03 end). */
     private fun chunkTally(raw: ByteArray): java.util.SortedMap<Int, MutableMap<Int, Int>> {
         val tally = sortedMapOf<Int, MutableMap<Int, Int>>()
-        var i = 0
-        while (i + 13 <= raw.size) {
-            if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
-            val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
-            if (len < 13 || i + len > raw.size) { i++; continue }
-            val plStart = i + 11
-            if ((raw[i + 9].toInt() and 0xFF) == 0x00 && (raw[i + 10].toInt() and 0xFF) == 0x27 &&
-                len - 13 >= 10 && (raw[plStart].toInt() and 0xFF) == 0x4A
-            ) {
-                val ctr = raw[plStart + 4].toInt() and 0xFF
-                val sub = raw[plStart + 1].toInt() and 0xFF
-                tally.getOrPut(ctr) { sortedMapOf() }.merge(sub, 1, Int::plus)
-            }
-            i += len
+        forEachListFrame(raw) { p, _ ->
+            val ctr = raw[p + 4].toInt() and 0xFF
+            val sub = raw[p + 1].toInt() and 0xFF
+            tally.getOrPut(ctr) { sortedMapOf() }.merge(sub, 1, Int::plus)
         }
         return tally
     }
 
     /** Visit every `0x00/0x27` `4A` frame in [raw] from offset [from] on, in arrival order, by payload offset. */
-    private inline fun forEachListFrame(raw: ByteArray, from: Int = 0, visit: (payloadAt: Int) -> Unit) {
+    private inline fun forEachListFrame(raw: ByteArray, from: Int = 0, visit: (payloadAt: Int, payloadSize: Int) -> Unit) {
         var i = from
         while (i + 13 <= raw.size) {
             if ((raw[i].toInt() and 0xFF) != 0x55) { i++; continue }
             val len = ((raw[i + 1].toInt() and 0xFF) or ((raw[i + 2].toInt() and 0xFF) shl 8)) and 0x3FF
             if (len < 13 || i + len > raw.size) { i++; continue }
+            // A UDP session ID or ACK cursor can contain 0x55. Its apparent length can grow to
+            // fit as more packets arrive, making an already decoded record disappear on the next pass.
+            if ((raw[i + 2].toInt() ushr 2) != 1 ||
+                DjiCrc.computeCrc8(raw.copyOfRange(i, i + 3)) != (raw[i + 3].toInt() and 0xFF)) {
+                i++
+                continue
+            }
+            // A frame split across two SW UDP envelopes still has a good header in a whole-datagram blob,
+            // with the second envelope's header inside its body. Read as a chunk, it puts 20 foreign bytes
+            // into an Action 1 list, and skipping its length jumps over the rebuilt copy [withSplitFrames]
+            // put after it. The other cameras keep the header-only check their fixtures were pinned with.
+            if (strictListFrames && DjiCrc.computeCrc16(raw, offset = i, length = len - 2) !=
+                ((raw[i + len - 2].toInt() and 0xFF) or ((raw[i + len - 1].toInt() and 0xFF) shl 8))) {
+                i++
+                continue
+            }
             if ((raw[i + 9].toInt() and 0xFF) == 0x00 && (raw[i + 10].toInt() and 0xFF) == 0x27 &&
                 len - 13 >= 10 && (raw[i + 11].toInt() and 0xFF) == 0x4A
-            ) visit(i + 11)
+            ) visit(i + 11, len - 13)
             i += len
         }
     }
@@ -1791,7 +2214,7 @@ class CameraSession(
      */
     internal fun answerState(raw: ByteArray, ctr: Int, from: Int = 0): Answer {
         var start = false; var state = false; var data = false; var closed = false
-        forEachListFrame(raw, from) { p ->
+        forEachListFrame(raw, from) { p, _ ->
             if ((raw[p + 4].toInt() and 0xFF) == ctr) when (raw[p + 1].toInt() and 0xFF) {
                 0x04 -> start = true
                 0x03 -> state = true
@@ -1806,6 +2229,33 @@ class CameraSession(
         }
     }
 
+    /** An Action 1 answer's data chunks under request [ctr] from [from] on: chunk sequence → (payload offset, size). First copy wins. */
+    private fun action1Chunks(raw: ByteArray, ctr: Int, from: Int = 0): java.util.TreeMap<Long, Pair<Int, Int>> {
+        val chunks = java.util.TreeMap<Long, Pair<Int, Int>>()
+        forEachListFrame(raw, from) { p, size ->
+            if ((raw[p + 1].toInt() and 0xFF) == 1 && (raw[p + 4].toInt() and 0xFF) == ctr)
+                chunks.putIfAbsent(u32le(raw, p + 6), p to size)
+        }
+        return chunks
+    }
+
+    /**
+     * The first chunk an Action 1 list answer to [ctr] is missing, when the chunks from [from] on carry
+     * fewer bytes than its header declares (`[count][total]`, the total counting the header itself).
+     * Null when the answer is complete, has no first chunk yet, or the camera is not an Action 1.
+     */
+    internal fun action1ListGap(raw: ByteArray, ctr: Int, from: Int = 0): Long? {
+        if (legacyAlbum != LegacyActionAlbum.ACTION_1) return null
+        val chunks = action1Chunks(raw, ctr, from)
+        val (first, size) = chunks[0L] ?: return null
+        if (size < 18) return null
+        val declared = u32le(raw, first + 14)
+        if (chunks.values.sumOf { (it.second - 10).toLong() } >= declared) return null
+        var missing = 0L
+        while (missing in chunks) missing++
+        return missing
+    }
+
     /**
      * The control frames (everything but data) the camera sent under request [ctr], as distinct
      * sub-headers with a count, e.g. `4a030a00010000000000×15`. Diagnostic only: the four bytes after
@@ -1813,7 +2263,7 @@ class CameraSession(
      */
     private fun controlFrames(raw: ByteArray, ctr: Int): String {
         val seen = LinkedHashMap<String, Int>()
-        forEachListFrame(raw) { p ->
+        forEachListFrame(raw) { p, _ ->
             if ((raw[p + 4].toInt() and 0xFF) == ctr && (raw[p + 1].toInt() and 0xFF) != 0x01)
                 seen.merge((p until p + 10).joinToString("") { "%02x".format(raw[it]) }, 1, Int::plus)
         }
@@ -1822,7 +2272,7 @@ class CameraSession(
 
     /** Distinct media paths seen so far — lets the collect loop stop once the list stops growing. */
     private fun distinctPaths(blob: java.io.ByteArrayOutputStream): Int =
-        countMediaPaths(manifestBytes(blob.toByteArray()))
+        listRecordCount(manifestBytes(blob.toByteArray()))
 
     private val primaryExts = setOf("MP4", "MOV", "JPG", "JPEG", "DNG", "OSV", "INSV", "HEIC")
     private val proxyExts = setOf("LRF", "LRV")
@@ -1887,7 +2337,105 @@ class CameraSession(
         return files.map { if (it.handle in shared) it.copy(handleShared = true) else it }
     }
 
+    /**
+     * Put the work mode that opened `:80` back after a re-registration, if the camera has left it.
+     *
+     * The delete and the fresh-page fallback close the socket and register again. Closing the socket is
+     * what takes the newer cameras out of playback, so the Action 1 may drop its mode the same way.
+     * Reads the status push first and only sends when the mode has actually changed. No-op when no mode
+     * was found.
+     */
+    private fun ensureHttpWorkMode() {
+        if (httpServing != true || closing) return
+        val mode = httpWorkMode ?: return
+        parseStatus(recvAll(200))
+        val current = workModeReported ?: readWorkMode() ?: return
+        if (current == mode || closing) return
+        val status = setWorkMode(mode)
+        log("datalink: work mode was ${WorkMode.name(current)} after re-registering — " +
+            "SetMode ${WorkMode.name(mode)} again → ${if (status == null) "no reply" else "0x%02x".format(status)}")
+    }
+
+    /**
+     * ROADMAP #6's open question, asked directly: does this camera serve file bytes over the datalink?
+     *
+     * Runs once per session on an Action-1-style manifest, right after the list lands and while the
+     * session is provably alive. See [DcfTransferProbe] for the reasoning, what a silent result is
+     * worth (little), and why every probe releases. Read-only: query + release, nothing that writes.
+     */
+    private fun probeTransferKinds(fileIndex: Long) {
+        log("datalink: --- 0x4a transfer-kind probe on index 0x%08x (read-only) ---".format(fileIndex))
+        var answered = 0
+        var sawState = 0
+        for ((n, base) in DcfTransferProbe.BASES.withIndex()) {
+            val seq = 0x60 + n
+            sendDuml(0x00, 0x26, DcfTransferProbe.query(base, seq, fileIndex),
+                receiverType = 0x01, receiverId = 0)
+            val heard = LinkedHashMap<Int, Int>()
+            var sample: ByteArray? = null
+            for (round in 0 until 3) {
+                for (dg in recvAll(250)) {
+                    for ((set, cmd, pl) in scanFrames(dg)) {
+                        if (set != 0x00 || cmd != 0x27) continue
+                        DcfTransferProbe.familyMember(pl, base, seq)?.let { off ->
+                            heard.merge(off, 1, Int::plus)
+                            if (sample == null) sample = pl.copyOfRange(0, minOf(40, pl.size))
+                        }
+                    }
+                }
+                sendAck()
+            }
+            // Always release, answer or not — a leaked slot makes the camera go quiet later and looks
+            // exactly like "unsupported", which would send us away from a route that works.
+            sendDuml(0x00, 0x26, DcfTransferProbe.release(base, seq), receiverType = 0x01, receiverId = 0)
+            recvAll(150); sendAck()
+
+            if (heard.isEmpty()) {
+                log("datalink:   base 0x%02x — no reply".format(base))
+            } else {
+                answered++
+                if (DcfTransferProbe.STATE in heard.keys) sawState++
+                log("datalink:   base 0x%02x — ANSWERED: %s".format(base,
+                    heard.entries.joinToString(", ") { "${DcfTransferProbe.kindName(it.key)}×${it.value}" }))
+                sample?.let { log("datalink:     %s".format(it.joinToString("") { b -> "%02x".format(b) })) }
+            }
+        }
+        // Distinguish "the kind exists" from "a transfer started". An Action 1 answered base 0x20 with
+        // a `release` and nothing else: the family IS understood there — a foreign base would be
+        // ignored outright — but the camera closed the transfer instead of raising a state and sending.
+        // The earlier wording called any reply "transfer is LIVE", which overstated exactly this case.
+        log(when {
+            sawState > 0 -> "datalink: --- probe: $sawState kind(s) raised STATE — a transfer STARTED, report this ---"
+            answered > 0 -> "datalink: --- probe: $answered/${DcfTransferProbe.BASES.size} kind(s) replied but none " +
+                "raised STATE — the transfer family is understood there, the transfer was refused. " +
+                "Most likely our query payload is wrong, not that the route is closed ---"
+            else -> "datalink: --- probe: nothing answered. NOT a refutation — the query payload is a guess, " +
+                "and a wrong shape looks the same as an unsupported kind. See DcfTransferProbe ---"
+        })
+    }
+
     private fun decodeManifest(bytes: ByteArray, store: String = ""): List<CameraFile> {
+        // The older Osmo Action generation answers with a flat DCF record array instead of
+        // CompositePack — no paths, no filenames, files addressed by packed index. Its header is
+        // self-describing ([u32 count][u32 totalBytes] where totalBytes covers itself), so this can be
+        // tried first without risking a CompositePack manifest being misread as one.
+        // Where a newer Action supplies a physical path, keep the name and mount from its manifest.
+        var dcf = if (legacyAlbum != null && countMediaPaths(bytes) > 0) emptyList()
+            else DcfRecords.decodeAction1(bytes, variableRecords = legacyAlbum != null)
+        // Last resort, after the resend requests: an Action 1 list still short of its header shows the
+        // whole records that did arrive, newest first, instead of an empty grid. [collectStores] reports
+        // the slice as truncated.
+        if (dcf.isEmpty() && legacyAlbum == LegacyActionAlbum.ACTION_1 && countMediaPaths(bytes) == 0) {
+            dcf = DcfRecords.decodeAction1(bytes, variableRecords = true, allowShort = true)
+            if (dcf.isNotEmpty()) log("datalink: Action 1 list${storeTag(store)} is short: ${bytes.size} of " +
+                "${u32le(bytes, 4)} bytes — showing the ${dcf.size} whole record(s) that arrived")
+        }
+        if (dcf.isNotEmpty()) {
+            log("datalink: decoded ${dcf.size} DCF index records${storeTag(store)} (older Osmo Action generation)")
+            if (probeTransfers && (legacyAlbum == null || httpViaWorkMode)) probeTransferKinds(dcf.first().fileIndex)
+            dumpManifest(bytes)
+            return dcf.map { it.toCameraFile(dcfRoute) }
+        }
         val comp = decodeComposite(bytes, store)
         if (comp.isNotEmpty()) {
             log("datalink: decoded ${comp.size} CompositePack records${storeTag(store)} " +

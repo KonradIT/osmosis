@@ -1,15 +1,9 @@
 package dev.konraditurbe.osmosis.dcf
 
 import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.core.MediaFileType
 
-/**
- * One media item as a DCF-indexed device reports it — the fields that are actually in a manifest
- * record, before any naming or URL is invented on top.
- *
- * There is deliberately **no path** here: these devices transmit no filename at all. The on-card name
- * is reconstructed from [fileIndex] in [toCameraFile], purely for display and for what the file is
- * saved as.
- */
+/** DCF album descriptor. A name extension takes precedence over the conventional indexed filename. */
 data class DcfRecord(
     val fileIndex: Long,
     val sizeBytes: Long,
@@ -20,21 +14,38 @@ data class DcfRecord(
     val resolution: String? = null,
     /** Frames per second from the record's fps code, or 0 when unmapped / a still. */
     val fps: Int = 0,
+    val mediaType: Int = -1,
+    val segmentIndex: Int = 0,
+    val listedName: String? = null,
 ) {
     val storage: Int get() = DcfIndex.storage(fileIndex)
 
-    /**
-     * Project into the app-wide [CameraFile] model.
-     *
-     * `durationSec == 0` is the only still-vs-video signal a record carries; it held for every file in
-     * the Mavic 3 capture, and the two we could cross-check came back from HTTP as `image/jpeg`.
-     */
-    fun toCameraFile(): CameraFile {
-        val path = DcfIndex.path(fileIndex, if (durationSec > 0) "MP4" else "JPG")
+    fun toCameraFile(route: DcfAddressing.Route = DcfAddressing.Route.V1): CameraFile {
+        val extension = when (mediaType) {
+            MediaFileType.JPEG -> "JPG"
+            MediaFileType.DNG -> "DNG"
+            MediaFileType.MOV -> "MOV"
+            MediaFileType.MP4 -> "MP4"
+            else -> if (durationSec > 0) "MP4" else "JPG" // drone records
+        }
+        val standardPath = DcfIndex.path(fileIndex, extension)
+        val name = listedName?.takeIf { it.substringAfterLast('.').equals(extension, ignoreCase = true) }
+        val basePath = when {
+            name == null -> standardPath
+            name.startsWith("DCIM/") -> name
+            else -> "${standardPath.substringBeforeLast('/')}/$name"
+        }
+        val suffix = "_%03d".format(java.util.Locale.ROOT, segmentIndex)
+        val stem = basePath.substringBeforeLast('.')
+        val path = if (segmentIndex == 0 || stem.endsWith(suffix)) basePath
+            else "$stem$suffix.${basePath.substringAfterLast('.')}"
         return CameraFile(
             path = path,
             thumbPath = path,
             fileIndex = fileIndex,
+            dcfRoute = route,
+            mediaType = mediaType,
+            segmentIndex = segmentIndex,
             sizeBytes = sizeBytes,
             durationSec = durationSec,
             mtimeEpoch = mtimeEpoch,
@@ -46,14 +57,7 @@ data class DcfRecord(
     }
 }
 
-/**
- * Decoders for the fixed-stride record arrays DCF-indexed devices return.
- *
- * Unlike the path-based cameras — which answer with DJI's *CompositePack* TLV — these devices answer
- * with a flat array of fixed-size records. The stride and field offsets differ per device family and
- * the layouts share only [DcfRecord.fileIndex], so each family gets its own explicit decoder rather
- * than one parameterised reader that would obscure both.
- */
+/** Decodes drone record arrays and the length-prefixed photo and video descriptors used by Actions. */
 object DcfRecords {
 
     /**
@@ -85,12 +89,7 @@ object DcfRecords {
         return (body / count).takeIf { it in 16..1024 }
     }
 
-    /**
-     * Osmo Action 1 record stride — its list is `[u32 count][u32 totalBytes]` then fixed 65-byte records
-     * carrying **unix** seconds at `+0` (not FAT) and the packed index at `+8`. Decoder lands with the
-     * `support-osmo-action-1` branch, which has the fixture to test it against. Layout:
-     * MEDIA_PROTOCOL.md §1 ("Parsed — index-based").
-     */
+    /** Record stride in the captured Action 1 albums. See [decodeAction1]. */
     const val ACTION1_STRIDE = 65
 
     /**
@@ -180,6 +179,94 @@ object DcfRecords {
         0x5F -> "2688x2016"; 0x60 -> "8192x3424"; 0x61 -> "5120x2700"; 0x62 -> "1440x1080"
         else -> null
     }
+
+    /**
+     * DJI's dji_list_info_descriptor has an 18-byte prefix and an extension length at +17.
+     * The captured Action 1 firmware pads its extension area to 47 bytes. A newer layout can
+     * vary the length by item. Validate every boundary before returning any files.
+     *
+     * AC101 DjiTransSrv_SendListFrag packs FAT wall time at +0 and writes the media type at +16.
+     * DjiTransSrv_VideoMiscInfoGet writes tag 10, the segment sub-index and duration in ms.
+     *
+     * [allowShort] accepts a list that stops before the length its header declares and returns the
+     * whole records it holds. A missing chunk is a missing run of records, not a shifted one, because
+     * the camera packs whole records into each chunk. Every record that is present is still checked.
+     */
+    fun decodeAction1(blob: ByteArray, variableRecords: Boolean = false, allowShort: Boolean = false): List<DcfRecord> {
+        if (blob.size < LIST_HEADER) return emptyList()
+        val count = u32(blob, 0)
+        val declared = u32(blob, 4)
+        val short = allowShort && declared in (blob.size + 1L)..MAX_ACTION1_LIST
+        if (declared != blob.size.toLong() && !short) return emptyList()
+        if (count !in 1..((declared - LIST_HEADER) / 18)) return emptyList()
+        if (!variableRecords && LIST_HEADER + count * ACTION1_STRIDE != declared) return emptyList()
+
+        val out = ArrayList<DcfRecord>()
+        var off = LIST_HEADER
+        repeat(count.toInt()) {
+            if (blob.size - off < 18) return if (short) out else emptyList()
+            val next = off + 18 + u8(blob, off + 17)
+            if (next > blob.size) return if (short) out else emptyList()
+            if (!variableRecords && next - off != ACTION1_STRIDE) return emptyList()
+            val index = u32(blob, off + 8)
+            if (!DcfIndex.isPlausible(index)) return emptyList()
+            val type = u8(blob, off + 16)
+            val video = type == MediaFileType.MOV || type == MediaFileType.MP4
+            if (video || type == MediaFileType.JPEG || type == MediaFileType.DNG) {
+                var seconds = if (video) u16(blob, off + 12) else 0
+                var segment = 0
+                var listedName: String? = null
+                var starred = false
+                var pos = off + 18
+                while (pos < next) {
+                    val tag = u8(blob, pos++)
+                    // DJI_FILE_LIST_EXT_TYPE. Unknown tags have no length field, so skip to
+                    // the next record rather than interpreting their payload as another tag.
+                    val length = when (tag) {
+                        1 -> 4  // video UUID
+                        2 -> 3  // photo type and group
+                        3 -> 1  // star
+                        4 -> 5  // video attributes
+                        5 -> 3  // group
+                        6, 7 -> 1
+                        8 -> 35 // packed EXIF
+                        10 -> 10 // misc video
+                        11 -> 23 // custom DCF metadata
+                        13 -> if (pos < next) 1 + u8(blob, pos) else return emptyList()
+                        14 -> 16 // file MD5
+                        else -> break
+                    }
+                    if (pos + length > next) return emptyList()
+                    if (tag == 3) starred = u8(blob, pos) == 1
+                    if (tag == 13) {
+                        val name = String(blob, pos + 1, length - 1, Charsets.UTF_8).trimEnd('\u0000')
+                            .removePrefix("/")
+                        if (listedFileName.matches(name)) listedName = name
+                    }
+                    if (tag == 10 && video) {
+                        segment = u16(blob, pos)
+                        val ms = u32(blob, pos + 2)
+                        if (ms > 0) seconds = (ms / 1000).toInt().coerceAtLeast(1)
+                    }
+                    pos += length
+                }
+                out += DcfRecord(
+                    fileIndex = index, sizeBytes = u32(blob, off + 4), durationSec = seconds,
+                    mtimeEpoch = DcfIndex.fatToEpoch(u32(blob, off)), starred = starred,
+                    resolution = if (video) droneResolution(u8(blob, off + 15)) else null,
+                    fps = if (video) droneFps(u8(blob, off + 14) and 0x3f) else 0,
+                    mediaType = type, segmentIndex = segment, listedName = listedName,
+                )
+            }
+            off = next
+        }
+        return if (off == blob.size) out else emptyList()
+    }
+
+    /** Largest declared length a short Action 1 list is taken at its word for: 255 records of 1 KiB. */
+    private const val MAX_ACTION1_LIST = 255L * 1024
+
+    private val listedFileName = Regex("""(?:DCIM/(?:[A-Za-z0-9_-]+/)*)?[A-Za-z0-9_-][A-Za-z0-9_.-]*\.[A-Za-z0-9]+""")
 
     private fun u8(b: ByteArray, i: Int) = b[i].toInt() and 0xFF
     private fun u16(b: ByteArray, i: Int) = u8(b, i) or (u8(b, i + 1) shl 8)

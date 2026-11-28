@@ -49,7 +49,8 @@
 
     <!-- Wi-Fi join failed dialog -->
     <string name="couldnt_join_wifi">Не вдалося під’єднатися до %1$s</string>
-    <string name="wifi_join_failed_message">Не вдалося під’єднатися до Wi-Fi камери. Зазвичай це означає, що збережений пароль застарів — наприклад, після скидання камери до заводських налаштувань. Ввести його ще раз і спробувати знову?</string>
+    <string name="wifi_join_failed_message">Android не зміг під’єднатися до Wi-Fi камери й не повідомляє чому. Зазвичай Wi-Fi камери ще не був готовий або запит на з’єднання закрили. Неправильний пароль (наприклад, після скидання камери) виглядає так само.</string>
+    <string name="try_again">Спробувати знову</string>
     <string name="wifi_join_failed_wpa_message">Цей телефон не зміг під’єднатися до %1$s ні через WPA3, ні через WPA2 — імовірно, це обмеження сумісності Wi-Fi телефону, а не пароль. Ви все одно можете ввести пароль ще раз, щоб це виключити.</string>
     <string name="reenter_password">Ввести пароль ще раз</string>
     <string name="back_to_cameras">Назад до камер</string>
@@ -111,6 +112,8 @@
     <string name="not_connected">Не підключено</string>
     <string name="no_media_found">На %1$s немає медіа</string>
     <string name="camera_unreachable">Не вдалося зв’язатися з %1$s через Wi-Fi</string>
+    <string name="datalink_original_available">Додайте оригінал до черги, щоб завантажити його через канал даних камери. Збережений файл можна відкрити в галереї.</string>
+    <string name="camera_not_serving_files">Ця камера ще не надає свої файли через Wi-Fi, тому попередній перегляд і завантаження недоступні.</string>
     <string name="camera_network_blocked_title">Android заблокував з’єднання з камерою</string>
     <string name="camera_network_blocked_message">Телефон під’єднався до %1$s, але Android не дозволяє Osmosis нічого надсилати через цю мережу, тому камера так і не відповіла.\n\nЗазвичай причина — VPN, блокувальник реклами, DNS-фільтр або фаєрвол. Вимкніть його і під’єднайтеся знову.</string>
     <string name="camera_not_activated_title">%1$s — абсолютно нова камера, не активована</string>

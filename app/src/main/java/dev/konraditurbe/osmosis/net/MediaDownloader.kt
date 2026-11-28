@@ -10,6 +10,7 @@ import android.media.MediaMuxer
 import android.net.Uri
 import android.provider.MediaStore
 import dev.konraditurbe.osmosis.core.CameraFile
+import dev.konraditurbe.osmosis.core.MediaSession
 import dev.konraditurbe.osmosis.core.TrimRange
 import dev.konraditurbe.osmosis.core.urlPath
 import java.io.FileOutputStream
@@ -27,6 +28,8 @@ class MediaDownloader(
     private val context: Context,
     private val http: HttpClient,
     private val log: (String) -> Unit,
+    private val originalSession: MediaSession? = null,
+    private val sessionCurrent: () -> Boolean = { true },
 ) {
     /** One queued download: a whole file, or a trimmed time window of it. */
     data class Job(val file: CameraFile, val trim: TrimRange? = null)
@@ -51,10 +54,17 @@ class MediaDownloader(
         var overallBase = 0L
         var saved = 0; var skipped = 0; var failed = 0
         for ((i, job) in jobs.withIndex()) {
+            if (!sessionCurrent()) {
+                failed += jobs.size - i
+                break
+            }
             val sz = sizes[i]
             p.onFileStart(i, displayName(job), sz)
             val tick = { done: Long -> p.onTick(done, overallBase + done) }
-            val r = if (job.trim != null) downloadTrimmed(job.file, job.trim, tick)
+            val r = if (job.trim != null && originalSession != null) {
+                log("paused trim of ${job.file.name}: streaming the trim requires HTTP")
+                Result.FAILED
+            } else if (job.trim != null) downloadTrimmed(job.file, job.trim, tick)
             else downloadOne(job.file, sz, tick)
             when (r) {
                 Result.SAVED -> saved++
@@ -70,7 +80,11 @@ class MediaDownloader(
     /** Full remote size for whole jobs; a duration-proportional estimate for trims (for the bars). Both
      *  size and duration come from the DUML manifest; HTTP HEAD only guards a record we couldn't size. */
     private fun estimateBytes(job: Job): Long {
-        val full = (if (job.file.sizeBytes > 0) job.file.sizeBytes else http.head(job.file.urlPath())).coerceAtLeast(0L)
+        val full = when {
+            job.file.sizeBytes > 0 -> job.file.sizeBytes
+            originalSession != null -> 0L
+            else -> http.head(job.file.urlPath()).coerceAtLeast(0L)
+        }
         val trim = job.trim ?: return full
         if (full <= 0) return 0L
         val durMs = job.file.durationSec * 1000L
@@ -80,14 +94,18 @@ class MediaDownloader(
     private fun displayName(job: Job): String =
         if (job.trim == null) job.file.name else trimmedName(job.file, job.trim)
 
-    private fun trimmedName(f: CameraFile, trim: TrimRange): String =
-        "${f.name.substringBeforeLast('.')}_${trim.startMs / 1000}-${trim.endMs / 1000}s.${f.ext}"
+    private fun trimmedName(f: CameraFile, trim: TrimRange): String {
+        val ext = if (f.ext == "MOV") "MP4" else f.ext
+        return "${f.name.substringBeforeLast('.')}_${trim.startMs / 1000}-${trim.endMs / 1000}s.$ext"
+    }
 
     // ---- whole-file download (resumable) ------------------------------------
 
     private fun downloadOne(f: CameraFile, remote: Long, tick: (Long) -> Unit): Result {
+        if (originalSession != null && (!f.isActionDcf || remote <= 0)) return Result.FAILED
         val resolver = context.contentResolver
-        val key = "dl_" + f.path
+        val key = if (f.isActionDcf) "action_${f.albumKey}_${f.mtimeEpoch}_${f.sizeBytes}"
+            else "dl_" + f.path
 
         var u = prefs.getString(key, null)?.let { runCatching { Uri.parse(it) }.getOrNull() }
         val tracked = u
@@ -97,13 +115,13 @@ class MediaDownloader(
             u = createPending(f, f.name) ?: run { log("insert failed: ${f.name}"); return Result.FAILED }
             prefs.edit().putString(key, u.toString()).apply()
         }
-        val uri: Uri = u!!
+        val uri: Uri = u
 
         val pfd = runCatching { resolver.openFileDescriptor(uri, "rw") }.getOrNull()
             ?: run { log("open failed: ${f.name}"); prefs.edit().remove(key).apply(); return Result.FAILED }
         val startOffset = pfd.statSize.coerceAtLeast(0L)
 
-        if (remote > 0 && startOffset >= remote) {
+        if (remote > 0 && (startOffset == remote || (!f.isActionDcf && startOffset > remote))) {
             pfd.close(); markComplete(uri); prefs.edit().remove(key).apply(); return Result.SAVED
         }
         if (startOffset > 0) log("resuming ${f.name} at ${startOffset / 1_000_000} MB")
@@ -135,30 +153,45 @@ class MediaDownloader(
         var attempt = 0
         var barren = 0                    // consecutive attempts that moved no bytes at all
         while (true) {
+            if (!sessionCurrent()) {
+                if (attempt == 0) pfd.close()
+                return Result.FAILED
+            }
             val pfdN = if (attempt == 0) pfd else runCatching { resolver.openFileDescriptor(uri, "rw") }.getOrNull()
                 ?: run { log("reopen failed: ${f.name}"); return Result.FAILED }
             if (attempt > 0) offset = pfdN.statSize.coerceAtLeast(0L)
 
             val fos = FileOutputStream(pfdN.fileDescriptor)
+            if (f.isActionDcf && remote > 0 && offset > remote) {
+                fos.channel.truncate(0L)
+                offset = 0L
+            }
             fos.channel.position(offset)
-            val outcome = http.download(f.urlPath(), fos, offset) { total -> tick(total) }
-            runCatching { fos.flush(); fos.close() }
-            var after = pfdN.statSize.coerceAtLeast(0L)
-
+            val outcome = if (originalSession != null) {
+                if (originalSession.downloadOriginal(f, offset, fos, tick)) HttpClient.Fetch.DONE else HttpClient.Fetch.INTERRUPTED
+            } else http.download(f.urlPath(), fos, offset, f.takeIf { it.isActionDcf }) { total -> tick(total) }
+            if (f.isActionDcf && outcome == HttpClient.Fetch.FAILED && pfdN.statSize > offset) {
+                fos.channel.truncate(offset)
+            }
             if (outcome == HttpClient.Fetch.RANGE_IGNORED) {
-                // The body we'd have appended starts at byte 0. Truncate and start the file over rather
-                // than write a corrupt one; the next pass runs with offset 0.
-                runCatching { FileOutputStream(pfdN.fileDescriptor).channel.use { it.truncate(0L) } }
-                after = 0L
+                // The server started at byte zero. Discard the partial before the next attempt.
+                runCatching { fos.channel.truncate(0L) }
                 log("camera ignored the resume range — restarting ${f.name} from 0")
             }
+            val after = pfdN.statSize.coerceAtLeast(0L)
+            runCatching { fos.close() }
             pfdN.close()
 
-            if (outcome == HttpClient.Fetch.DONE) {
+            if (outcome == HttpClient.Fetch.DONE && (!f.isActionDcf || remote == 0L || after == remote)) {
                 markComplete(uri); prefs.edit().remove(key).apply(); return Result.SAVED
             }
-            if (remote > 0 && after >= remote) {
+            if (!f.isActionDcf && remote > 0 && after >= remote) {
                 markComplete(uri); prefs.edit().remove(key).apply(); return Result.SAVED
+            }
+
+            if (originalSession != null) {
+                log("paused datalink original ${f.name} at $after/$remote bytes")
+                return Result.FAILED
             }
 
             if (after > offset) barren = 0 else barren++
@@ -182,7 +215,7 @@ class MediaDownloader(
         if (!trim.isValid) { log("bad trim range: ${f.name}"); return Result.FAILED }
         val resolver = context.contentResolver
         val name = trimmedName(f, trim)
-        val uri = createPending(f, name) ?: run { log("insert failed: $name"); return Result.FAILED }
+        val uri = createPending(f, name, mimeOverride = "video/mp4") ?: run { log("insert failed: $name"); return Result.FAILED }
         val pfd = runCatching { resolver.openFileDescriptor(uri, "rw") }.getOrNull()
             ?: run { log("open failed: $name"); runCatching { resolver.delete(uri, null, null) }; return Result.FAILED }
 
@@ -214,6 +247,7 @@ class MediaDownloader(
             var firstPts = -1L
             var written = 0L
             while (true) {
+                if (!sessionCurrent()) throw java.io.IOException("Camera network changed during trim")
                 val tIdx = extractor.sampleTrackIndex
                 if (tIdx < 0) break
                 val pts = extractor.sampleTime
@@ -254,19 +288,19 @@ class MediaDownloader(
     // Pictures next to its JPEG); only the MIME is refined per extension so a raw or an audio-backup
     // sidecar is stored as what it actually is. downloadedUri mirrors the collection/folder choice.
     private fun collectionFor(f: CameraFile): Triple<Uri, String, String> = when {
-        f.isVideo -> Triple(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "Movies/Osmosis", "video/mp4")
+        f.isVideo -> Triple(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "Movies/Osmosis", mimeOf(f))
         f.isImage -> Triple(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "Pictures/Osmosis",
             if (f.ext == "DNG") "image/x-adobe-dng" else "image/jpeg")
         else -> Triple(MediaStore.Downloads.EXTERNAL_CONTENT_URI, "Download/Osmosis",
             if (f.ext == "WAV") "audio/x-wav" else "application/octet-stream")
     }
 
-    private fun createPending(f: CameraFile, displayName: String): Uri? {
+    private fun createPending(f: CameraFile, displayName: String, mimeOverride: String? = null): Uri? {
         val (collection, relPath, mime) = collectionFor(f)
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-            put(MediaStore.MediaColumns.MIME_TYPE, mime)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeOverride ?: mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, albumFolder(relPath, f))
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         return context.contentResolver.insert(collection, values)
@@ -302,9 +336,16 @@ class MediaDownloader(
         /** Pause before a resume, multiplied by the barren-attempt count (0.75 s, 1.5 s, 2.25 s, …). */
         private const val RESUME_BACKOFF_MS = 750L
 
+        private fun albumFolder(root: String, file: CameraFile): String {
+            if (!file.isActionDcf) return root
+            val directory = dev.konraditurbe.osmosis.dcf.DcfIndex.dirName(file.fileIndex)
+            return "$root/Action-${file.storage}/$directory"
+        }
+
         /**
          * True if [file] is already fully saved **in its Osmosis folder**. Matched by display name,
-         * relative path and **completed** state (`IS_PENDING=0`) — NOT by exact byte size. A completed
+         * relative path and **completed** state (`IS_PENDING=0`). Action DCF names repeat after a card
+         * swap, so those also require the size used to validate the HTTP transfer. Elsewhere a completed
          * row is only ever written after a full transfer, so name + folder is sufficient proof. (An
          * exact-size match false-negatived files whose manifest size disagreed slightly with the stored
          * bytes, re-saving them as duplicates every run.)
@@ -321,7 +362,7 @@ class MediaDownloader(
         /**
          * The saved copy's `content://` Uri, or null if it isn't in the gallery yet.
          *
-         * The match [isDownloaded] documents — completed row, matched on name **and** our own relative
+         * The match [isDownloaded] documents — completed row, matched on name and our own relative
          * path — but keeping the row id instead of discarding it, so the file can be handed to another
          * app (share / edit). A MediaStore Uri is directly grantable, which a raw path would not be.
          */
@@ -339,10 +380,14 @@ class MediaDownloader(
             }
             val proj = arrayOf(MediaStore.MediaColumns._ID)
             val sel = "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.IS_PENDING}=0" +
-                " AND ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+                " AND ${MediaStore.MediaColumns.RELATIVE_PATH} IN (?, ?)" +
+                if (file.isActionDcf && file.sizeBytes > 0) " AND ${MediaStore.MediaColumns.SIZE}=?" else ""
+            val folder = albumFolder(relPath, file)
+            val args = mutableListOf(file.name, folder, "$folder/")
+            if (file.isActionDcf && file.sizeBytes > 0) args.add(file.sizeBytes.toString())
             return runCatching {
                 context.contentResolver
-                    .query(collection, proj, sel, arrayOf(file.name, "$relPath%"), null)
+                    .query(collection, proj, sel, args.toTypedArray(), null)
                     ?.use { c ->
                         if (c.moveToFirst()) ContentUris.withAppendedId(collection, c.getLong(0)) else null
                     }
@@ -351,7 +396,7 @@ class MediaDownloader(
 
         /** MIME for a saved copy, matching what the download wrote (see [collectionFor]). */
         fun mimeOf(file: CameraFile): String = when {
-            file.isVideo -> "video/mp4"
+            file.isVideo -> if (file.ext == "MOV") "video/quicktime" else "video/mp4"
             file.isImage -> if (file.ext == "DNG") "image/x-adobe-dng" else "image/jpeg"
             file.ext == "WAV" -> "audio/x-wav"
             else -> "application/octet-stream"

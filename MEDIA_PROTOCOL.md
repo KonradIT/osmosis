@@ -542,15 +542,255 @@ for f in media_files:
 
 #### Parsed — index-based (Osmo Action 1/2/3)
 
-Header `[u32-LE count][u32-LE total_size]`, then fixed 65 B records, no path strings; files are keyed by `FileIndex`.
+The list begins with a little-endian record count and total byte length (including the 8-byte
+header). Each record has an 18-byte prefix. Action 1 captures have 47 extension bytes per record
+for a 65-byte stride. For an identified older Action, read the extension length on each record.
 
-| offset | type | field |
+| Offset within record | Type | Field |
 |---|---|---|
-| `[0:4]` | u32-LE | Unix timestamp |
-| `[8:12]` | u32-LE | **FileIndex** (`0x640251`…) |
-| `[10:14]` | 2×u16-LE | DCF dir / file number (`100` = `100MEDIA`) |
-| `[19:23]` | u32-LE | video UUID (Amba `DjiMovDmx`) |
-| `[38:42]` | u32-LE | size (~KB) |
+| +0 | u32 LE | Local FAT date and time, two-second precision |
+| +4 | u32 LE | Size in bytes |
+| +8 | u32 LE | DCF index. Storage in bits 31–30, directory in 29–16, file number in 15–0 |
+| +12 | u16 LE | Video duration in whole seconds |
+| +14 | u8 | Video frame-rate code in bits 5–0 |
+| +15 | u8 | Video resolution code |
+| +16 | u8 | Media type (0 JPEG, 1 DNG, 2 MOV, 3 MP4) |
+| +17 | u8 | Extension area length |
+| +18 onward | Tagged fields | Tag 3 carries the favourite flag. Tag 10 carries the segment sub-index (u16), duration in milliseconds (u32), and a timing parameter (u32). |
+
+The Action 1 firmware confirms these fields in `DjiTransSrv_SendListFrag` and
+`DjiTransSrv_VideoMiscInfoGet`. The video UUID and millisecond duration appear at +19 and +38
+in the seven-clip fixture. Their offsets depend on which tags precede them. [DJI descriptor definitions](https://github.com/dji-sdk/Onboard-SDK/blob/master/osdk-core/modules/inc/filemgr/impl/dji_file_mgr_internal_define.hpp)
+
+**List chunks, ACKs and resends.** In retail AC101 V01.10.00.40, `DjiTransSrv_SendListFrag`
+(`0x4790e8`) packs whole records into each `4a 01` chunk. It raises event `0x10` while records
+remain, and `DjiTransSrv_MainProc` (`0x47d22c`) sends the next chunk without waiting for an ACK,
+up to four in a row before it yields. The last chunk carries flag `0x1000` and raises event `0x11`.
+The transfer then starts a 1000 ms timer and sends a push (`4a 03`) on each expiry, up to five times,
+before it closes with "Transfer no answer close". An ACK (`4a 02`) is matched to its transfer by the
+ID at +4. The camera reads a confirmed chunk count at +10, a pair count at +14 and (chunk, count)
+pairs from +15, queues the pairs, and `DjiTransSrv_DoResend` (`0x477c9c`) sends them again ("ReSend
+List seq"). A 16-file list from a tester's camera declared 1048 bytes, and only its first chunk
+arrived: 918 bytes, 14 records.
+A frame split between two SW UDP envelopes is lost when whole datagrams are scanned: the second
+envelope's header lands inside the frame. Osmosis rebuilds such frames. If an Action 1 list is
+still short of its declared length after a quiet step, it sends that ACK with the first missing
+chunk, up to three times. As a last resort it shows the whole records that arrived.
+[Tester log](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7239762220)
+
+The DCF index identifies the album item independently of the download transport. Mimo 2.10.9
+selects indexed HTTP v1 for Action 2 and path-based HTTP v2 for Action 3. Osmosis retains physical
+paths supplied by a path-based manifest. Action 1 original transfers over HTTP still need hardware
+verification. [Firmware and transport findings](ROADMAP.md#6-older-osmo-action-cameras)
+
+#### Action 1 original download over the datalink
+
+When HTTP cannot serve an original, the Action 1 uses the paired album session on UDP 9004.
+Osmosis opens one file transfer when the user requests a download. It sends a 48-byte
+`4a 20` request on `00/26`. Mimo 2.10.9 builds it at `0x130c090` in `libdjisdk_jni.so`.
+The following offsets are measured from the start of the envelope.
+
+| Offset | Field | Original request |
+|---:|---|---|
+| 10 | u32 file index | Includes the drive bits |
+| 14 | u16 file count | 1 |
+| 16 | u8 subtype | 0 |
+| 17 | u8 sub-index | 0 |
+| 18 | u32 file offset | Number of original bytes already saved |
+| 22 | u32 requested bytes | `ffffffff` to EOF, or an explicit byte count |
+| 26 | u32 extended sub-index | 0 |
+| 30 | u16 segment | Listed segment index |
+| 32 | 16 reserved bytes | Zero |
+
+In retail AC101 firmware V01.10.00.40 the file handler reads the segment at `0x47ccdc`.
+It opens the selected file, checks the offset against EOF and adds 13 to the transfer length at
+`0x47cb54`. The sender at `0x475ab4` emits `4a 21` frames with up to 993 data bytes each.
+Chunk zero contains a 13-byte header with the total transfer length at +4, file index at +8 and
+a zero byte at +12. The first four bytes are unused here. The final frame sets flag `0x1000`.
+A range whose header would overflow the camera's 32-bit length is split into two requests.
+
+Osmosis validates both DUML checksums and the transfer ID, reassembles frames across UDP envelopes
+and writes contiguous chunks in sequence. It verifies the file index, manifest size and initial media
+signature before accepting a new original. On loss it sends `4a 02` with the first missing chunk,
+followed by a count and up to three pairs of missing chunk indices and lengths. It sends `4a 24`
+on completion or abandonment. A partial stays pending in MediaStore for the next download attempt.
+
+A stock Action 1 has never answered `4a 02`. In the 2026-11-27 tester logs every failed transfer
+stopped on one missing chunk while the camera kept sending past it: chunk 2239 missing with chunk
+4329 received, after 30–57 resend requests. A new `4a 20` request from the last contiguous byte
+started streaming in all six manual resumes. Osmosis therefore gives a missing chunk two seconds
+once data is flowing, releases the transfer and requests the original again from the contiguous end.
+The camera still gets eight seconds to send the first chunk. A restart that adds no bytes may be
+retried once before the download stops. A corrupt frame, a released transfer or a lost connection
+ends it at once. [Tester logs](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7227379731)
+
+The local Mavic 3 capture `mavic3_media_browse.pcap` has a 16,824-byte JPEG thumbnail in transfer
+`0x12` that exercises this framing. An Android 14 emulator verified the original-file path with a
+simulated Action 1. A stock Action 1 sent 1,728,800 of 2,486,428,346 bytes of `DJI_0819.MP4`
+before Android reported Wi-Fi loss. A complete original still needs hardware confirmation.
+[Tester log](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7202572811)
+
+#### Action 1 Wi-Fi app heartbeat
+
+Mimo 2.10.9 sends a DUML general ping every 500 ms on an Action 1 Wi-Fi session. The sender is
+the app (`02`), the receiver is camera 0 (`01`), the command is `00/00`, and the foreground
+payload is `01 00`. In `libdjisdk_jni.so`, see `HeartbeatLogic::PostStart` at `0x13bf8bc`
+for the timer, the Action 1 branch of `SendHeartbeat` at `0x13bfed8` for the receiver, and
+`GetDatalinkType` / `SetPackBody` at `0x13c0398` / `0x13c075c` for the payload.
+
+Retail AC101 V01.10.00.40 has two relevant timers. In the RTOS, `DjiCamPingHandler`
+(`0x442ec8`) sets Wi-Fi app presence and rearms a two-second timer. On expiry,
+`DjiPingTimerIsr` (`0x442e7c`) clears presence. On Linux, the `dji_wms_ac101` self-check
+refreshes a monotonic timestamp while the RTOS reports app presence (`0x407664`). With Wi-Fi
+active and more than 60 whole seconds elapsed, it enters the shutdown path (`0x4076b0`).
+That path stops the access point and brings down `wlan0` (`0x40b98c` → `0x40abd4`).
+
+To cross-check the cutoff, the stock RTOS ping handler, expiry callback and Linux self-check
+were run under instruction emulation with an active access point, a simulated clock, and OS
+calls intercepted. With a self-check every 500 ms, the manager requested access-point shutdown
+at 61 s without pings. With a Wi-Fi ping every 500 ms it stayed active for all 180 s. When
+pings stopped at 10 s, it requested shutdown at 72.5 s.
+
+The tester lost the network 61.5 and 61.8 seconds after the last logged BLE wake, once in
+the album grid and once during a download. UDP window acknowledgements were already running
+in that build. [Tester log](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7202572811)
+
+Osmosis starts the ping when the paired UDP session is ready and checks its deadline between
+socket reads. This also services the heartbeat while a file transfer owns the socket. An Android
+14 emulator completed a 69.57-second simulated download with 134 pings during the transfer. The
+longest gap over the whole session was 688 ms and the saved MP4 matched the source SHA-256.
+
+#### Action 1 album thumbnails, screen JPEGs and video playback
+
+**Grid and viewer.** Mimo 2.10.9 names file data types 1 and 2 `THUMBNAIL` and `SCREEN` in
+`dji.sdk.keyvalue.value.file.FileDataType`. In the gallery, `PlaybackRemoteBitmapLoader.g` checks the image cache
+and then requests the selected loader kind. Its AC101 product branch (`k0 → z0 → N`) selects
+`MEDIAFILEKIND_PHOTO_PREVIEW`, so Mimo can use a screen JPEG even for a grid cell. On retail AC101 V01.10.00.40, `DjiTransSrv_GetFileInfo`
+dispatches subtype 1 at `0x47ceb8` to `DjiTransSrv_GetThumbnail` and subtype 2 at `0x47cedc` to
+`DjiTransSrv_GetScreennail`. Both supply an offset and length for the JPEG to the album sender.
+
+Osmosis uses the 48-byte file request above with the listed file index and segment, byte offset zero
+and requested length `ffffffff`. Osmosis requests the smaller subtype 1 first for grid cells, using a
+downsampled screen JPEG if needed. The viewer requests subtype 2 for a photo or video poster and
+falls back to subtype 1. The expected
+JPEG length comes from the transfer header even when the indexed original is a much larger MP4.
+The Mavic 3 capture provides an independent replay of subtype 1. An Android 14 emulator with a
+simulated Action 1 rendered a 1280×720 video poster and decoded a 160×90 thumbnail. These sizes
+belong to the test images. Hardware confirmation of AC101 JPEG delivery and dimensions is pending.
+
+**Moving preview.** Mimo's `com.dji.playback.internal.product.a` identifies AC101 and inherits
+`e() == false` and `v() == false` from its base profile. For an uncached album clip,
+`PlaybackCutVideoDataSource.Companion.a` consequently returns no file source. The known-product
+and AC101 link checks in `PlaybackVideoPreviewViewNew.canTranscodePreview` enable
+`VideoPreviewerTranscode`. Its `PlaybackRemotePlayer` prepares the selected file index, plays,
+pauses, seeks and stops via `DJIMediaManager`. The renderer attaches a video consumer named
+`PLAYBACK`. DJI documents file-based LRF previews for Action 2 and 3. [DJI's LRF support article](https://support.dji.com/help/content?customId=01700006938&spaceId=17)
+
+Mimo's ARM64 `libdjisdk_jni.so` and the AC101 RTOS agree on the control messages.
+
+| Camera message | Mimo 2.10.9 | Action 1 firmware |
+|---|---|---|
+| `02/7b` select and start | `TranscodePlaybackHandler::InternalPlay` at `0x1417b58` writes the file index and start time in milliseconds as two little-endian u32s | `DjiMsgXcodePbFileSel` reads both words at `0x44d2e4` and calls `DjiXcodePb_FilePbStart` |
+| `02/7a` control | `SendControlPack` at `0x1417340` writes a u8 operation and a little-endian u32 argument. The state machine sends 0 to stop, 1 to resume, 4 to seek in milliseconds, and 5 to pause | `DjiMsgXcodePbControl` reads the same fields at `0x44d478`. Its operation map at `0x120ed3c` contains those four values |
+| `02/82` state push | `TranscodePlaybackHandler::Initialize` registers the playback state observer | `DjiXcodePb_Start` sends `DjiPushPbParaSend` as playback starts |
+
+On AC101, `DjiXcodePb_Start` at `0x3b77e0` resolves the DCF file, opens it with
+`AmbaMoviePlayback` and starts `DjiStream`.
+Its configuration includes 1280×720, 1440×1080 and 1920×1080 paths according to source dimensions.
+`DjiXcodePb_MmapInit` connects the encoder buffers to the RLV video/audio IPC channels.
+On the Linux side `S50service_dji` starts `usb_conn_svr`, which opens the SW UDP stream sender
+at `0x402cec`. In `libswudp.so`, the initializer at `0x2174c` assigns outer packet type 2 to
+this stream and type 3 to file downloads. The application payload begins at offset 20.
+`usb_conn_svr` sends a 12-byte HPI header followed by encoded video. It wraps audio in HPI too.
+
+| AC101 HPI offset | Field from `libdjihpi.so:hpi_fill_header` |
+|---|---|
+| 0–3 | Magic bytes `00 00 01 ff` |
+| 4–7 | Payload length, low 16 bits at 4–5, fixed `ff` at 6, high eight bits at 7 |
+| 8–9 | `4c` for this 12-byte header, then `11` for video or `24` for audio |
+| 10–11 | XOR of the other header bytes, then zero |
+
+The HPI header and media bytes can cross UDP packets. An independent Mimo/Pocket 3 capture
+(`mimo_op3_playback_2026-08-17.pcap`) contains type-2 packets with the same HPI magic and video
+type, a longer 16-byte header, and Annex B H.264 sequence parameter sets, IDR frames and slices.
+That capture corroborates the stream family. AC101's 12-byte header above comes from its own firmware.
+
+##### Starting the selected clip
+
+Mimo's AC101 album requests work mode `TRANSCODE` (wire value 3). The tester's Action 1
+acknowledged `02/10 [03]` and reported mode 3 twice. Osmosis's HTTP check subsequently restored
+RECORD. When the user taps Play, read the current mode, enter TRANSCODE if needed, and confirm it
+via `02/11` or the `02/80` push before sending `02/7b`. The stock file-select handler checks
+the internal playback operating mode and returns `e4` if it is wrong (`0x44d218`). For example,
+the tester's DCF index `0x00640333` at time zero encodes as `33 03 64 00 00 00 00 00`.
+[Action 1 tester log](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7202572811)
+
+The AC101 `02/82` push has a 41-byte body. Executing `DjiPushPbParaSend` at `0x43ae20`
+with known playback values verified these offsets. The three u32 fields are little-endian.
+
+| Body offset | Meaning |
+|---|---|
+| 0 | State. Mimo recognises 2 as playing, 3 as paused, 7 as stopped and 8 as loading. |
+| 4–7 | Current DCF index |
+| 9–12 | Movie duration in milliseconds |
+| 13–16 | Current playback position in milliseconds. Mimo also treats `ffffffff` as loading in states 2 and 7. |
+
+Use the selected index and this push to update the play button and scrubber. For split recordings,
+`02/7b` carries only the index and start time. The firmware opens the DCF subfiles and calls
+`AmbaMoviePlayback_CrossSegVideoCheck`. Confirm how chapter start times map to the recording
+timeline on a split recording before offering chapter-specific seeking.
+
+##### Feeding the Android player
+
+With HTTP unavailable, tapping Play in `MediaPreviewActivity` starts playback through the existing
+album session. The JPEG poster stays visible until Android displays the first frame. The socket
+owner sends commands, the 500 ms app heartbeat and video-window acknowledgements while receiving
+video. It reorders type-2 packets by sequence, acknowledges the last contiguous packet and carries
+partial HPI headers and payloads across reads.
+
+A bounded queue feeds Annex B AVC to `MediaCodec` on a separate thread. The decoder reads the
+dimensions from the SPS and renders to a `TextureView`. After a gap it waits for an IDR picture.
+AC101's configuration branch at `0x3b7af0` selects 1280×720 for 1280×720
+input, 1440×1080 for 4000×3000 or 2720×2040, and a 1920×1080 default.
+[Android MediaCodec reference](https://developer.android.com/reference/android/media/MediaCodec)
+
+In playback mode, the firmware takes a compressed audio sample from the source movie. At
+`0x79ac88` it writes a seven-byte MPEG-4 ADTS header for AAC-LC at 48 kHz in stereo, then reads
+the sample immediately after that header. Running those instructions with a 2,400-byte sample
+produced `ff f1 4c 81 2c ff fc`. At `0x79f0c8` the firmware compares the audio read PTS with the
+playback clock before passing the buffer and length to `DjiXcodePb_AudioBufSend`.
+On Linux, `usb_conn_svr` wraps those bytes with HPI type `24` at `0x402e34` and sends
+the header and payload together on the video socket at `0x402e7c`.
+
+Osmosis validates the length and format of each HPI audio record, removes its ADTS header and
+decodes AAC to stereo PCM for Android’s media output. The 12-byte HPI header has no timestamp.
+The player uses the arrival time of the rendered video frame to align camera-paced audio and
+discards stale samples after a seek or interruption. Clips without audio can play normally.
+[Android AudioTrack reference](https://developer.android.com/reference/android/media/AudioTrack)
+
+The player uses camera-reported position for pause, resume and seeking. Seeking drops queued
+pictures from the old position. Split files are labelled as full-recording previews because the
+play command accepts a DCF index across segments. Leaving the viewer stops playback and restores
+the previous work mode.
+
+**Decoder replay.** A 9.56-second Pocket 3 capture excerpt supplied 247 HPI video records with
+240 pictures. Running the stock AC101 `hpi_fill_header` function produced 12-byte headers for
+those payloads and 36 interleaved synthetic audio records. Splitting the stream at each header
+byte and into 1,452-byte chunks recovered all 4,057,500 video bytes. FFmpeg decoded 240 distinct
+pictures. Android 14's `MediaCodec` decoded all 240 at 1280×720 and delivered all 240 to an
+`ImageReader` surface. A physical Action 1 still needs to verify the emitted codec and dimensions,
+video delivery under packet loss, seeking across segments, and return to browsing after Stop.
+
+For the audio replay, a simulated camera interleaved HPI video with ADTS frames containing a
+660 Hz tone on the left and 990 Hz on the right. An Android 14 test detected both frequencies
+in the playing audio session, verified that pause released the output, and observed stereo PCM
+playback resume after a seek. Audio delivery and lip sync still need a physical Action 1 test.
+
+**Stored stream files.** File-transfer subtype 9 reaches `DjiTransSrv_GetStreamFile` at
+`0x47cf34`. Its movie branch can derive a secondary-file path. For two GIS metadata values it
+returns the original path with offset zero and length `ffffffff`. Subtype 3 looks up an existing
+transcode by commit and clip numbers. Availability and size of these files on ordinary Action 1
+recordings remain unverified. Mimo's on-demand playback path uses the recording index directly.
 
 ### 1a. Unlisted sidecar files (`.DNG` / `.WAV`)
 

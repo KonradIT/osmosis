@@ -13,7 +13,6 @@ import androidx.recyclerview.widget.RecyclerView
 import dev.konraditurbe.osmosis.R
 import dev.konraditurbe.osmosis.core.CameraFile
 import dev.konraditurbe.osmosis.core.TrimRange
-import dev.konraditurbe.osmosis.core.thumbUrlPath
 import dev.konraditurbe.osmosis.net.ImageLoader
 import dev.konraditurbe.osmosis.net.MetaLoader
 import java.util.Calendar
@@ -35,6 +34,7 @@ class MediaGridAdapter(
     private val loader: ImageLoader,
     private val meta: MetaLoader,
     private val spanCount: Int,
+    private val mediaAvailable: Boolean,
     private val onOpen: (CameraFile) -> Unit,
     private val onLongPress: (CameraFile) -> Unit = {},
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
@@ -102,7 +102,7 @@ class MediaGridAdapter(
                 val a = old[o]; val b = newRows[n]
                 return when {
                     a is Row.Header && b is Row.Header -> a.label == b.label
-                    a is Row.Item && b is Row.Item -> a.file.path == b.file.path
+                    a is Row.Item && b is Row.Item -> a.file.albumKey == b.file.albumKey
                     else -> false
                 }
             }
@@ -160,6 +160,11 @@ class MediaGridAdapter(
         }
     }
 
+    override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+        if (holder is ItemVH) holder.clearThumbnail()
+        super.onViewRecycled(holder)
+    }
+
     private class HeaderVH(v: View) : RecyclerView.ViewHolder(v) {
         val label: TextView = v.findViewById(R.id.headerLabel)
     }
@@ -189,9 +194,11 @@ class MediaGridAdapter(
             v.setOnLongClickListener { file?.let(onLongPress); true }
         }
 
+        fun clearThumbnail() = loader.clear(thumb)
+
         fun bind(f: CameraFile) {
             file = f
-            val queued = selected.containsKey(f.path)
+            val queued = selected.containsKey(f.albumKey)
             check.visibility = if (selectMode || queued) View.VISIBLE else View.GONE
             check.isChecked = queued
             // favorite; burst/interval group; in-camera panorama (an ordinary .JPG, so only the record's
@@ -203,10 +210,10 @@ class MediaGridAdapter(
                 f.isVideo -> R.drawable.ic_media_video
                 else -> R.drawable.ic_media_photo
             })
-            loader.load(f.thumbUrlPath(), thumb)
+            loader.loadThumbnail(f, mediaAvailable, thumb)
             // A queued clip that carries a trim shows the scissors mark before its filename (compound
             // drawable, so it survives the async meta text update). Sized to the 10sp name row.
-            val trimmed = selected[f.path] != null
+            val trimmed = selected[f.albumKey] != null
             if (trimmed) {
                 val d = androidx.core.content.ContextCompat.getDrawable(name.context, R.drawable.ic_trimmed)!!.mutate()
                 val s = (13 * name.resources.displayMetrics.density).toInt()
@@ -216,7 +223,7 @@ class MediaGridAdapter(
             } else {
                 name.setCompoundDrawablesRelative(null, null, null, null)
             }
-            meta.load(f, name, "%04d".format(f.seq))
+            meta.load(f, name, f.displayNumber)
         }
     }
 
@@ -225,18 +232,18 @@ class MediaGridAdapter(
     // ---- queue / selection --------------------------------------------------
 
     private fun rowIndexOfPath(path: String): Int =
-        rows.indexOfFirst { it is Row.Item && it.file.path == path }
+        rows.indexOfFirst { it is Row.Item && it.file.albumKey == path }
 
     private fun toggleQueue(f: CameraFile) {
-        if (selected.containsKey(f.path)) { selected.remove(f.path); selectedMember.remove(f.path) }
-        else selected[f.path] = null
-        rowIndexOfPath(f.path).takeIf { it >= 0 }?.let { notifyItemChanged(it) }
+        if (selected.containsKey(f.albumKey)) { selected.remove(f.albumKey); selectedMember.remove(f.albumKey) }
+        else selected[f.albumKey] = null
+        rowIndexOfPath(f.albumKey).takeIf { it >= 0 }?.let { notifyItemChanged(it) }
         onQueueChanged?.invoke()
     }
 
     fun isQueuedPath(path: String): Boolean = selected.containsKey(path)
     fun trimForPath(path: String): TrimRange? = selected[path]
-    fun fileForPath(path: String): CameraFile? = all.firstOrNull { it.path == path }
+    fun fileForPath(path: String): CameraFile? = all.firstOrNull { it.albumKey == path }
 
     /** Apply the preview's add/remove + optional trim; [member] is the exact burst frame to queue (else lead). */
     fun setQueuedByPath(path: String, queued: Boolean, trim: TrimRange? = null, member: CameraFile? = null) {
@@ -253,7 +260,7 @@ class MediaGridAdapter(
 
     /** Reflect a favorite toggle (from the grid long-press) on the ❤️ badge. */
     fun setStarredByPath(path: String, starred: Boolean) {
-        val idx = all.indexOfFirst { it.path == path }
+        val idx = all.indexOfFirst { it.albumKey == path }
         if (idx < 0 || all[idx].starred == starred) return
         all[idx] = all[idx].copy(starred = starred)
         // A faved-only view may gain/lose this cell, so re-diff; otherwise just repaint its badge.
@@ -267,7 +274,7 @@ class MediaGridAdapter(
 
     /** The filtered items in display order (no headers) — the list the preview swipes through. */
     fun visibleFiles(): List<CameraFile> = rows.mapNotNull { (it as? Row.Item)?.file }
-    fun visibleIndexOf(path: String): Int = visibleFiles().indexOfFirst { it.path == path }
+    fun visibleIndexOf(path: String): Int = visibleFiles().indexOfFirst { it.albumKey == path }
 
     fun selectedEntries(): List<Pair<CameraFile, TrimRange?>> =
         selected.entries.map { (selectedMember[it.key] ?: fileForPath(it.key)!!) to it.value }
@@ -306,7 +313,8 @@ class MediaGridAdapter(
      * the end and keep their manifest order, the sort being stable.
      */
     private fun sortNewestFirst() {
-        all.sortWith(compareByDescending { it.timestamp.ifEmpty { "0" } })
+        all.sortWith(compareByDescending<CameraFile> { it.timestamp }
+            .thenByDescending { it.mtimeEpoch }.thenByDescending { it.fileIndex })
     }
 
     // ---- filter / mode toggles (driven by the toolbar chips) ----------------
@@ -331,8 +339,8 @@ class MediaGridAdapter(
      *  non-burst cell. Bursts are skipped (they queue a specific frame via the preview). */
     fun selectAllVisible(select: Boolean) {
         for (r in rows) if (r is Row.Item && !r.file.isBurst) {
-            if (select) selected.putIfAbsent(r.file.path, null)
-            else { selected.remove(r.file.path); selectedMember.remove(r.file.path) }
+            if (select) selected.putIfAbsent(r.file.albumKey, null)
+            else { selected.remove(r.file.albumKey); selectedMember.remove(r.file.albumKey) }
         }
         notifyDataSetChanged()
         onQueueChanged?.invoke()
