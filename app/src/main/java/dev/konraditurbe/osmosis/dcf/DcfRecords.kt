@@ -187,20 +187,27 @@ object DcfRecords {
      *
      * AC101 DjiTransSrv_SendListFrag packs FAT wall time at +0 and writes the media type at +16.
      * DjiTransSrv_VideoMiscInfoGet writes tag 10, the segment sub-index and duration in ms.
+     *
+     * [allowShort] accepts a list that stops before the length its header declares and returns the
+     * whole records it holds. A missing chunk is a missing run of records, not a shifted one, because
+     * the camera packs whole records into each chunk. Every record that is present is still checked.
      */
-    fun decodeAction1(blob: ByteArray, variableRecords: Boolean = false): List<DcfRecord> {
+    fun decodeAction1(blob: ByteArray, variableRecords: Boolean = false, allowShort: Boolean = false): List<DcfRecord> {
         if (blob.size < LIST_HEADER) return emptyList()
         val count = u32(blob, 0)
-        if (u32(blob, 4) != blob.size.toLong() || count !in 1..((blob.size - LIST_HEADER) / 18).toLong())
-            return emptyList()
-        if (!variableRecords && LIST_HEADER + count * ACTION1_STRIDE != blob.size.toLong()) return emptyList()
+        val declared = u32(blob, 4)
+        val short = allowShort && declared in (blob.size + 1L)..MAX_ACTION1_LIST
+        if (declared != blob.size.toLong() && !short) return emptyList()
+        if (count !in 1..((declared - LIST_HEADER) / 18)) return emptyList()
+        if (!variableRecords && LIST_HEADER + count * ACTION1_STRIDE != declared) return emptyList()
 
         val out = ArrayList<DcfRecord>()
         var off = LIST_HEADER
         repeat(count.toInt()) {
-            if (blob.size - off < 18) return emptyList()
+            if (blob.size - off < 18) return if (short) out else emptyList()
             val next = off + 18 + u8(blob, off + 17)
-            if (next > blob.size || (!variableRecords && next - off != ACTION1_STRIDE)) return emptyList()
+            if (next > blob.size) return if (short) out else emptyList()
+            if (!variableRecords && next - off != ACTION1_STRIDE) return emptyList()
             val index = u32(blob, off + 8)
             if (!DcfIndex.isPlausible(index)) return emptyList()
             val type = u8(blob, off + 16)
@@ -255,6 +262,9 @@ object DcfRecords {
         }
         return if (off == blob.size) out else emptyList()
     }
+
+    /** Largest declared length a short Action 1 list is taken at its word for: 255 records of 1 KiB. */
+    private const val MAX_ACTION1_LIST = 255L * 1024
 
     private val listedFileName = Regex("""(?:DCIM/(?:[A-Za-z0-9_-]+/)*)?[A-Za-z0-9_-][A-Za-z0-9_.-]*\.[A-Za-z0-9]+""")
 

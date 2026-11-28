@@ -6,6 +6,7 @@ import dev.konraditurbe.osmosis.core.StorageRules
 import dev.konraditurbe.osmosis.core.AlbumJpeg
 import dev.konraditurbe.osmosis.core.AlbumVideo
 import dev.konraditurbe.osmosis.dcf.ActionFileTransfer
+import dev.konraditurbe.osmosis.dcf.AlbumFrames
 import dev.konraditurbe.osmosis.dcf.DcfAddressing.Route
 import dev.konraditurbe.osmosis.dcf.DcfRecords
 import dev.konraditurbe.osmosis.dcf.DcfTransferProbe
@@ -56,6 +57,8 @@ class CameraSession(
 ) : DumlSession(log, port, tcpPoke, isDrone = false) {
 
     private val httpViaWorkMode = legacyAlbum == LegacyActionAlbum.ACTION_1
+    /** List frames must pass their CRC16 too. See [forEachListFrame]. */
+    private val strictListFrames = legacyAlbum == LegacyActionAlbum.ACTION_1
     private var dcfRoute = if (legacyAlbum == LegacyActionAlbum.ACTION_3) Route.V2 else Route.V1
     init { logWorkMode = httpViaWorkMode }
 
@@ -268,6 +271,13 @@ class CameraSession(
      *
      * The proceed was first sent on the drone's precedent. An Action 6 then delivered its card's list
      * after it on every older page (issue #53); whether the data would have come without it is not known.
+     *
+     * [RESEND][Action.RESEND] is for a stream that went quiet with a known hole: [next]'s `gap` says the
+     * answer's own header declares more than arrived. It is asked for up to [MAX_RESENDS] times, a
+     * quiet step apart, before the transfer is released. Retail AC101 firmware sends every list chunk
+     * without waiting for an ACK, then keeps the transfer open for about six seconds (a one-second push
+     * timer, five pushes) and resends the chunks an ACK lists as missing (`DjiTransSrv_DoResend`,
+     * "ReSend List seq"). A 16-file Action 1 list lost its second chunk and showed an empty grid.
      */
     internal class ListTransfer(
         val ctr: Int,
@@ -277,22 +287,31 @@ class CameraSession(
         private val maxSteps: Int,
         private val hold: Boolean = true,
     ) {
-        enum class Action { WAIT, PROCEED, RELEASE }
+        enum class Action { WAIT, PROCEED, RESEND, RELEASE }
 
         var released = false
             private set
         private var proceededAt = -1
         private var lastRecords = -1
         private var quiet = 0
+        private var resends = 0
 
-        /** [step] counts collect steps since the query went out; [records] is this store's records in so far. */
-        fun next(step: Int, answer: Answer, records: Int): Action {
+        /**
+         * [step] counts collect steps since the query went out; [records] is this store's records in so
+         * far; [gap] is true when the answer is known to be missing a chunk the camera could resend.
+         */
+        fun next(step: Int, answer: Answer, records: Int, gap: Boolean = false): Action {
             if (released) return Action.WAIT
             quiet = if (records == lastRecords) quiet + 1 else 0
             lastRecords = records
             if (hold && answer == Answer.WAITING && proceededAt < 0) {
                 proceededAt = step
                 return Action.PROCEED
+            }
+            if (hold && gap && answer != Answer.DONE && quiet >= quietSteps && resends < MAX_RESENDS) {
+                resends++
+                quiet = 0
+                return Action.RESEND
             }
             val due = !hold || when (answer) {
                 Answer.DONE, Answer.EMPTY -> true
@@ -303,6 +322,11 @@ class CameraSession(
             if (step < minStep || !due) return Action.WAIT
             released = true
             return Action.RELEASE
+        }
+
+        companion object {
+            /** Resend requests per transfer. Each asks for one chunk, so a list can be up to this many chunks short. */
+            const val MAX_RESENDS = 3
         }
     }
 
@@ -319,6 +343,18 @@ class CameraSession(
     /** The release and proceed frames for request [ctr]: the SD ones with that counter at byte 4. */
     internal fun listRelease(ctr: Int) = SD_RELEASE.copyOf().also { it[4] = ctr.toByte() }
     internal fun listProceed(ctr: Int) = SD_PROCEED.copyOf().also { it[4] = ctr.toByte() }
+
+    /**
+     * The `4A 02` ACK for request [ctr] that confirms chunks before [chunk] and lists [chunk] as missing:
+     * `[confirm:u32 @10][missing pairs:u8 @14][seq:u32][count:u32]`. Retail AC101 V01.10.00.40 reads
+     * those fields in `DjiTransSrv_MainProc` (`0x47db68` to `0x47dbf0`) and queues the pair for
+     * `DjiTransSrv_DoResend`. The proceed above is the same frame with nothing confirmed or missing.
+     */
+    internal fun listResend(ctr: Int, chunk: Long): ByteArray =
+        java.nio.ByteBuffer.allocate(23).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+            put(0x4A).put(0x02).putShort((0x1000 or 23).toShort()).putShort(ctr.toShort()).putInt(0)
+            putInt(chunk.toInt()).put(1).putInt(chunk.toInt()).putInt(1)
+        }.array()
     // What each store's query last came to ([answerState] over the page's own frames), and the stores
     // that have nothing older to give: past their end marker, or given up on. See [unansweredStores].
     private val lastAnswers = HashMap<Int, Answer>()
@@ -592,8 +628,9 @@ class CameraSession(
         var internalAskedAt = -1
         var internalFrom = 0
         var lastCount = -1
+        val frames = AlbumFrames(tx.sessionId)
         for (batch in 0 until batches) {
-            for (r in recvAll(800)) blob.write(r); sendAck()
+            for (r in withSplitFrames(recvAll(800), frames)) blob.write(r); sendAck()
             val raw = blob.toByteArray()
             val count = distinctPaths(blob)
             perBatch(batch, count, count != lastCount)
@@ -606,6 +643,41 @@ class CameraSession(
             } else if (stepTransfer(internal, batch - internalAskedAt, raw, internalFrom)) break
         }
     }
+
+    /**
+     * [datagrams] as they go into a list blob, each preceded by any frame that began in an earlier
+     * envelope of the same channel and ends in it.
+     *
+     * A list blob is scanned for frames across whole datagrams, so a frame split between two SW UDP
+     * envelopes carries the second envelope's 20-byte header inside it, fails its checksum and is lost.
+     * The drone's list lost chunks that way until [dev.konraditurbe.osmosis.drone.DroneSession] began
+     * stripping the headers. Retail AC101 firmware sends a list's chunks back to back without waiting for
+     * an ACK (`DjiTransSrv_SendListFrag` raises event `0x10` and `MainProc` sends the next), so a 16-file
+     * Action 1 list went out as a 918-byte chunk and a 130-byte one; the second never decoded (issue #32).
+     * A split like this is the likeliest reason. Frames that fit inside one envelope are left to the
+     * datagram itself, so nothing is counted twice.
+     */
+    private fun withSplitFrames(datagrams: List<ByteArray>, frames: AlbumFrames?): List<ByteArray> {
+        if (frames == null || datagrams.isEmpty()) return datagrams
+        val out = ArrayList<ByteArray>(datagrams.size)
+        for (dg in datagrams) {
+            frames.frames(dg) { frame, carried ->
+                if (carried) {
+                    out += frame
+                    rejoinedFrames++
+                }
+            }
+            out += dg
+        }
+        return out
+    }
+
+    /** Frames [withSplitFrames] rebuilt since [collectStores] last reported them. Diagnostic only. */
+    @Volatile private var rejoinedFrames = 0
+
+    /** Test seam: a list blob built from [datagrams] the way the collect loops build it. */
+    internal fun listBlobForTest(datagrams: List<ByteArray>, session: Int): ByteArray =
+        withSplitFrames(datagrams, AlbumFrames(session)).fold(ByteArray(0)) { acc, b -> acc + b }
 
     /** A store's transfer for the batch-paced paths (~800 ms a step). */
     private fun transferByBatch(ctr: Int, hold: Boolean = true) = ListTransfer(
@@ -632,10 +704,16 @@ class CameraSession(
         // Where the body writes a count, every declared record being in settles it, flag or no flag.
         if (answer == Answer.STREAMING && bytes.size >= 4 && u32le(bytes, 0) in 1..COUNT_MAX.toLong() &&
             records >= u32le(bytes, 0)) answer = Answer.DONE
-        when (t.next(step, answer, records)) {
+        val gap = action1ListGap(raw, t.ctr, from)
+        when (t.next(step, answer, records, gap != null)) {
             ListTransfer.Action.PROCEED -> {
                 log("datalink: $name list raised a state frame before any data — sending proceed (4A 02)")
                 sendDuml(0x00, 0x26, listProceed(t.ctr), receiverType = 0x01, receiverId = 0)
+            }
+            ListTransfer.Action.RESEND -> if (gap != null) {
+                log("datalink: $name list stopped at ${bytes.size} of ${u32le(bytes, 4)} bytes — " +
+                    "asking the camera to resend chunk $gap (4A 02)")
+                sendDuml(0x00, 0x26, listResend(t.ctr, gap), receiverType = 0x01, receiverId = 0)
             }
             ListTransfer.Action.RELEASE -> {
                 if (answer == Answer.WAITING || answer == Answer.SILENT)
@@ -692,8 +770,9 @@ class CameraSession(
         log("datalink: SD store answered empty — re-asking once (it may not have been mounted yet)")
         sendDuml(0x00, 0x26, listCmd(SD_QUERY_CTR, NEWEST_SD), receiverType = 0x01, receiverId = 0)
         val sd = transferByBatch(SD_QUERY_CTR)
+        val frames = AlbumFrames(tx.sessionId)
         for (batch in 0 until 6) {
-            for (r in recvAll(700)) blob.write(r); sendAck()
+            for (r in withSplitFrames(recvAll(700), frames)) blob.write(r); sendAck()
             holdPlayback()
             // Judge this query by its own frames: the blob still holds the first, empty answer.
             if (!sd.released) stepTransfer(sd, batch, blob.toByteArray(), from = first.size)
@@ -869,8 +948,9 @@ class CameraSession(
         val blob = java.io.ByteArrayOutputStream()
         sendDuml(0x00, 0x26, groupCmd(1, handle, GROUP_EXPAND_LIMIT), receiverType = 0x01, receiverId = 0)
         var lastCount = -1; var stable = 0
+        val frames = AlbumFrames(tx.sessionId)
         for (batch in 0 until 10) {
-            for (r in recvAll(700)) blob.write(r); sendAck()
+            for (r in withSplitFrames(recvAll(700), frames)) blob.write(r); sendAck()
             if (batch == 1) sendDuml(0x00, 0x26, hex("4a040e1001000000000001000000"), receiverType = 0x01, receiverId = 0)
             val c = distinctPaths(blob)
             if (batch >= 3 && c > 0 && c == lastCount) { if (++stable >= 2) break } else stable = 0
@@ -1116,6 +1196,7 @@ class CameraSession(
         val sdTransfer: ListTransfer? = null,       // set = the query is an SD list: release its transfer first, then prime
         val internalTransfer: ListTransfer? = null, // set with it: the last prime frame is the internal query, and the
                                                     // page is over when this transfer is released
+        val frames: AlbumFrames? = null,            // a stream query's frames split across envelopes ([withSplitFrames])
     ) {
         val blob = java.io.ByteArrayOutputStream()   // raw datagrams for a stream query
         @Volatile var reply: ByteArray? = null
@@ -1166,7 +1247,8 @@ class CameraSession(
         val c = PendingCmd(0x00, 0x26, payload, 0x01, 0, 2, 0x00, 0x27,
             System.currentTimeMillis() + timeoutMs, primeFrames = primeFrames.toList(), stream = true,
             sdTransfer = if (sdList) transferByTick(SD_QUERY_CTR, holds(SD_STORE)) else null,
-            internalTransfer = if (sdList) transferByTick(INTERNAL_QUERY_CTR, holds(INTERNAL_STORE)) else null)
+            internalTransfer = if (sdList) transferByTick(INTERNAL_QUERY_CTR, holds(INTERNAL_STORE)) else null,
+            frames = AlbumFrames(tx.sessionId))
         cmdQueue.add(c)
         while (!c.done && System.currentTimeMillis() < c.deadlineMs + 600) runCatching { Thread.sleep(30) }
         return c.reply
@@ -1508,7 +1590,7 @@ class CameraSession(
                     parseStatus(dg)
                     awaitingCmd?.let { c ->
                         if (c.stream) {
-                            for (r in dg) c.blob.write(r)
+                            for (r in withSplitFrames(dg, c.frames)) c.blob.write(r)
                             c.ticks++
                             val sd = c.sdTransfer
                             val internal = c.internalTransfer
@@ -1916,6 +1998,14 @@ class CameraSession(
      * still reassembled.
      */
     private fun manifestBytes(raw: ByteArray, requestCtr: Int? = null): ByteArray {
+        // An Action 1 answer can be completed by a resent chunk, which arrives after the chunks that
+        // followed it, and two resend requests can bring the same chunk twice. Within one counter the
+        // chunk sequence numbers are the camera's own, so order by them and keep each once.
+        if (requestCtr != null && legacyAlbum == LegacyActionAlbum.ACTION_1) {
+            val out = java.io.ByteArrayOutputStream()
+            for ((p, size) in action1Chunks(raw, requestCtr).values) out.write(raw, p + 10, size - 10)
+            return out.toByteArray()
+        }
         // The file list streams back as DUML data frames (cmd 0x00/0x27) whose payload is
         //   [10-byte sub-header][chunk]:  4A 01 .. .. <seq:u16le @6> 00 00, then the chunk bytes.
         // byte1==0x01 marks a data chunk; the control frames (4A 04.. start / 4A 03.. end) are 10
@@ -1968,13 +2058,22 @@ class CameraSession(
         // like one list being fitted twice rather than two stores each being fitted once.
         val tally = chunkTally(raw)
         lastSlices.clear()
+        if (rejoinedFrames > 0) {
+            log("datalink: rebuilt $rejoinedFrames list frame(s) split across UDP envelopes")
+            rejoinedFrames = 0
+        }
         fun sliceOf(ctr: Int): List<CameraFile> {
             val store = if (ctr == SD_QUERY_CTR) "SD" else "internal"
             val bytes = manifestBytes(raw, requestCtr = ctr)
             val files = bytes.takeIf { it.isNotEmpty() }?.let { decodeManifest(it, store) } ?: emptyList()
+            val indexed = files.firstOrNull()?.isIndexed == true
             val info = SliceInfo(
                 declared = if (bytes.size >= 4) u32le(bytes, 0).toInt() else -1,
-                records = if (files.firstOrNull()?.isIndexed == true) u32le(bytes, 0).toInt() else countMediaPaths(bytes),
+                records = when {
+                    !indexed -> countMediaPaths(bytes)
+                    bytes.size >= 8 && u32le(bytes, 4) > bytes.size -> files.size  // a short Action 1 list
+                    else -> u32le(bytes, 0).toInt()
+                },
                 endMarker = files.firstOrNull()?.isIndexed != true && hasEndMarker(bytes),
                 ended = (tally[ctr]?.get(0x03) ?: 0) > 0)
             lastSlices[if (ctr == SD_QUERY_CTR) SD_STORE else INTERNAL_STORE] = info
@@ -2088,6 +2187,15 @@ class CameraSession(
                 i++
                 continue
             }
+            // A frame split across two SW UDP envelopes still has a good header in a whole-datagram blob,
+            // with the second envelope's header inside its body. Read as a chunk, it puts 20 foreign bytes
+            // into an Action 1 list, and skipping its length jumps over the rebuilt copy [withSplitFrames]
+            // put after it. The other cameras keep the header-only check their fixtures were pinned with.
+            if (strictListFrames && DjiCrc.computeCrc16(raw, offset = i, length = len - 2) !=
+                ((raw[i + len - 2].toInt() and 0xFF) or ((raw[i + len - 1].toInt() and 0xFF) shl 8))) {
+                i++
+                continue
+            }
             if ((raw[i + 9].toInt() and 0xFF) == 0x00 && (raw[i + 10].toInt() and 0xFF) == 0x27 &&
                 len - 13 >= 10 && (raw[i + 11].toInt() and 0xFF) == 0x4A
             ) visit(i + 11, len - 13)
@@ -2119,6 +2227,33 @@ class CameraSession(
             state -> Answer.WAITING
             else -> Answer.SILENT
         }
+    }
+
+    /** An Action 1 answer's data chunks under request [ctr] from [from] on: chunk sequence → (payload offset, size). First copy wins. */
+    private fun action1Chunks(raw: ByteArray, ctr: Int, from: Int = 0): java.util.TreeMap<Long, Pair<Int, Int>> {
+        val chunks = java.util.TreeMap<Long, Pair<Int, Int>>()
+        forEachListFrame(raw, from) { p, size ->
+            if ((raw[p + 1].toInt() and 0xFF) == 1 && (raw[p + 4].toInt() and 0xFF) == ctr)
+                chunks.putIfAbsent(u32le(raw, p + 6), p to size)
+        }
+        return chunks
+    }
+
+    /**
+     * The first chunk an Action 1 list answer to [ctr] is missing, when the chunks from [from] on carry
+     * fewer bytes than its header declares (`[count][total]`, the total counting the header itself).
+     * Null when the answer is complete, has no first chunk yet, or the camera is not an Action 1.
+     */
+    internal fun action1ListGap(raw: ByteArray, ctr: Int, from: Int = 0): Long? {
+        if (legacyAlbum != LegacyActionAlbum.ACTION_1) return null
+        val chunks = action1Chunks(raw, ctr, from)
+        val (first, size) = chunks[0L] ?: return null
+        if (size < 18) return null
+        val declared = u32le(raw, first + 14)
+        if (chunks.values.sumOf { (it.second - 10).toLong() } >= declared) return null
+        var missing = 0L
+        while (missing in chunks) missing++
+        return missing
     }
 
     /**
@@ -2285,8 +2420,16 @@ class CameraSession(
         // self-describing ([u32 count][u32 totalBytes] where totalBytes covers itself), so this can be
         // tried first without risking a CompositePack manifest being misread as one.
         // Where a newer Action supplies a physical path, keep the name and mount from its manifest.
-        val dcf = if (legacyAlbum != null && countMediaPaths(bytes) > 0) emptyList()
+        var dcf = if (legacyAlbum != null && countMediaPaths(bytes) > 0) emptyList()
             else DcfRecords.decodeAction1(bytes, variableRecords = legacyAlbum != null)
+        // Last resort, after the resend requests: an Action 1 list still short of its header shows the
+        // whole records that did arrive, newest first, instead of an empty grid. [collectStores] reports
+        // the slice as truncated.
+        if (dcf.isEmpty() && legacyAlbum == LegacyActionAlbum.ACTION_1 && countMediaPaths(bytes) == 0) {
+            dcf = DcfRecords.decodeAction1(bytes, variableRecords = true, allowShort = true)
+            if (dcf.isNotEmpty()) log("datalink: Action 1 list${storeTag(store)} is short: ${bytes.size} of " +
+                "${u32le(bytes, 4)} bytes — showing the ${dcf.size} whole record(s) that arrived")
+        }
         if (dcf.isNotEmpty()) {
             log("datalink: decoded ${dcf.size} DCF index records${storeTag(store)} (older Osmo Action generation)")
             if (probeTransfers && (legacyAlbum == null || httpViaWorkMode)) probeTransferKinds(dcf.first().fileIndex)

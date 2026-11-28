@@ -161,6 +161,34 @@ class SdListTransferTest {
         assertEquals(Action.RELEASE, t.next(10, Answer.DONE, 45))
     }
 
+    /**
+     * Issue #32: an Action 1 list declared 1048 bytes and stopped at 918. Its transfer asks for the
+     * missing chunk on each quiet step, a few times, before it is released.
+     */
+    @Test
+    fun `a stream short of its own header asks for the missing chunk before it is released`() {
+        val t = transfer()
+        assertEquals(Action.WAIT, t.next(0, Answer.STREAMING, 0, gap = true))
+        for (n in 1..ListTransfer.MAX_RESENDS)
+            assertEquals("request $n", Action.RESEND, t.next(n, Answer.STREAMING, 0, gap = true))
+        assertEquals(Action.RELEASE, t.next(ListTransfer.MAX_RESENDS + 1, Answer.STREAMING, 0, gap = true))
+    }
+
+    @Test
+    fun `a resent chunk that completes the list ends the requests`() {
+        val t = transfer()
+        assertEquals(Action.WAIT, t.next(0, Answer.STREAMING, 0, gap = true))
+        assertEquals(Action.RESEND, t.next(1, Answer.STREAMING, 0, gap = true))
+        assertEquals(Action.RELEASE, t.next(2, Answer.DONE, 16))
+    }
+
+    @Test
+    fun `a store with nothing older to give is never held for a resend`() {
+        val t = transfer(hold = false)
+        assertEquals(Action.WAIT, t.next(0, Answer.STREAMING, 0, gap = true))
+        assertEquals(Action.RELEASE, t.next(1, Answer.STREAMING, 0, gap = true))
+    }
+
     /** A store past its end marker, or never populated, keeps the old timing: step 1, no proceed, no waiting. */
     @Test
     fun `a store with nothing older to give is released on step one whatever it says`() {

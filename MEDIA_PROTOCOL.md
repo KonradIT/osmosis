@@ -562,6 +562,22 @@ The Action 1 firmware confirms these fields in `DjiTransSrv_SendListFrag` and
 `DjiTransSrv_VideoMiscInfoGet`. The video UUID and millisecond duration appear at +19 and +38
 in the seven-clip fixture. Their offsets depend on which tags precede them. [DJI descriptor definitions](https://github.com/dji-sdk/Onboard-SDK/blob/master/osdk-core/modules/inc/filemgr/impl/dji_file_mgr_internal_define.hpp)
 
+**List chunks, ACKs and resends.** In retail AC101 V01.10.00.40, `DjiTransSrv_SendListFrag`
+(`0x4790e8`) packs whole records into each `4a 01` chunk. It raises event `0x10` while records
+remain, and `DjiTransSrv_MainProc` (`0x47d22c`) sends the next chunk without waiting for an ACK,
+up to four in a row before it yields. The last chunk carries flag `0x1000` and raises event `0x11`.
+The transfer then starts a 1000 ms timer and sends a push (`4a 03`) on each expiry, up to five times,
+before it closes with "Transfer no answer close". An ACK (`4a 02`) is matched to its transfer by the
+ID at +4. The camera reads a confirmed chunk count at +10, a pair count at +14 and (chunk, count)
+pairs from +15, queues the pairs, and `DjiTransSrv_DoResend` (`0x477c9c`) sends them again ("ReSend
+List seq"). A 16-file list from a tester's camera declared 1048 bytes, and only its first chunk
+arrived: 918 bytes, 14 records.
+A frame split between two SW UDP envelopes is lost when whole datagrams are scanned: the second
+envelope's header lands inside the frame. Osmosis rebuilds such frames. If an Action 1 list is
+still short of its declared length after a quiet step, it sends that ACK with the first missing
+chunk, up to three times. As a last resort it shows the whole records that arrived.
+[Tester log](https://github.com/KonradIT/osmosis/issues/32#issuecomment-7239762220)
+
 The DCF index identifies the album item independently of the download transport. Mimo 2.10.9
 selects indexed HTTP v1 for Action 2 and path-based HTTP v2 for Action 3. Osmosis retains physical
 paths supplied by a path-based manifest. Action 1 original transfers over HTTP still need hardware

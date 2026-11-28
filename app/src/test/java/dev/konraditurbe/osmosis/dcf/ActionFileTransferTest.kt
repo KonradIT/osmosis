@@ -120,6 +120,17 @@ class ActionFileTransferTest {
         assertArrayEquals(bytes("4a240e1012000000000001000000"), sent.last())
     }
 
+    @Test fun `a frame split across two envelopes is rebuilt once and marked as carried`() {
+        val opening = frame(0x21, 0, first(original.copyOf(600)))
+        val small = frame(0x21, 1, original.copyOfRange(600, 700))
+        val stream = opening + small
+        val seen = mutableListOf<Pair<Int, Boolean>>()
+        val frames = AlbumFrames(session)
+        frames.frames(packet(8, stream.copyOf(opening.size + 40))) { f, carried -> seen += f.size to carried }
+        frames.frames(packet(16, stream.copyOfRange(opening.size + 40, stream.size))) { f, carried -> seen += f.size to carried }
+        assertEquals(listOf(opening.size to false, small.size to true), seen)
+    }
+
     @Test fun `a resumed response must describe the remaining range`() {
         val tail = original.copyOfRange(900, 1200)
         assertFalse(run(packet(8, frame(0x21, 0, first(tail), last = true)), offset = 900))

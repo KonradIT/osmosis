@@ -240,7 +240,18 @@ internal class AlbumFrames(private val session: Int) {
     private val download = Channel()
     private val control = Channel()
 
-    fun accept(packet: ByteArray, consume: (ByteArray) -> Unit) {
+    /** The album payload (the `0x00/0x27` body) of every whole frame in [packet]. */
+    fun accept(packet: ByteArray, consume: (ByteArray) -> Unit) = frames(packet) { frame, _ ->
+        if (frame[9] == 0.toByte() && frame[10] == 0x27.toByte()) consume(frame.copyOfRange(11, frame.size - 2))
+    }
+
+    /**
+     * Every whole, checksummed DUML frame in [packet]'s download and control envelopes. [carried] is
+     * true for a frame that began in an earlier envelope of the same channel: such a frame cannot be
+     * found by scanning the datagram on its own, because the second envelope's 20-byte header sits
+     * inside it.
+     */
+    fun frames(packet: ByteArray, visit: (frame: ByteArray, carried: Boolean) -> Unit) {
         DumlTransport.forEachEnvelope(packet) { at, length ->
             val kind = packet[at + 6].toInt()
             if ((kind == 3 || kind == 5) && length > 20 && u16(packet, at + 2) == session) {
@@ -249,12 +260,14 @@ internal class AlbumFrames(private val session: Int) {
                 val carry = if (seq == ((channel.seq + 8) and 0xffff)) channel.tail else ByteArray(0)
                 val bytes = carry + packet.copyOfRange(at + 20, at + length)
                 channel.seq = seq
-                channel.tail = decode(bytes, consume)
+                channel.tail = decode(bytes) { start, size ->
+                    visit(bytes.copyOfRange(start, start + size), start < carry.size)
+                }
             }
         }
     }
 
-    private fun decode(bytes: ByteArray, consume: (ByteArray) -> Unit): ByteArray {
+    private fun decode(bytes: ByteArray, consume: (start: Int, size: Int) -> Unit): ByteArray {
         var i = 0
         while (i < bytes.size) {
             if (bytes[i] != 0x55.toByte()) { i++; continue }
@@ -264,8 +277,7 @@ internal class AlbumFrames(private val session: Int) {
                 DjiCrc.computeCrc8(bytes.copyOfRange(i, i + 3)) != (bytes[i + 3].toInt() and 255)) { i++; continue }
             if (i + size > bytes.size) break
             if (DjiCrc.computeCrc16(bytes, offset = i, length = size - 2) != u16(bytes, i + size - 2)) { i++; continue }
-            if (bytes[i + 9] == 0.toByte() && bytes[i + 10] == 0x27.toByte())
-                consume(bytes.copyOfRange(i + 11, i + size - 2))
+            consume(i, size)
             i += size
         }
         return bytes.copyOfRange(i, bytes.size)
